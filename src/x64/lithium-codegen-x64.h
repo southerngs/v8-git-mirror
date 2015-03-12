@@ -204,24 +204,23 @@ class LCodeGen: public LCodeGenBase {
 
   //TODO: Look at use of Deoptimizer::DeoptReason and fix all calls in lithium-codegen-x64.cc
   void DeoptimizeIf(Condition cc, LInstruction* instr,
-                    //Deoptimizer::DeoptReason deopt_reason,
-                    //Deoptimizer::BailoutType bailout_type);
+                    Deoptimizer::DeoptReason deopt_reason,
                     Deoptimizer::BailoutType bailout_type, bool check_selected,
                     ExternalReference taken_counter);
 
   void DeoptimizeIf(Condition cc, LInstruction* instr,
-                    Deoptimizer::DeoptReason deopt_reason);
-
+                    Deoptimizer::DeoptReason deopt_reason );
+  
   // TODO: Need to switch from "const char * detail" to Deoptimizer::DeoptReason
   // Adding specialized Deopt checks
-  void DeoptimizeIfOverflow(LInstruction* instr, const char* detail);
-  void DeoptimizeIfZero(LInstruction* instr, const char* detail);
-  void DeoptimizeIfNegative(LInstruction* instr, const char* detail);
-  void DeoptimizeIfBounds(Condition cc, LInstruction* instr, const char* detail);
-  void DeoptimizeIfInstanceType(Condition cc, LInstruction* instr, const char* detail);
-  void DeoptimizeIfLdSt(Condition cc, LInstruction* instr, const char* detail);
-  void DeoptimizeIfMap(Condition cc, LInstruction* instr, const char* detail);
-  void DeoptimizeIfSmi(Condition cc, LInstruction* instr, const char* detail);
+  void DeoptimizeIfOverflow(LInstruction* instr, Deoptimizer::DeoptReason deopt_reason);
+  void DeoptimizeIfZero(LInstruction* instr, Deoptimizer::DeoptReason deopt_reason);
+  void DeoptimizeIfNegative(LInstruction* instr, Deoptimizer::DeoptReason deopt_reason);
+  void DeoptimizeIfBounds(Condition cc, LInstruction* instr, Deoptimizer::DeoptReason deopt_reason);
+  void DeoptimizeIfInstanceType(Condition cc, LInstruction* instr, Deoptimizer::DeoptReason deopt_reason);
+  void DeoptimizeIfLdSt(Condition cc, LInstruction* instr, Deoptimizer::DeoptReason deopt_reason);
+  void DeoptimizeIfMap(Condition cc, LInstruction* instr, Deoptimizer::DeoptReason deopt_reason);
+  void DeoptimizeIfSmi(Condition cc, LInstruction* instr, Deoptimizer::DeoptReason deopt_reason);
 
   bool DeoptEveryNTimes() {
     return FLAG_deopt_every_n_times != 0 && !info()->IsStub();
