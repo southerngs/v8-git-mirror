@@ -1139,7 +1139,7 @@ ExternalReference ExternalReference::deopt_checks_smi(Isolate* isolate) {
 ExternalReference ExternalReference::deopt_checks_taken_count(Isolate* isolate) {
   return ExternalReference(isolate->deopt_checks_taken_count_address());
 }
-+
+
 ExternalReference ExternalReference::deopt_nocond_count(Isolate* isolate) {
   return ExternalReference(isolate->deopt_nocond_count_address());
 }

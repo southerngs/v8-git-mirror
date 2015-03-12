@@ -1173,8 +1173,8 @@ void LCodeGen::DoModByPowerOf2I(LModByPowerOf2I* instr) {
     __ andl(dividend, Immediate(mask));
     __ negl(dividend);
     if (hmod->CheckFlag(HValue::kBailoutOnMinusZero)) {
-      //DeoptimizeIf(zero, instr, Deoptimizer::kMinusZero);
-      DeoptimizeIfZero(instr, "minus zero");
+      DeoptimizeIfZero(instr, Deoptimizer::kMinusZero);
+      //DeoptimizeIfZero(instr, "minus zero");
     }
     __ jmp(&done, Label::kNear);
   }
