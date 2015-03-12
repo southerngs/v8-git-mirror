@@ -232,6 +232,7 @@ class LCodeGen: public LCodeGenBase {
                     Deoptimizer::BailoutType bailout_type);
   void DeoptimizeIf(Condition condition, LInstruction* instr,
                     Deoptimizer::DeoptReason deopt_reason);
+  void DeoptimizeIfOverflow(LInstruction* instr, const char* detail);
 
   void AddToTranslation(LEnvironment* environment,
                         Translation* translation,

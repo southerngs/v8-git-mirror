@@ -1844,6 +1844,7 @@ LInstruction* LChunkBuilder::DoSeqStringSetChar(HSeqStringSetChar* instr) {
 
 
 LInstruction* LChunkBuilder::DoBoundsCheck(HBoundsCheck* instr) {
+  if(FLAG_skip_check_bounds) return NULL;
   if (!FLAG_debug_code && instr->skip_check()) return NULL;
   LOperand* index = UseRegisterOrConstantAtStart(instr->index());
   LOperand* length = !index->IsConstantOperand()
@@ -2012,6 +2013,8 @@ LInstruction* LChunkBuilder::DoCheckValue(HCheckValue* instr) {
 
 
 LInstruction* LChunkBuilder::DoCheckMaps(HCheckMaps* instr) {
+  //if (FLAG_skip_checkmaps) return new(zone()) LDummy;
+  if (FLAG_skip_check_maps) return new(zone()) LCheckMaps;
   if (instr->IsStabilityCheck()) return new(zone()) LCheckMaps;
   LOperand* value = UseRegisterAtStart(instr->value());
   LInstruction* result = AssignEnvironment(new(zone()) LCheckMaps(value));

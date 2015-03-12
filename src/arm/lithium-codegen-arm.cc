@@ -839,6 +839,51 @@ void LCodeGen::DeoptimizeIf(Condition condition, LInstruction* instr,
     return;
   }
 
+  // TODO: Create different version for incrementing counter for cases where
+  // overflow is unlikely 
+  if (FLAG_print_deopt_checks != 0 && !info()->IsStub()) {
+    Register scratch = scratch0();
+
+     //Store the condition on the stack if necessary
+    if (condition != al) {
+      __ mov(scratch, Operand::Zero(), LeaveCC, NegateCondition(condition));
+      __ mov(scratch, Operand(1), LeaveCC, condition);
+      __ push(scratch);
+    }
+
+    ExternalReference count = ExternalReference::deopt_checks_count(isolate());
+    /*__ push(r1);
+    __ push(r2);
+    __ mov(scratch, Operand(count));
+    __ ldr(r1, MemOperand(scratch));
+    __ add(scratch, scratch, Operand(4), LeaveCC);
+    __ ldr(r2, MemOperand(scratch));
+    __ add(r1, r1, Operand(1), SetCC);
+    __ adc(r2, r2, Operand(0), LeaveCC);
+    __ str(r2, MemOperand(scratch));
+    __ sub(scratch, scratch, Operand(4), LeaveCC);
+    __ str(r1, MemOperand(scratch));
+    __ pop(r2);
+    __ pop(r1);*/
+
+    __ push(r1);
+    __ mov(scratch, Operand(count));
+    __ ldr(r1, MemOperand(scratch));
+    __ add(r1, r1, Operand(1), SetCC);
+    __ str(r1, MemOperand(scratch));
+    __ add(scratch, scratch, Operand(4), LeaveCC);
+    __ ldr(r1, MemOperand(scratch));
+    __ adc(r1, r1, Operand(0), LeaveCC);
+    __ str(r1, MemOperand(scratch));
+    __ pop(r1);
+
+    if (condition != al) {
+      __ pop(scratch);
+      condition = ne;
+      __ cmp(scratch, Operand::Zero());
+    }
+  }
+
   if (FLAG_deopt_every_n_times != 0 && !info()->IsStub()) {
     Register scratch = scratch0();
     ExternalReference count = ExternalReference::stress_deopt_count(isolate());
@@ -910,6 +955,17 @@ void LCodeGen::DeoptimizeIf(Condition condition, LInstruction* instr,
   DeoptimizeIf(condition, instr, deopt_reason, bailout_type);
 }
 
+// For ARM the condition code for overflow is 'vs'
+void LCodeGen::DeoptimizeIfOverflow(LInstruction* instr,
+                            const char* detail) {
+  Deoptimizer::BailoutType bailout_type = info()->IsStub()
+      ? Deoptimizer::LAZY
+      : Deoptimizer::EAGER;
+
+  if(FLAG_skip_check_overflow) return;
+
+  DeoptimizeIf(vs, instr, detail, bailout_type);
+}
 
 void LCodeGen::PopulateDeoptimizationData(Handle<Code> code) {
   int length = deoptimizations_.length();
@@ -1478,7 +1534,7 @@ void LCodeGen::DoFlooringDivByPowerOf2I(LFlooringDivByPowerOf2I* instr) {
   // Dividing by -1 is basically negation, unless we overflow.
   if (divisor == -1) {
     if (instr->hydrogen()->CheckFlag(HValue::kLeftCanBeMinInt)) {
-      DeoptimizeIf(vs, instr, Deoptimizer::kOverflow);
+      DeoptimizeIfOverflow(instr, "overflow");
     }
     return;
   }
@@ -1627,7 +1683,7 @@ void LCodeGen::DoMulI(LMulI* instr) {
       case -1:
         if (overflow) {
           __ rsb(result, left, Operand::Zero(), SetCC);
-          DeoptimizeIf(vs, instr, Deoptimizer::kOverflow);
+          DeoptimizeIfOverflow(instr, "overflow");
         } else {
           __ rsb(result, left, Operand::Zero());
         }
@@ -1818,7 +1874,7 @@ void LCodeGen::DoShiftI(LShiftI* instr) {
             } else {
               __ SmiTag(result, left, SetCC);
             }
-            DeoptimizeIf(vs, instr, Deoptimizer::kOverflow);
+            DeoptimizeIfOverflow(instr, "overflow");
           } else {
             __ mov(result, Operand(left, LSL, shift_count));
           }
@@ -1850,7 +1906,7 @@ void LCodeGen::DoSubI(LSubI* instr) {
   }
 
   if (can_overflow) {
-    DeoptimizeIf(vs, instr, Deoptimizer::kOverflow);
+    DeoptimizeIfOverflow(instr, "overflow");
   }
 }
 
@@ -1871,7 +1927,7 @@ void LCodeGen::DoRSubI(LRSubI* instr) {
   }
 
   if (can_overflow) {
-    DeoptimizeIf(vs, instr, Deoptimizer::kOverflow);
+    DeoptimizeIfOverflow(instr, "overflow");
   }
 }
 
@@ -2058,7 +2114,7 @@ void LCodeGen::DoAddI(LAddI* instr) {
   }
 
   if (can_overflow) {
-    DeoptimizeIf(vs, instr, Deoptimizer::kOverflow);
+    DeoptimizeIfOverflow(instr, "overflow");
   }
 }
 
@@ -3754,7 +3810,7 @@ void LCodeGen::EmitIntegerMathAbs(LMathAbs* instr) {
   // if input is positive.
   __ rsb(result, input, Operand::Zero(), SetCC, mi);
   // Deoptimize on overflow.
-  DeoptimizeIf(vs, instr, Deoptimizer::kOverflow);
+  DeoptimizeIfOverflow(instr, "overflow");
 }
 
 
@@ -4913,7 +4969,7 @@ void LCodeGen::DoSmiTag(LSmiTag* instr) {
   if (hchange->CheckFlag(HValue::kCanOverflow) &&
       !hchange->value()->CheckFlag(HValue::kUint32)) {
     __ SmiTag(output, input, SetCC);
-    DeoptimizeIf(vs, instr, Deoptimizer::kOverflow);
+    DeoptimizeIfOverflow(instr, "overflow");
   } else {
     __ SmiTag(output, input);
   }
@@ -5162,7 +5218,7 @@ void LCodeGen::DoDoubleToSmi(LDoubleToSmi* instr) {
     }
   }
   __ SmiTag(result_reg, SetCC);
-  DeoptimizeIf(vs, instr, Deoptimizer::kOverflow);
+  DeoptimizeIfOverflow(instr, "overflow");
 }
 
 

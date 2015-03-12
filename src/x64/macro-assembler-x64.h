@@ -978,6 +978,7 @@ class MacroAssembler: public Assembler {
 
   // Compare an object's map with the specified map.
   void CompareMap(Register obj, Handle<Map> map);
+  void CompareMapA(Register obj, Handle<Map> map);
 
   // Check if the map of an object is equal to a specified map and branch to
   // label if not. Skip the smi check if not required (object is known to be a

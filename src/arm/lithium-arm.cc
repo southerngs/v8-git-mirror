@@ -1899,6 +1899,7 @@ LInstruction* LChunkBuilder::DoSeqStringSetChar(HSeqStringSetChar* instr) {
 
 
 LInstruction* LChunkBuilder::DoBoundsCheck(HBoundsCheck* instr) {
+  if(FLAG_skip_check_bounds) return NULL;
   if (!FLAG_debug_code && instr->skip_check()) return NULL;
   LOperand* index = UseRegisterOrConstantAtStart(instr->index());
   LOperand* length = !index->IsConstantOperand()

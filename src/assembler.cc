@@ -1112,6 +1112,53 @@ ExternalReference ExternalReference::stress_deopt_count(Isolate* isolate) {
   return ExternalReference(isolate->stress_deopt_count_address());
 }
 
+ExternalReference ExternalReference::deopt_checks_count(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_checks_count_address());
+}
+
+ExternalReference ExternalReference::deopt_checks_selected(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_checks_selected_address());
+}
+
+ExternalReference ExternalReference::deopt_checks_overflow(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_checks_overflow_address());
+}
+
+ExternalReference ExternalReference::deopt_checks_bounds(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_checks_bounds_address());
+}
+
+ExternalReference ExternalReference::deopt_checks_maps(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_checks_maps_address());
+}
+
+ExternalReference ExternalReference::deopt_checks_smi(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_checks_smi_address());
+}
+
+ExternalReference ExternalReference::deopt_checks_taken_count(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_checks_taken_count_address());
+}
++
+ExternalReference ExternalReference::deopt_nocond_count(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_nocond_count_address());
+}
+
+ExternalReference ExternalReference::deopt_overflow_count(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_overflow_count_address());
+}
+
+ExternalReference ExternalReference::deopt_bounds_count(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_bounds_count_address());
+}
+
+ExternalReference ExternalReference::deopt_maps_count(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_maps_count_address());
+}
+
+ExternalReference ExternalReference::deopt_smi_count(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_smi_count_address());
+}
 
 ExternalReference ExternalReference::new_deoptimizer_function(
     Isolate* isolate) {

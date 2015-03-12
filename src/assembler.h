@@ -1022,6 +1022,19 @@ class ExternalReference BASE_EMBEDDED {
   }
 
   static ExternalReference stress_deopt_count(Isolate* isolate);
+ 
+  static ExternalReference deopt_checks_count(Isolate* isolate);
+  static ExternalReference deopt_checks_selected(Isolate* isolate);
+  static ExternalReference deopt_checks_overflow(Isolate* isolate);
+  static ExternalReference deopt_checks_bounds(Isolate* isolate);
+  static ExternalReference deopt_checks_maps(Isolate* isolate);
+  static ExternalReference deopt_checks_smi(Isolate* isolate);
+  static ExternalReference deopt_checks_taken_count(Isolate* isolate);
+  static ExternalReference deopt_nocond_count(Isolate* isolate);
+  static ExternalReference deopt_overflow_count(Isolate* isolate);
+  static ExternalReference deopt_bounds_count(Isolate* isolate);
+  static ExternalReference deopt_maps_count(Isolate* isolate);
+  static ExternalReference deopt_smi_count(Isolate* isolate);
 
  private:
   explicit ExternalReference(void* address)

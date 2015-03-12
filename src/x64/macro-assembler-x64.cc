@@ -3131,6 +3131,9 @@ void MacroAssembler::CompareMap(Register obj, Handle<Map> map) {
   Cmp(FieldOperand(obj, HeapObject::kMapOffset), map);
 }
 
+void MacroAssembler::CompareMapA(Register obj, Handle<Map> map) {
+  //Cmp(FieldOperand(obj, HeapObject::kMapOffset), map);
+}
 
 void MacroAssembler::CheckMap(Register obj,
                               Handle<Map> map,

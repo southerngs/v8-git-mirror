@@ -1704,6 +1704,18 @@ Isolate::Isolate(bool enable_serializer)
       deferred_handles_head_(NULL),
       optimizing_compiler_thread_(NULL),
       stress_deopt_count_(0),
+      deopt_checks_count_(0),
+      deopt_checks_selected_(0),
+      deopt_checks_overflow_(0),
+      deopt_checks_bounds_(0),
+      deopt_checks_maps_(0),
+      deopt_checks_smi_(0),
+      deopt_checks_taken_count_(0),
+      deopt_nocond_count_(0),
+      deopt_overflow_count_(0),
+      deopt_bounds_count_(0),
+      deopt_maps_count_(0),
+      deopt_smi_count_(0),
       next_optimization_id_(0),
 #if TRACE_MAPS
       next_unique_sfi_id_(0),
@@ -1796,6 +1808,21 @@ void Isolate::Deinit() {
 
   if (heap_.mark_compact_collector()->sweeping_in_progress()) {
     heap_.mark_compact_collector()->EnsureSweepingCompleted();
+  }
+
+  if (FLAG_print_deopt_checks) {
+    PrintF(stdout, "=== Count of all deopt checks: %llu\n", deopt_checks_count_);
+    PrintF(stdout, "=== Count of overflow deopt checks: %llu\n", deopt_checks_overflow_);
+    PrintF(stdout, "=== Count of bounds deopt checks: %llu\n", deopt_checks_bounds_);
+    PrintF(stdout, "=== Count of maps deopt checks: %llu\n", deopt_checks_maps_);
+    PrintF(stdout, "=== Count of smi deopt checks: %llu\n", deopt_checks_smi_);
+    PrintF(stdout, "=== Count of selected deopt checks: %llu\n", deopt_checks_selected_);
+    PrintF(stdout, "=== Count of selected taken conditional deopt checks: %llu\n", deopt_checks_taken_count_);
+    PrintF(stdout, "=== Count of taken unconditional deopt checks: %llu\n", deopt_nocond_count_);
+    PrintF(stdout, "=== Count of taken overflow deopt checks: %llu\n", deopt_overflow_count_);
+    PrintF(stdout, "=== Count of taken bounds deopt checks: %llu\n", deopt_bounds_count_);
+    PrintF(stdout, "=== Count of taken maps deopt checks: %llu\n", deopt_maps_count_);
+    PrintF(stdout, "=== Count of taken smi deopt checks: %llu\n", deopt_smi_count_);
   }
 
   DumpAndResetCompilationStats();

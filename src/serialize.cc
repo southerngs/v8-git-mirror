@@ -143,6 +143,32 @@ ExternalReferenceTable::ExternalReferenceTable(Isolate* isolate) {
   Add(ExternalReference::stress_deopt_count(isolate).address(),
       "Isolate::stress_deopt_count_address()");
 
+  // Track types of deopts
+  Add(ExternalReference::deopt_checks_count(isolate).address(),
+      "Isolate::deopt_checks_count_address()");
+  Add(ExternalReference::deopt_checks_selected(isolate).address(),
+      "Isolate::deopt_checks_selected_address()");
+  Add(ExternalReference::deopt_checks_overflow(isolate).address(),
+      "Isolate::deopt_checks_overflow_address()");
+  Add(ExternalReference::deopt_checks_bounds(isolate).address(),
+      "Isolate::deopt_checks_bounds_address()");
+  Add(ExternalReference::deopt_checks_maps(isolate).address(),
+      "Isolate::deopt_checks_maps_address()");
+  Add(ExternalReference::deopt_checks_smi(isolate).address(),
+      "Isolate::deopt_checks_smi_address()");
+  Add(ExternalReference::deopt_checks_taken_count(isolate).address(),
+      "Isolate::deopt_checks_count_taken_address()");
+  Add(ExternalReference::deopt_nocond_count(isolate).address(),
+      "Isolate::deopt_nocond_address()");
+  Add(ExternalReference::deopt_overflow_count(isolate).address(),
+      "Isolate::deopt_overflow_address()");
+  Add(ExternalReference::deopt_bounds_count(isolate).address(),
+      "Isolate::deopt_bounds_address()");
+  Add(ExternalReference::deopt_maps_count(isolate).address(),
+      "Isolate::deopt_maps_address()");
+  Add(ExternalReference::deopt_smi_count(isolate).address(),
+      "Isolate::deopt_smi_address()");
+
   // Debug addresses
   Add(ExternalReference::debug_after_break_target_address(isolate).address(),
       "Debug::after_break_target_address()");

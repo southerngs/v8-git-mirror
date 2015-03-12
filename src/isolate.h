@@ -1068,6 +1068,19 @@ class Isolate {
 
   void* stress_deopt_count_address() { return &stress_deopt_count_; }
 
+  void* deopt_checks_count_address() { return &deopt_checks_count_; }
+  void* deopt_checks_selected_address() { return &deopt_checks_selected_; }
+  void* deopt_checks_overflow_address() { return &deopt_checks_overflow_; }
+  void* deopt_checks_bounds_address() { return &deopt_checks_bounds_; }
+  void* deopt_checks_maps_address() { return &deopt_checks_maps_; }
+  void* deopt_checks_smi_address() { return &deopt_checks_smi_; }
+  void* deopt_checks_taken_count_address() { return &deopt_checks_taken_count_; }
+  void* deopt_nocond_count_address() { return &deopt_nocond_count_; }
+  void* deopt_overflow_count_address() { return &deopt_overflow_count_; }
+  void* deopt_bounds_count_address() { return &deopt_bounds_count_; }
+  void* deopt_maps_count_address() { return &deopt_maps_count_; }
+  void* deopt_smi_count_address() { return &deopt_smi_count_; }
+
   inline base::RandomNumberGenerator* random_number_generator();
 
   // Given an address occupied by a live code object, return that object.
@@ -1341,6 +1354,20 @@ class Isolate {
 
   // Counts deopt points if deopt_every_n_times is enabled.
   unsigned int stress_deopt_count_;
+
+  // Counts number of deopt checks if enabled
+  unsigned long long deopt_checks_count_;
+  unsigned long long deopt_checks_selected_;
+  unsigned long long deopt_checks_overflow_;
+  unsigned long long deopt_checks_bounds_;
+  unsigned long long deopt_checks_maps_;
+  unsigned long long deopt_checks_smi_;
+  unsigned long long deopt_checks_taken_count_;
+  unsigned long long deopt_nocond_count_;
+  unsigned long long deopt_overflow_count_;
+  unsigned long long deopt_bounds_count_;
+  unsigned long long deopt_maps_count_;
+  unsigned long long deopt_smi_count_;
 
   int next_optimization_id_;
 

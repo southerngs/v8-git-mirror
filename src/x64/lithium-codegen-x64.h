@@ -137,6 +137,8 @@ class LCodeGen: public LCodeGenBase {
 
   void AddDeferredCode(LDeferredCode* code) { deferred_.Add(code, zone()); }
 
+// Helper function for counter
+  void IncrementCounter(ExternalReference count);
 
   void SaveCallerDoubles();
   void RestoreCallerDoubles();
@@ -199,11 +201,27 @@ class LCodeGen: public LCodeGenBase {
                                     int argc);
   void RegisterEnvironmentForDeoptimization(LEnvironment* environment,
                                             Safepoint::DeoptMode mode);
+
+  //TODO: Look at use of Deoptimizer::DeoptReason and fix all calls in lithium-codegen-x64.cc
   void DeoptimizeIf(Condition cc, LInstruction* instr,
-                    Deoptimizer::DeoptReason deopt_reason,
-                    Deoptimizer::BailoutType bailout_type);
+                    //Deoptimizer::DeoptReason deopt_reason,
+                    //Deoptimizer::BailoutType bailout_type);
+                    Deoptimizer::BailoutType bailout_type, bool check_selected,
+                    ExternalReference taken_counter);
+
   void DeoptimizeIf(Condition cc, LInstruction* instr,
                     Deoptimizer::DeoptReason deopt_reason);
+
+  // TODO: Need to switch from "const char * detail" to Deoptimizer::DeoptReason
+  // Adding specialized Deopt checks
+  void DeoptimizeIfOverflow(LInstruction* instr, const char* detail);
+  void DeoptimizeIfZero(LInstruction* instr, const char* detail);
+  void DeoptimizeIfNegative(LInstruction* instr, const char* detail);
+  void DeoptimizeIfBounds(Condition cc, LInstruction* instr, const char* detail);
+  void DeoptimizeIfInstanceType(Condition cc, LInstruction* instr, const char* detail);
+  void DeoptimizeIfLdSt(Condition cc, LInstruction* instr, const char* detail);
+  void DeoptimizeIfMap(Condition cc, LInstruction* instr, const char* detail);
+  void DeoptimizeIfSmi(Condition cc, LInstruction* instr, const char* detail);
 
   bool DeoptEveryNTimes() {
     return FLAG_deopt_every_n_times != 0 && !info()->IsStub();

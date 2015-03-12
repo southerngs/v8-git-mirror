@@ -33,6 +33,7 @@
 #include "src/hydrogen-sce.h"
 #include "src/hydrogen-store-elimination.h"
 #include "src/hydrogen-uint32-analysis.h"
+#include "src/hydrogen-deopt-checks-remove.h"
 #include "src/ic/call-optimization.h"
 #include "src/ic/ic.h"
 // GetRootConstructor
@@ -4371,6 +4372,10 @@ bool HGraph::Optimize(BailoutReason* bailout_reason) {
   // Find unreachable code a second time, GVN and other optimizations may have
   // made blocks unreachable that were previously reachable.
   Run<HMarkUnreachableBlocksPhase>();
+  
+  // Unsafe: benchmarking only try removing deopt checks
+  if (FLAG_remove_deopt_checks) Run<HDeoptChecksRemovePhase>();
+
 
   return true;
 }

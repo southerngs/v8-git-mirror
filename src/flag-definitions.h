@@ -328,6 +328,32 @@ DEFINE_INT(deopt_every_n_times, 0,
 DEFINE_INT(deopt_every_n_garbage_collections, 0,
            "deoptimize every n garbage collections")
 DEFINE_BOOL(print_deopt_stress, false, "print number of possible deopt points")
+
+// Flags for controlling deopt type statistics
+DEFINE_BOOL(print_deopt_checks, false, "print number of lithium checks for deopt")
+
+DEFINE_BOOL(remove_deopt_checks, false, "remove deopt checks for benchmarking")
+DEFINE_BOOL(remove_deopt_checks_print_only, false, "remove deopt checks for benchmarking")
+
+DEFINE_BOOL(count_all_deopt_checks, false, "print number of lithium checks for deopt")
+DEFINE_BOOL(count_all_cond_deopt_checks_taken, false, "print count of all taken conditional checks for deopt")
+DEFINE_BOOL(count_deopt_checks_nocondition, false, "print number of unconditional deopt checks")
+
+DEFINE_BOOL(skip_deopt_checks, false, "don't generate deomptimziation code for selected cases")
+DEFINE_BOOL(skip_check_overflow, false, "no deopt checks for overflow")
+DEFINE_BOOL(skip_check_bounds, false, "no deopt checks for array bounds")
+DEFINE_BOOL(skip_check_maps, false, "don't generate code for CheckMaps")
+DEFINE_BOOL(skip_check_smi, false, "don't generate code for smi")
+
+DEFINE_BOOL(deopt_checks_overflow, false, "select overflow deopt checks")
+DEFINE_BOOL(deopt_checks_zero, false, "select zero deopt checks")
+DEFINE_BOOL(deopt_checks_negative, false, "select negative deopt checks")
+DEFINE_BOOL(deopt_checks_bounds, false, "select bounds checks")
+DEFINE_BOOL(deopt_checks_instance_type, false, "deopts for instance type")
+DEFINE_BOOL(deopt_checks_ld_st, false, "deopts for loads and stores")
+DEFINE_BOOL(deopt_checks_maps, false, "deopts for loads and stores")
+DEFINE_BOOL(deopt_checks_smi, false, "deopts for loads and stores")
+
 DEFINE_BOOL(trap_on_deopt, false, "put a break point before deoptimizing")
 DEFINE_BOOL(trap_on_stub_deopt, false,
             "put a break point before deoptimizing a stub")
