@@ -1752,8 +1752,7 @@ HValue* HGraphBuilder::BuildUncheckedDictionaryElementLoad(HValue* receiver,
     details_index->ClearFlag(HValue::kCanOverflow);
     HValue* details =
         Add<HLoadKeyed>(elements, details_index, nullptr, FAST_ELEMENTS);
-    int details_mask = PropertyDetails::TypeField::kMask |
-                       PropertyDetails::DeletedField::kMask;
+    int details_mask = PropertyDetails::TypeField::kMask;
     details = AddUncasted<HBitwise>(Token::BIT_AND, details,
                                     Add<HConstant>(details_mask));
     IfBuilder details_compare(this);
@@ -7853,8 +7852,7 @@ bool HOptimizedGraphBuilder::TryInline(Handle<JSFunction> target,
   // Parse and allocate variables.
   // Use the same AstValueFactory for creating strings in the sub-compilation
   // step, but don't transfer ownership to target_info.
-  ParseInfo parse_info(zone());
-  parse_info.InitializeFromJSFunction(target);
+  ParseInfo parse_info(zone(), target);
   parse_info.set_ast_value_factory(
       top_info()->parse_info()->ast_value_factory());
   parse_info.set_ast_value_factory_owned(false);

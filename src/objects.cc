@@ -554,28 +554,29 @@ void JSObject::SetNormalizedProperty(Handle<JSObject> object,
   }
 
   PropertyDetails original_details = property_dictionary->DetailsAt(entry);
-  int enumeration_index;
+  int enumeration_index = original_details.dictionary_index();
+
+  if (!object->IsGlobalObject()) {
+    DCHECK(enumeration_index > 0);
+    details = PropertyDetails(details.attributes(), details.type(),
+                              enumeration_index);
+    property_dictionary->SetEntry(entry, name, value, details);
+    return;
+  }
+
+  Handle<PropertyCell> cell(
+      PropertyCell::cast(property_dictionary->ValueAt(entry)));
   // Preserve the enumeration index unless the property was deleted.
-  if (original_details.IsDeleted()) {
+  if (cell->value()->IsTheHole()) {
     enumeration_index = property_dictionary->NextEnumerationIndex();
     property_dictionary->SetNextEnumerationIndex(enumeration_index + 1);
-  } else {
-    enumeration_index = original_details.dictionary_index();
-    DCHECK(enumeration_index > 0);
   }
-
+  DCHECK(enumeration_index > 0);
   details = PropertyDetails(
       details.attributes(), details.type(), enumeration_index);
-
-  if (object->IsGlobalObject()) {
-    Handle<PropertyCell> cell(
-        PropertyCell::cast(property_dictionary->ValueAt(entry)));
-    PropertyCell::SetValueInferType(cell, value);
-    // Please note we have to update the property details.
-    property_dictionary->DetailsAtPut(entry, details);
-  } else {
-    property_dictionary->SetEntry(entry, name, value, details);
-  }
+  PropertyCell::SetValueInferType(cell, value);
+  // Please note we have to update the property details.
+  property_dictionary->DetailsAtPut(entry, details);
 }
 
 
@@ -1922,6 +1923,50 @@ void JSObject::MigrateToMap(Handle<JSObject> object, Handle<Map> new_map) {
 }
 
 
+// Returns true if during migration from |old_map| to |new_map| "tagged"
+// inobject fields are going to be replaced with unboxed double fields.
+static bool ShouldClearSlotsRecorded(Map* old_map, Map* new_map,
+                                     int new_number_of_fields) {
+  DisallowHeapAllocation no_gc;
+  int inobject = new_map->inobject_properties();
+  DCHECK(inobject <= old_map->inobject_properties());
+
+  int limit = Min(inobject, new_number_of_fields);
+  for (int i = 0; i < limit; i++) {
+    FieldIndex index = FieldIndex::ForPropertyIndex(new_map, i);
+    if (new_map->IsUnboxedDoubleField(index) &&
+        !old_map->IsUnboxedDoubleField(index)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+
+static void RemoveOldToOldSlotsRecorded(Heap* heap, JSObject* object,
+                                        FieldIndex index) {
+  DisallowHeapAllocation no_gc;
+
+  Object* old_value = object->RawFastPropertyAt(index);
+  if (old_value->IsHeapObject()) {
+    HeapObject* ho = HeapObject::cast(old_value);
+    if (heap->InNewSpace(ho)) {
+      // At this point there must be no old-to-new slots recorded for this
+      // object.
+      SLOW_DCHECK(
+          !heap->store_buffer()->CellIsInStoreBuffer(reinterpret_cast<Address>(
+              HeapObject::RawField(object, index.offset()))));
+    } else {
+      Page* p = Page::FromAddress(reinterpret_cast<Address>(ho));
+      if (p->IsEvacuationCandidate()) {
+        Object** slot = HeapObject::RawField(object, index.offset());
+        SlotsBuffer::RemoveSlot(p->slots_buffer(), slot);
+      }
+    }
+  }
+}
+
+
 // To migrate a fast instance to a fast map:
 // - First check whether the instance needs to be rewritten. If not, simply
 //   change the map.
@@ -2075,24 +2120,38 @@ void JSObject::MigrateFastToFast(Handle<JSObject> object, Handle<Map> new_map) {
   // From here on we cannot fail and we shouldn't GC anymore.
   DisallowHeapAllocation no_allocation;
 
+  Heap* heap = isolate->heap();
+
+  // If we are going to put an unboxed double to the field that used to
+  // contain HeapObject we should ensure that this slot is removed from
+  // both StoreBuffer and respective SlotsBuffer.
+  bool clear_slots_recorded =
+      FLAG_unbox_double_fields && !heap->InNewSpace(object->address()) &&
+      ShouldClearSlotsRecorded(*old_map, *new_map, number_of_fields);
+  if (clear_slots_recorded) {
+    Address obj_address = object->address();
+    Address start_address = obj_address + JSObject::kHeaderSize;
+    Address end_address = obj_address + old_map->instance_size();
+    heap->store_buffer()->RemoveSlots(start_address, end_address);
+  }
+
   // Copy (real) inobject properties. If necessary, stop at number_of_fields to
   // avoid overwriting |one_pointer_filler_map|.
   int limit = Min(inobject, number_of_fields);
   for (int i = 0; i < limit; i++) {
     FieldIndex index = FieldIndex::ForPropertyIndex(*new_map, i);
     Object* value = array->get(external + i);
-    // Can't use JSObject::FastPropertyAtPut() because proper map was not set
-    // yet.
     if (new_map->IsUnboxedDoubleField(index)) {
       DCHECK(value->IsMutableHeapNumber());
+      if (clear_slots_recorded && !old_map->IsUnboxedDoubleField(index)) {
+        RemoveOldToOldSlotsRecorded(heap, *object, index);
+      }
       object->RawFastDoublePropertyAtPut(index,
                                          HeapNumber::cast(value)->value());
     } else {
       object->RawFastPropertyAtPut(index, value);
     }
   }
-
-  Heap* heap = isolate->heap();
 
   // If there are properties in the new backing store, trim it to the correct
   // size and install the backing store into the object.
@@ -5295,12 +5354,10 @@ void JSObject::DeleteNormalizedProperty(Handle<JSObject> object,
 
   // If we have a global object set the cell to the hole.
   if (object->IsGlobalObject()) {
-    PropertyDetails details = dictionary->DetailsAt(entry);
-    DCHECK(details.IsConfigurable());
+    DCHECK(dictionary->DetailsAt(entry).IsConfigurable());
     Handle<PropertyCell> cell(PropertyCell::cast(dictionary->ValueAt(entry)));
     Handle<Object> value = isolate->factory()->the_hole_value();
     PropertyCell::SetValueInferType(cell, value);
-    dictionary->DetailsAtPut(entry, details.AsDeleted());
     return;
   }
 
@@ -6237,12 +6294,12 @@ static Handle<FixedArray> GetEnumPropertyKeys(Handle<JSObject> object,
     return storage;
   } else {
     Handle<NameDictionary> dictionary(object->property_dictionary());
-    int length = dictionary->NumberOfEnumElements();
+    int length = dictionary->NumberOfEnumElements(*object);
     if (length == 0) {
       return Handle<FixedArray>(isolate->heap()->empty_fixed_array());
     }
     Handle<FixedArray> storage = isolate->factory()->NewFixedArray(length);
-    dictionary->CopyEnumKeysTo(*storage);
+    dictionary->CopyEnumKeysTo(*object, *storage);
     return storage;
   }
 }
@@ -13888,7 +13945,7 @@ int JSObject::NumberOfOwnProperties(PropertyAttributes filter) {
     }
     return map->NumberOfDescribedProperties(OWN_DESCRIPTORS, filter);
   }
-  return property_dictionary()->NumberOfElementsFilterAttributes(filter);
+  return property_dictionary()->NumberOfElementsFilterAttributes(this, filter);
 }
 
 
@@ -14021,9 +14078,7 @@ void JSObject::GetOwnPropertyNames(
       }
     }
   } else {
-    property_dictionary()->CopyKeysTo(storage,
-                                      index,
-                                      filter,
+    property_dictionary()->CopyKeysTo(this, storage, index, filter,
                                       NameDictionary::UNSORTED);
   }
 }
@@ -14107,11 +14162,13 @@ int JSObject::GetOwnElementKeys(FixedArray* storage,
 
     case DICTIONARY_ELEMENTS: {
       if (storage != NULL) {
-        element_dictionary()->CopyKeysTo(storage,
-                                         filter,
-                                         SeededNumberDictionary::SORTED);
+        element_dictionary()->CopyKeysTo<DictionaryEntryType::kObjects>(
+            storage, filter, SeededNumberDictionary::SORTED);
       }
-      counter += element_dictionary()->NumberOfElementsFilterAttributes(filter);
+      counter +=
+          element_dictionary()
+              ->NumberOfElementsFilterAttributes<DictionaryEntryType::kObjects>(
+                  filter);
       break;
     }
     case SLOPPY_ARGUMENTS_ELEMENTS: {
@@ -14124,10 +14181,11 @@ int JSObject::GetOwnElementKeys(FixedArray* storage,
         SeededNumberDictionary* dictionary =
             SeededNumberDictionary::cast(arguments);
         if (storage != NULL) {
-          dictionary->CopyKeysTo(
+          dictionary->CopyKeysTo<DictionaryEntryType::kObjects>(
               storage, filter, SeededNumberDictionary::UNSORTED);
         }
-        counter += dictionary->NumberOfElementsFilterAttributes(filter);
+        counter += dictionary->NumberOfElementsFilterAttributes<
+            DictionaryEntryType::kObjects>(filter);
         for (int i = 0; i < mapped_length; ++i) {
           if (!parameter_map->get(i + 2)->IsTheHole()) {
             if (storage != NULL) storage->set(counter, Smi::FromInt(i));
@@ -14718,15 +14776,6 @@ template Object*
 Dictionary<NameDictionary, NameDictionaryShape, Handle<Name> >::
     SlowReverseLookup(Object* value);
 
-template void
-Dictionary<SeededNumberDictionary, SeededNumberDictionaryShape, uint32_t>::
-    CopyKeysTo(
-        FixedArray*,
-        PropertyAttributes,
-        Dictionary<SeededNumberDictionary,
-                   SeededNumberDictionaryShape,
-                   uint32_t>::SortMode);
-
 template Handle<Object>
 Dictionary<NameDictionary, NameDictionaryShape, Handle<Name> >::DeleteProperty(
     Handle<NameDictionary>, int);
@@ -14747,18 +14796,6 @@ template Handle<SeededNumberDictionary>
 HashTable<SeededNumberDictionary, SeededNumberDictionaryShape, uint32_t>::
     Shrink(Handle<SeededNumberDictionary>, uint32_t);
 
-template void Dictionary<NameDictionary, NameDictionaryShape, Handle<Name> >::
-    CopyKeysTo(
-        FixedArray*,
-        int,
-        PropertyAttributes,
-        Dictionary<
-            NameDictionary, NameDictionaryShape, Handle<Name> >::SortMode);
-
-template int
-Dictionary<NameDictionary, NameDictionaryShape, Handle<Name> >::
-    NumberOfElementsFilterAttributes(PropertyAttributes);
-
 template Handle<NameDictionary>
 Dictionary<NameDictionary, NameDictionaryShape, Handle<Name> >::Add(
     Handle<NameDictionary>, Handle<Name>, Handle<Object>, PropertyDetails);
@@ -14770,10 +14807,6 @@ template Handle<FixedArray> Dictionary<
 template Handle<FixedArray> Dictionary<
     NameDictionary, NameDictionaryShape,
     Handle<Name> >::GenerateNewEnumerationIndices(Handle<NameDictionary>);
-
-template int
-Dictionary<SeededNumberDictionary, SeededNumberDictionaryShape, uint32_t>::
-    NumberOfElementsFilterAttributes(PropertyAttributes);
 
 template Handle<SeededNumberDictionary>
 Dictionary<SeededNumberDictionary, SeededNumberDictionaryShape, uint32_t>::
@@ -14801,16 +14834,13 @@ template Handle<NameDictionary>
 Dictionary<NameDictionary, NameDictionaryShape, Handle<Name> >::
     EnsureCapacity(Handle<NameDictionary>, int, Handle<Name>);
 
-template
-int Dictionary<SeededNumberDictionary, SeededNumberDictionaryShape, uint32_t>::
-    NumberOfEnumElements();
+template bool
+Dictionary<SeededNumberDictionary, SeededNumberDictionaryShape,
+           uint32_t>::HasComplexElements<DictionaryEntryType::kCells>();
 
-template
-int Dictionary<NameDictionary, NameDictionaryShape, Handle<Name> >::
-    NumberOfEnumElements();
-
-template bool Dictionary<SeededNumberDictionary, SeededNumberDictionaryShape,
-                         uint32_t>::HasComplexElements();
+template bool
+Dictionary<SeededNumberDictionary, SeededNumberDictionaryShape,
+           uint32_t>::HasComplexElements<DictionaryEntryType::kObjects>();
 
 template int HashTable<SeededNumberDictionary, SeededNumberDictionaryShape,
                        uint32_t>::FindEntry(uint32_t);
@@ -15272,7 +15302,6 @@ Handle<PropertyCell> GlobalObject::EnsurePropertyCell(
     Isolate* isolate = global->GetIsolate();
     Handle<PropertyCell> cell = isolate->factory()->NewPropertyCellWithHole();
     PropertyDetails details(NONE, DATA, 0);
-    details = details.AsDeleted();
     Handle<NameDictionary> dictionary = NameDictionary::Add(
         handle(global->property_dictionary()), name, cell, details);
     global->set_properties(*dictionary);
@@ -15781,9 +15810,7 @@ void Dictionary<Derived, Shape, Key>::AddEntry(
 
   uint32_t entry = dictionary->FindInsertionEntry(hash);
   // Insert element at empty or deleted entry
-  if (!details.IsDeleted() &&
-      details.dictionary_index() == 0 &&
-      Shape::kIsEnumerable) {
+  if (details.dictionary_index() == 0 && Shape::kIsEnumerable) {
     // Assign an enumeration index to the property and update
     // SetNextEnumerationIndex.
     int index = dictionary->NextEnumerationIndex();
@@ -15887,8 +15914,21 @@ Handle<UnseededNumberDictionary> UnseededNumberDictionary::Set(
 }
 
 
+template <DictionaryEntryType type, typename D>
+static inline bool IsDeleted(D d, int i) {
+  switch (type) {
+    case DictionaryEntryType::kObjects:
+      return false;
+    case DictionaryEntryType::kCells:
+      return PropertyCell::cast(d->ValueAt(i))->value()->IsTheHole();
+  }
+  UNREACHABLE();
+  return false;
+}
 
-template<typename Derived, typename Shape, typename Key>
+
+template <typename Derived, typename Shape, typename Key>
+template <DictionaryEntryType type>
 int Dictionary<Derived, Shape, Key>::NumberOfElementsFilterAttributes(
     PropertyAttributes filter) {
   int capacity = DerivedHashTable::Capacity();
@@ -15896,8 +15936,8 @@ int Dictionary<Derived, Shape, Key>::NumberOfElementsFilterAttributes(
   for (int i = 0; i < capacity; i++) {
     Object* k = DerivedHashTable::KeyAt(i);
     if (DerivedHashTable::IsKey(k) && !FilterKey(k, filter)) {
+      if (IsDeleted<type>(this, i)) continue;
       PropertyDetails details = DetailsAt(i);
-      if (details.IsDeleted()) continue;
       PropertyAttributes attr = details.attributes();
       if ((attr & filter) == 0) result++;
     }
@@ -15906,21 +15946,15 @@ int Dictionary<Derived, Shape, Key>::NumberOfElementsFilterAttributes(
 }
 
 
-template<typename Derived, typename Shape, typename Key>
-int Dictionary<Derived, Shape, Key>::NumberOfEnumElements() {
-  return NumberOfElementsFilterAttributes(
-      static_cast<PropertyAttributes>(DONT_ENUM | SYMBOLIC));
-}
-
-
 template <typename Derived, typename Shape, typename Key>
+template <DictionaryEntryType type>
 bool Dictionary<Derived, Shape, Key>::HasComplexElements() {
   int capacity = DerivedHashTable::Capacity();
   for (int i = 0; i < capacity; i++) {
     Object* k = DerivedHashTable::KeyAt(i);
     if (DerivedHashTable::IsKey(k) && !FilterKey(k, NONE)) {
+      if (IsDeleted<type>(this, i)) continue;
       PropertyDetails details = DetailsAt(i);
-      if (details.IsDeleted()) continue;
       if (details.type() == ACCESSOR_CONSTANT) return true;
       PropertyAttributes attr = details.attributes();
       if (attr & (READ_ONLY | DONT_DELETE | DONT_ENUM)) return true;
@@ -15931,17 +15965,18 @@ bool Dictionary<Derived, Shape, Key>::HasComplexElements() {
 
 
 template <typename Derived, typename Shape, typename Key>
+template <DictionaryEntryType type>
 void Dictionary<Derived, Shape, Key>::CopyKeysTo(
     FixedArray* storage, PropertyAttributes filter,
     typename Dictionary<Derived, Shape, Key>::SortMode sort_mode) {
-  DCHECK(storage->length() >= NumberOfElementsFilterAttributes(filter));
+  DCHECK(storage->length() >= NumberOfElementsFilterAttributes<type>(filter));
   int capacity = DerivedHashTable::Capacity();
   int index = 0;
   for (int i = 0; i < capacity; i++) {
      Object* k = DerivedHashTable::KeyAt(i);
      if (DerivedHashTable::IsKey(k) && !FilterKey(k, filter)) {
+       if (IsDeleted<type>(this, i)) continue;
        PropertyDetails details = DetailsAt(i);
-       if (details.IsDeleted()) continue;
        PropertyAttributes attr = details.attributes();
        if ((attr & filter) == 0) storage->set(index++, k);
      }
@@ -15964,6 +15999,7 @@ struct EnumIndexComparator {
 };
 
 
+template <DictionaryEntryType type>
 void NameDictionary::CopyEnumKeysTo(FixedArray* storage) {
   int length = storage->length();
   int capacity = Capacity();
@@ -15972,7 +16008,7 @@ void NameDictionary::CopyEnumKeysTo(FixedArray* storage) {
      Object* k = KeyAt(i);
      if (IsKey(k) && !k->IsSymbol()) {
        PropertyDetails details = DetailsAt(i);
-       if (details.IsDeleted() || details.IsDontEnum()) continue;
+       if (details.IsDontEnum() || IsDeleted<type>(this, i)) continue;
        storage->set(properties, Smi::FromInt(i));
        properties++;
        if (properties == length) break;
@@ -15989,19 +16025,18 @@ void NameDictionary::CopyEnumKeysTo(FixedArray* storage) {
 }
 
 
-template<typename Derived, typename Shape, typename Key>
+template <typename Derived, typename Shape, typename Key>
+template <DictionaryEntryType type>
 void Dictionary<Derived, Shape, Key>::CopyKeysTo(
-    FixedArray* storage,
-    int index,
-    PropertyAttributes filter,
+    FixedArray* storage, int index, PropertyAttributes filter,
     typename Dictionary<Derived, Shape, Key>::SortMode sort_mode) {
-  DCHECK(storage->length() >= NumberOfElementsFilterAttributes(filter));
+  DCHECK(storage->length() >= NumberOfElementsFilterAttributes<type>(filter));
   int capacity = DerivedHashTable::Capacity();
   for (int i = 0; i < capacity; i++) {
     Object* k = DerivedHashTable::KeyAt(i);
     if (DerivedHashTable::IsKey(k) && !FilterKey(k, filter)) {
+      if (IsDeleted<type>(this, i)) continue;
       PropertyDetails details = DetailsAt(i);
-      if (details.IsDeleted()) continue;
       PropertyAttributes attr = details.attributes();
       if ((attr & filter) == 0) storage->set(index++, k);
     }
@@ -16021,6 +16056,7 @@ Object* Dictionary<Derived, Shape, Key>::SlowReverseLookup(Object* value) {
     Object* k =  DerivedHashTable::KeyAt(i);
     if (Dictionary::IsKey(k)) {
       Object* e = ValueAt(i);
+      // TODO(dcarney): this should be templatized.
       if (e->IsPropertyCell()) {
         e = PropertyCell::cast(e)->value();
       }
