@@ -93,6 +93,11 @@
             '<(icu_gyp_path):icuuc',
           ],
         }],
+        ['OS=="linux" and d8_static_link==1', {
+          'ldflags': [
+            '-static',
+          ],
+        }],
         ['OS=="win" and v8_enable_i18n_support==1', {
           'dependencies': [
             '<(icu_gyp_path):icudata',

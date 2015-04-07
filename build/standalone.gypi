@@ -41,6 +41,7 @@
     'v8_deprecation_warnings': 1,
     'msvs_multi_core_compile%': '1',
     'mac_deployment_target%': '10.5',
+    'd8_static_link%' : 0,
     'variables': {
       'variables': {
         'variables': {
@@ -160,7 +161,7 @@
     'arm_thumb': 'default',
 
     # Default MIPS variable settings.
-    'mips_arch_variant%': 'r2',
+    'mips_arch_variant%': 'r6',
     # Possible values fp32, fp64, fpxx.
     # fp32 - 32 32-bit FPU registers are available, doubles are placed in
     #        register pairs.

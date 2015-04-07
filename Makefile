@@ -156,6 +156,10 @@ endif
 ifdef embedscript
   GYPFLAGS += -Dembed_script=$(embedscript)
 endif
+# d8 static link=off
+ifeq ($(d8_static_link),on)
+	GYPFLAGS += -Dd8_static_link=1
+endif
 
 # arm specific flags.
 # arm_version=<number | "default">

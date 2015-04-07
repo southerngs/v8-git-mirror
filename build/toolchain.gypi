@@ -375,6 +375,7 @@
                 'cflags': [
                   '-EB',
                   '-Wno-error=array-bounds',  # Workaround https://gcc.gnu.org/bugzilla/show_bug.cgi?id=56273
+                  '-Wno-error=sign-compare',
                 ],
                 'ldflags': ['-EB'],
                 'conditions': [
@@ -765,6 +766,7 @@
                 'cflags': [
                   '-EL',
                   '-Wno-error=array-bounds',  # Workaround https://gcc.gnu.org/bugzilla/show_bug.cgi?id=56273
+                  '-Wno-error=sign-compare',
                 ],
                 'ldflags': ['-EL'],
                 'conditions': [
