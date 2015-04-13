@@ -98,14 +98,13 @@ REPLACE_RUNTIME_CALL(JSCreateFunctionContext, Runtime::kNewFunctionContext)
 REPLACE_RUNTIME_CALL(JSCreateWithContext, Runtime::kPushWithContext)
 REPLACE_RUNTIME_CALL(JSCreateBlockContext, Runtime::kPushBlockContext)
 REPLACE_RUNTIME_CALL(JSCreateModuleContext, Runtime::kPushModuleContext)
-REPLACE_RUNTIME_CALL(JSCreateScriptContext, Runtime::kAbort)
+REPLACE_RUNTIME_CALL(JSCreateScriptContext, Runtime::kNewScriptContext)
 #undef REPLACE_RUNTIME
 
 
 #define REPLACE_UNIMPLEMENTED(op) \
   void JSGenericLowering::Lower##op(Node* node) { UNIMPLEMENTED(); }
 REPLACE_UNIMPLEMENTED(JSYield)
-REPLACE_UNIMPLEMENTED(JSDebugger)
 #undef REPLACE_UNIMPLEMENTED
 
 
@@ -122,7 +121,8 @@ void JSGenericLowering::ReplaceWithCompareIC(Node* node, Token::Value token) {
   Callable callable = CodeFactory::CompareIC(isolate(), token);
   CallDescriptor* desc_compare = Linkage::GetStubCallDescriptor(
       isolate(), zone(), callable.descriptor(), 0,
-      CallDescriptor::kPatchableCallSiteWithNop | FlagsForNode(node));
+      CallDescriptor::kPatchableCallSiteWithNop | FlagsForNode(node),
+      Operator::kNoProperties, kMachIntPtr);
 
   // Create a new call node asking a CompareIC for help.
   NodeVector inputs(zone());
@@ -149,8 +149,6 @@ void JSGenericLowering::ReplaceWithCompareIC(Node* node, Token::Value token) {
   Node* compare =
       graph()->NewNode(common()->Call(desc_compare),
                        static_cast<int>(inputs.size()), &inputs.front());
-  NodeProperties::SetBounds(
-      compare, Bounds(Type::None(zone()), Type::UntaggedSigned(zone())));
 
   // Decide how the return value from the above CompareIC can be converted into
   // a JavaScript boolean oddball depending on the given token.

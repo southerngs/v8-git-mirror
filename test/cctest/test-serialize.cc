@@ -35,13 +35,13 @@
 #include "src/compilation-cache.h"
 #include "src/debug.h"
 #include "src/heap/spaces.h"
-#include "src/natives.h"
 #include "src/objects.h"
 #include "src/parser.h"
 #include "src/runtime/runtime.h"
 #include "src/scopeinfo.h"
-#include "src/serialize.h"
-#include "src/snapshot.h"
+#include "src/snapshot/natives.h"
+#include "src/snapshot/serialize.h"
+#include "src/snapshot/snapshot.h"
 #include "test/cctest/cctest.h"
 
 using namespace v8::internal;
@@ -819,6 +819,37 @@ TEST(SerializeToplevelOnePlusOne) {
 }
 
 
+TEST(CodeCachePromotedToCompilationCache) {
+  FLAG_serialize_toplevel = true;
+  LocalContext context;
+  Isolate* isolate = CcTest::i_isolate();
+
+  v8::HandleScope scope(CcTest::isolate());
+
+  const char* source = "1 + 1";
+
+  Handle<String> src = isolate->factory()
+                           ->NewStringFromUtf8(CStrVector(source))
+                           .ToHandleChecked();
+  ScriptData* cache = NULL;
+
+  CompileScript(isolate, src, src, &cache,
+                v8::ScriptCompiler::kProduceCodeCache);
+
+  DisallowCompilation no_compile_expected(isolate);
+  Handle<SharedFunctionInfo> copy = CompileScript(
+      isolate, src, src, &cache, v8::ScriptCompiler::kConsumeCodeCache);
+
+  CHECK(isolate->compilation_cache()
+            ->LookupScript(src, src, 0, 0, false, false,
+                           isolate->native_context(), SLOPPY)
+            .ToHandleChecked()
+            .is_identical_to(copy));
+
+  delete cache;
+}
+
+
 TEST(SerializeToplevelInternalizedString) {
   FLAG_serialize_toplevel = true;
   LocalContext context;
@@ -1043,13 +1074,13 @@ TEST(SerializeToplevelThreeBigStrings) {
   Heap* heap = isolate->heap();
   CHECK(heap->InSpace(
       *v8::Utils::OpenHandle(*CompileRun("a")->ToString(CcTest::isolate())),
-      OLD_DATA_SPACE));
+      OLD_SPACE));
   CHECK(heap->InSpace(
       *v8::Utils::OpenHandle(*CompileRun("b")->ToString(CcTest::isolate())),
-      OLD_DATA_SPACE));
+      OLD_SPACE));
   CHECK(heap->InSpace(
       *v8::Utils::OpenHandle(*CompileRun("c")->ToString(CcTest::isolate())),
-      OLD_DATA_SPACE));
+      OLD_SPACE));
 
   delete cache;
   source_a.Dispose();
@@ -1341,7 +1372,9 @@ TEST(SerializeToplevelFlagChange) {
   v8::ScriptCompiler::CachedData* cache = ProduceCache(source);
 
   v8::Isolate* isolate2 = v8::Isolate::New();
+
   FLAG_allow_natives_syntax = true;  // Flag change should trigger cache reject.
+  FlagList::EnforceFlagImplications();
   {
     v8::Isolate::Scope iscope(isolate2);
     v8::HandleScope scope(isolate2);
@@ -1388,7 +1421,6 @@ TEST(SerializeToplevelBitFlip) {
 
 TEST(SerializeWithHarmonyScoping) {
   FLAG_serialize_toplevel = true;
-  FLAG_harmony_scoping = true;
 
   const char* source1 = "'use strict'; let x = 'X'";
   const char* source2 = "'use strict'; let y = 'Y'";
@@ -1452,6 +1484,9 @@ TEST(SerializeWithHarmonyScoping) {
 
 
 TEST(SerializeInternalReference) {
+#if V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_ARM64
+  return;
+#endif
   // Disable experimental natives that are loaded after deserialization.
   FLAG_turbo_deoptimization = false;
   FLAG_context_specialization = false;
@@ -1470,10 +1505,10 @@ TEST(SerializeInternalReference) {
       "      case 2:"
       "      case 3: j = 2; break;"
       "      case 4:"
-      "      case 5: j = 3; break;"
+      "      case 5: j = foo(3) + 1; break;"
       "      default: j = 0; break;"
       "    }"
-      "    return j|0;"
+      "    return j + 10;"
       "  }"
       "  return { foo: foo };"
       "})(this, {}, undefined).foo;"
@@ -1493,8 +1528,32 @@ TEST(SerializeInternalReference) {
     v8::Context::Scope c_scope(context);
     v8::Handle<v8::Function> foo =
         v8::Handle<v8::Function>::Cast(CompileRun("foo"));
+
+    // There are at least 6 internal references.
+    int mask = RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) |
+               RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE_ENCODED);
+    RelocIterator it(v8::Utils::OpenHandle(*foo)->code(), mask);
+    for (int i = 0; i < 6; ++i) {
+      CHECK(!it.done());
+      it.next();
+    }
+
     CHECK(v8::Utils::OpenHandle(*foo)->code()->is_turbofanned());
-    CHECK_EQ(3, CompileRun("foo(4)")->ToInt32(isolate)->Int32Value());
+    CHECK_EQ(11, CompileRun("foo(0)")->ToInt32(isolate)->Int32Value());
+    CHECK_EQ(11, CompileRun("foo(1)")->ToInt32(isolate)->Int32Value());
+    CHECK_EQ(12, CompileRun("foo(2)")->ToInt32(isolate)->Int32Value());
+    CHECK_EQ(12, CompileRun("foo(3)")->ToInt32(isolate)->Int32Value());
+    CHECK_EQ(23, CompileRun("foo(4)")->ToInt32(isolate)->Int32Value());
+    CHECK_EQ(23, CompileRun("foo(5)")->ToInt32(isolate)->Int32Value());
+    CHECK_EQ(10, CompileRun("foo(6)")->ToInt32(isolate)->Int32Value());
   }
   isolate->Dispose();
+}
+
+
+TEST(SerializationMemoryStats) {
+  FLAG_profile_deserialization = true;
+  FLAG_always_opt = false;
+  v8::StartupData blob = v8::V8::CreateSnapshotDataBlob();
+  delete[] blob.data;
 }

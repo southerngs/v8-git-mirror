@@ -141,7 +141,7 @@ static Maybe<PropertyAttributes> UnscopableLookup(LookupIterator* it) {
     DCHECK(isolate->has_pending_exception());
     return Nothing<PropertyAttributes>();
   }
-  return blacklist->IsUndefined() ? attrs : Just(ABSENT);
+  return blacklist->BooleanValue() ? Just(ABSENT) : attrs;
 }
 
 static void GetAttributesAndBindingFlags(VariableMode mode,
@@ -279,7 +279,7 @@ Handle<Object> Context::Lookup(Handle<String> name,
 
     // 2. Check the context proper if it has slots.
     if (context->IsFunctionContext() || context->IsBlockContext() ||
-        (FLAG_harmony_scoping && context->IsScriptContext())) {
+        context->IsScriptContext()) {
       // Use serialized scope information of functions and blocks to search
       // for the context index.
       Handle<ScopeInfo> scope_info;

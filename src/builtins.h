@@ -41,26 +41,26 @@ enum BuiltinExtraArguments {
 
 
 // Define list of builtins implemented in C++.
-#define BUILTIN_LIST_C(V)                                           \
-  V(Illegal, NO_EXTRA_ARGUMENTS)                                    \
-                                                                    \
-  V(EmptyFunction, NO_EXTRA_ARGUMENTS)                              \
-                                                                    \
-  V(ArrayPush, NO_EXTRA_ARGUMENTS)                                  \
-  V(ArrayPop, NO_EXTRA_ARGUMENTS)                                   \
-  V(ArrayShift, NO_EXTRA_ARGUMENTS)                                 \
-  V(ArrayUnshift, NO_EXTRA_ARGUMENTS)                               \
-  V(ArraySlice, NO_EXTRA_ARGUMENTS)                                 \
-  V(ArraySplice, NO_EXTRA_ARGUMENTS)                                \
-  V(ArrayConcat, NO_EXTRA_ARGUMENTS)                                \
-                                                                    \
-  V(HandleApiCall, NEEDS_CALLED_FUNCTION)                           \
-  V(HandleApiCallConstruct, NEEDS_CALLED_FUNCTION)                  \
-  V(HandleApiCallAsFunction, NO_EXTRA_ARGUMENTS)                    \
-  V(HandleApiCallAsConstructor, NO_EXTRA_ARGUMENTS)                 \
-                                                                    \
-  V(StrictModePoisonPill, NO_EXTRA_ARGUMENTS)                       \
-  V(GeneratorPoisonPill, NO_EXTRA_ARGUMENTS)
+#define BUILTIN_LIST_C(V)                                    \
+  V(Illegal, NO_EXTRA_ARGUMENTS)                             \
+                                                             \
+  V(EmptyFunction, NO_EXTRA_ARGUMENTS)                       \
+                                                             \
+  V(ArrayPush, NO_EXTRA_ARGUMENTS)                           \
+  V(ArrayPop, NO_EXTRA_ARGUMENTS)                            \
+  V(ArrayShift, NO_EXTRA_ARGUMENTS)                          \
+  V(ArrayUnshift, NO_EXTRA_ARGUMENTS)                        \
+  V(ArraySlice, NO_EXTRA_ARGUMENTS)                          \
+  V(ArraySplice, NO_EXTRA_ARGUMENTS)                         \
+  V(ArrayConcat, NO_EXTRA_ARGUMENTS)                         \
+                                                             \
+  V(HandleApiCall, NEEDS_CALLED_FUNCTION)                    \
+  V(HandleApiCallConstruct, NEEDS_CALLED_FUNCTION)           \
+  V(HandleApiCallAsFunction, NO_EXTRA_ARGUMENTS)             \
+  V(HandleApiCallAsConstructor, NO_EXTRA_ARGUMENTS)          \
+                                                             \
+  V(RestrictedFunctionPropertiesThrower, NO_EXTRA_ARGUMENTS) \
+  V(RestrictedStrictArgumentsPropertiesThrower, NO_EXTRA_ARGUMENTS)
 
 // Define list of builtins implemented in assembly.
 #define BUILTIN_LIST_A(V)                                                      \
@@ -109,6 +109,8 @@ enum BuiltinExtraArguments {
   /* Uses KeyedLoadIC_Initialize; must be after in list. */                    \
   V(FunctionCall, BUILTIN, UNINITIALIZED, kNoExtraICState)                     \
   V(FunctionApply, BUILTIN, UNINITIALIZED, kNoExtraICState)                    \
+  V(ReflectApply, BUILTIN, UNINITIALIZED, kNoExtraICState)                     \
+  V(ReflectConstruct, BUILTIN, UNINITIALIZED, kNoExtraICState)                 \
                                                                                \
   V(InternalArrayCode, BUILTIN, UNINITIALIZED, kNoExtraICState)                \
   V(ArrayCode, BUILTIN, UNINITIALIZED, kNoExtraICState)                        \
@@ -193,6 +195,8 @@ enum BuiltinExtraArguments {
   V(STRING_ADD_LEFT, 1)                    \
   V(STRING_ADD_RIGHT, 1)                   \
   V(APPLY_PREPARE, 1)                      \
+  V(REFLECT_APPLY_PREPARE, 1)              \
+  V(REFLECT_CONSTRUCT_PREPARE, 2)          \
   V(STACK_OVERFLOW, 1)
 
 class BuiltinFunctionTable;
@@ -316,6 +320,8 @@ class Builtins {
 
   static void Generate_FunctionCall(MacroAssembler* masm);
   static void Generate_FunctionApply(MacroAssembler* masm);
+  static void Generate_ReflectApply(MacroAssembler* masm);
+  static void Generate_ReflectConstruct(MacroAssembler* masm);
 
   static void Generate_InternalArrayCode(MacroAssembler* masm);
   static void Generate_ArrayCode(MacroAssembler* masm);

@@ -76,6 +76,7 @@
   'json2': [PASS, NO_VARIANTS],
   'packed-elements': [PASS, NO_VARIANTS],
   'unbox-double-arrays': [PASS, NO_VARIANTS],
+  'unicode-test': [PASS, NO_VARIANTS],
   'whitespaces': [PASS, NO_VARIANTS],
   'compiler/osr-assert': [PASS, NO_VARIANTS],
   'regress/regress-2185-2': [PASS, NO_VARIANTS],
@@ -91,27 +92,49 @@
   # not work, but we expect it to not crash.
   'debug-step-turbofan': [PASS, FAIL],
 
+  # TODO(mstarzinger): Optimizing top-level code revealed some issues. Fix!
+  'bitops-info': [PASS, NO_VARIANTS],  # fails on ARM hardware.
+  'md5': [PASS, NO_VARIANTS],  # fails on ARM hardware.
+  'debug-break-inline': [PASS, NO_VARIANTS],  # very flaky.
+  'debug-compile-event-newfunction': [PASS, NO_VARIANTS],
+  'debug-conditional-breakpoints': [PASS, NO_VARIANTS],
+  'debug-evaluate-locals-optimized': [PASS, NO_VARIANTS],
+  'debug-evaluate-locals-optimized-double': [PASS, NO_VARIANTS],
+  'debug-evaluate-recursive': [PASS, NO_VARIANTS],  # only in no-snap debug.
+  'debug-setbreakpoint': [PASS, NO_VARIANTS],  # only in no-snap debug.
+  'debug-step': [PASS, NO_VARIANTS],  # windows only.
+  'debug-step-2': [PASS, NO_VARIANTS],  # flaky in no-snap mode.
+  'debug-step-3': [PASS, NO_VARIANTS],  # flaky in no-snap mode.
+  'debug-stepframe-clearing': [PASS, NO_VARIANTS],  # only in no-snap debug.
+  'debug-stepin-call-function-stub': [PASS, NO_VARIANTS],  # only in no-snap debug.
+  'regress/regress-3717': [PASS, NO_VARIANTS],  # only in no-snap mode.
+  'regress/regress-2451': [PASS, NO_VARIANTS],  # with custom snapshot and gc-stress.
+  'debug-multiple-breakpoints': [PASS, NO_VARIANTS],  # with custom snapshot and gc-stress.
+  'debug-listbreakpoints': [PASS, NO_VARIANTS],  # arm64 nosnap with turbofan
+  'debug-enable-disable-breakpoints': [PASS, NO_VARIANTS],  #arm64 nosnap with turbofan.
+
+  # TODO(jarin): Fix for-in deopt points in turbofan.
+  'for-in-opt': [PASS, NO_VARIANTS],
+
+  # TODO(mstarzinger): Optimizing top-level code flushed out some correctness
+  # issues on ARM and ARM64.
+  'es6/math-log2-log10': [PASS, NO_VARIANTS],  # on ARM and ARM64.
+  'mirror-script': [PASS, NO_VARIANTS],  # on ARM64 only.
+
   # TODO(jarin/mstarzinger): Investigate debugger issues with TurboFan.
   'debug-evaluate-const': [PASS, NO_VARIANTS],
   'debug-evaluate-locals': [PASS, NO_VARIANTS],
   'debug-liveedit-check-stack': [PASS, NO_VARIANTS],  # only in no-snap mode.
   'debug-liveedit-double-call': [PASS, NO_VARIANTS],
-  'debug-step-stub-callfunction': [PASS, NO_VARIANTS],
   'debug-set-variable-value': [PASS, NO_VARIANTS],
-  'debug-stepin-accessor': [PASS, NO_VARIANTS],
-  'debug-stepin-builtin': [PASS, NO_VARIANTS],
-  'debug-stepin-constructor': [PASS, NO_VARIANTS],
-  'debug-stepin-function-call': [PASS, NO_VARIANTS],
-  'debug-stepin-positions': [PASS, NO_VARIANTS],
-  'debug-stepin-property-function-call': [PASS, NO_VARIANTS],
-  'debug-stepnext-do-while': [PASS, NO_VARIANTS],
   'debug-stepout-scope-part1': [PASS, NO_VARIANTS],
   'debug-stepout-scope-part2': [PASS, NO_VARIANTS],
   'debug-stepout-scope-part3': [PASS, NO_VARIANTS],
-  'es6/debug-stepin-microtasks': [PASS, NO_VARIANTS],
-  'es6/debug-stepnext-for': [PASS, NO_VARIANTS],
-  'harmony/debug-evaluate-blockscopes': [PASS, NO_VARIANTS],
-  'regress/regress-crbug-259300': [PASS, NO_VARIANTS],
+  'es6/debug-evaluate-blockscopes': [PASS, NO_VARIANTS],
+
+  # TODO(titzer): --always-opt incorrectly disables CrankShaft soft deopt points
+  'result-table-min': [PASS, NO_VARIANTS],
+  'result-table-max': [PASS, NO_VARIANTS],
 
   ##############################################################################
   # Too slow in debug mode with --stress-opt mode.
@@ -121,12 +144,18 @@
   'regress/regress-create-exception': [PASS, ['mode == debug', SKIP]],
 
   ##############################################################################
+  # Too slow in debug mode for validation of elements.
+  'regress/regress-430201': [PASS, ['mode == debug', SKIP]],
+  'regress/regress-430201b': [PASS, ['mode == debug', SKIP]],
+
+  ##############################################################################
   # Too slow in debug mode for GC stress mode.
   'regress/regress-crbug-217858': [PASS, ['mode == debug', SKIP]],
 
   ##############################################################################
-  # Only regexp stuff tested, no need for extensive Crankshaft tests.
+  # Only RegExp stuff tested, no need for extensive optimizing compiler tests.
   'regexp-global': [PASS, NO_VARIANTS],
+  'third_party/regexp-pcre': [PASS, NO_VARIANTS],
 
   ##############################################################################
   # No need to waste time for this test.
@@ -137,6 +166,7 @@
 
   # Very slow on ARM and MIPS, contains no architecture dependent code.
   'unicode-case-overoptimization': [PASS, NO_VARIANTS, ['arch == arm or arch == android_arm or arch == android_arm64 or arch == mipsel or arch == mips64el or arch == mips', TIMEOUT]],
+  'regress/regress-3976': [PASS, NO_VARIANTS, ['arch == arm or arch == android_arm or arch == android_arm64 or arch == mipsel or arch == mips64el or arch == mips', SKIP]],
 
   ##############################################################################
   # This test expects to reach a certain recursion depth, which may not work
@@ -183,6 +213,10 @@
   # nosse2. Also for arm novfp3.
   'regress/regress-2989': [FAIL, NO_VARIANTS, ['system == linux and arch == x87 or arch == arm and simulator == True', PASS]],
 
+  # BUG(v8:3985). Wrong materialization of arguments object after throwing
+  # an exception.
+  'regress/regress-3985': [PASS, FAIL],
+
   # Skip endain dependent test for mips due to different typed views of the same
   # array buffer.
   'nans': [PASS, ],
@@ -192,6 +226,9 @@
 
   # Too slow for slow variants.
   'asm/embenchen/*': [PASS, SLOW, FAST_VARIANTS],
+
+  # BUG(v8:3838).
+  'regress/regress-3116': [PASS, ['isolates', FLAKY]],
 }],  # ALWAYS
 
 ##############################################################################
@@ -208,7 +245,7 @@
   'fast-prototype': [SKIP],
   'field-type-tracking': [SKIP],
   'getters-on-elements': [SKIP],
-  'harmony/block-let-crankshaft': [SKIP],
+  'es6/block-let-crankshaft': [SKIP],
   'opt-elements-kind': [SKIP],
   'osr-elements-kind': [SKIP],
   'regress/regress-crbug-137689': [SKIP],
@@ -244,6 +281,8 @@
   'regress/regress-3717': [SKIP],
   # Issue 3924.
   'mjsunit/debug-clearbreakpointgroup': [SKIP],
+  # Issue 3969.
+  'mjsunit/debug-references': [SKIP],
 }],  # 'gc_stress == True'
 
 ##############################################################################
@@ -295,6 +334,9 @@
 
   # BUG(v8:3457).
   'deserialize-reference': [PASS, FAIL],
+
+  # BUG(v8:4016)
+  'regress/regress-crbug-467047': [SKIP],
 
   # Slow tests.
   'array-concat': [PASS, SLOW],
@@ -583,6 +625,9 @@
   'readonly': [SKIP],
   'array-feedback': [SKIP],
 
+  # Deopting uses just enough memory to make this one OOM.
+  'regress/regress-3976': [SKIP],
+
   # Deopt every n garbage collections collides with deopt every n times.
   'regress/regress-2653': [SKIP],
 }],  # 'deopt_fuzzer == True'
@@ -592,9 +637,5 @@
 
   # take too long with the simulator.
   'regress/regress-1132': [SKIP],
-  'asm/embenchen/box2d': [SKIP],
-
-  # issues to be investigated based on latest uplevel
-  'debug-references': [SKIP],
 }],  # 'arch == ppc and simulator_run == True'
 ]

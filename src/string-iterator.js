@@ -8,7 +8,6 @@
 
 %CheckIsBootstrapping();
 
-var GlobalArray = global.Array;
 var GlobalObject = global.Object;
 var GlobalString = global.String;
 
@@ -49,7 +48,7 @@ function StringIteratorNext() {
 
   var s = GET_PRIVATE(iterator, stringIteratorIteratedStringSymbol);
   if (IS_UNDEFINED(s)) {
-    return CreateIteratorResultObject(UNDEFINED, true);
+    return $iteratorCreateResultObject(UNDEFINED, true);
   }
 
   var position = GET_PRIVATE(iterator, stringIteratorNextIndexSymbol);
@@ -58,7 +57,7 @@ function StringIteratorNext() {
   if (position >= length) {
     SET_PRIVATE(iterator, stringIteratorIteratedStringSymbol,
                 UNDEFINED);
-    return CreateIteratorResultObject(UNDEFINED, true);
+    return $iteratorCreateResultObject(UNDEFINED, true);
   }
 
   var first = %_StringCharCodeAt(s, position);
@@ -75,7 +74,7 @@ function StringIteratorNext() {
 
   SET_PRIVATE(iterator, stringIteratorNextIndexSymbol, position);
 
-  return CreateIteratorResultObject(resultString, false);
+  return $iteratorCreateResultObject(resultString, false);
 }
 
 
@@ -89,9 +88,9 @@ function StringPrototypeIterator() {
 %FunctionSetPrototype(StringIterator, new GlobalObject());
 %FunctionSetInstanceClassName(StringIterator, 'String Iterator');
 
-InstallFunctions(StringIterator.prototype, DONT_ENUM, GlobalArray(
+InstallFunctions(StringIterator.prototype, DONT_ENUM, [
   'next', StringIteratorNext
-));
+]);
 %FunctionSetName(StringIteratorIterator, '[Symbol.iterator]');
 %AddNamedProperty(StringIterator.prototype, symbolIterator,
                   StringIteratorIterator, DONT_ENUM);

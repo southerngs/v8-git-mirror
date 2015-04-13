@@ -30,6 +30,7 @@ IncrementalMarking::IncrementalMarking(Heap* heap)
       unscanned_bytes_of_large_object_(0),
       was_activated_(false),
       weak_closure_was_overapproximated_(false),
+      weak_closure_approximation_rounds_(0),
       request_type_(COMPLETE_MARKING) {}
 
 
@@ -134,23 +135,12 @@ static void MarkObjectGreyDoNotEnqueue(Object* obj) {
 }
 
 
-static inline void MarkBlackOrKeepGrey(HeapObject* heap_object,
-                                       MarkBit mark_bit, int size) {
-  DCHECK(!Marking::IsImpossible(mark_bit));
-  if (mark_bit.Get()) return;
-  mark_bit.Set();
-  MemoryChunk::IncrementLiveBytesFromGC(heap_object->address(), size);
-  DCHECK(Marking::IsBlack(mark_bit));
-}
-
-
 static inline void MarkBlackOrKeepBlack(HeapObject* heap_object,
                                         MarkBit mark_bit, int size) {
   DCHECK(!Marking::IsImpossible(mark_bit));
   if (Marking::IsBlack(mark_bit)) return;
   Marking::MarkBlack(mark_bit);
   MemoryChunk::IncrementLiveBytesFromGC(heap_object->address(), size);
-  DCHECK(Marking::IsBlack(mark_bit));
 }
 
 
@@ -251,13 +241,7 @@ class IncrementalMarkingMarkingVisitor
 
   // Marks the object grey and pushes it on the marking stack.
   INLINE(static void MarkObject(Heap* heap, Object* obj)) {
-    HeapObject* heap_object = HeapObject::cast(obj);
-    MarkBit mark_bit = Marking::MarkBitFrom(heap_object);
-    if (mark_bit.data_only()) {
-      MarkBlackOrKeepGrey(heap_object, mark_bit, heap_object->Size());
-    } else if (Marking::IsWhite(mark_bit)) {
-      heap->incremental_marking()->WhiteToGreyAndPush(heap_object, mark_bit);
-    }
+    IncrementalMarking::MarkObject(heap, HeapObject::cast(obj));
   }
 
   // Marks the object black without pushing it on the marking stack.
@@ -266,7 +250,7 @@ class IncrementalMarkingMarkingVisitor
     HeapObject* heap_object = HeapObject::cast(obj);
     MarkBit mark_bit = Marking::MarkBitFrom(heap_object);
     if (Marking::IsWhite(mark_bit)) {
-      mark_bit.Set();
+      Marking::MarkBlack(mark_bit);
       MemoryChunk::IncrementLiveBytesFromGC(heap_object->address(),
                                             heap_object->Size());
       return true;
@@ -280,7 +264,7 @@ class IncrementalMarkingRootMarkingVisitor : public ObjectVisitor {
  public:
   explicit IncrementalMarkingRootMarkingVisitor(
       IncrementalMarking* incremental_marking)
-      : incremental_marking_(incremental_marking) {}
+      : heap_(incremental_marking->heap()) {}
 
   void VisitPointer(Object** p) { MarkObjectByPointer(p); }
 
@@ -293,18 +277,10 @@ class IncrementalMarkingRootMarkingVisitor : public ObjectVisitor {
     Object* obj = *p;
     if (!obj->IsHeapObject()) return;
 
-    HeapObject* heap_object = HeapObject::cast(obj);
-    MarkBit mark_bit = Marking::MarkBitFrom(heap_object);
-    if (mark_bit.data_only()) {
-      MarkBlackOrKeepGrey(heap_object, mark_bit, heap_object->Size());
-    } else {
-      if (Marking::IsWhite(mark_bit)) {
-        incremental_marking_->WhiteToGreyAndPush(heap_object, mark_bit);
-      }
-    }
+    IncrementalMarking::MarkObject(heap_, HeapObject::cast(obj));
   }
 
-  IncrementalMarking* incremental_marking_;
+  Heap* heap_;
 };
 
 
@@ -325,11 +301,6 @@ void IncrementalMarking::SetOldSpacePageFlags(MemoryChunk* chunk,
         chunk->size() > static_cast<size_t>(Page::kPageSize) && is_compacting) {
       chunk->SetFlag(MemoryChunk::RESCAN_ON_EVACUATION);
     }
-  } else if (chunk->owner()->identity() == CELL_SPACE ||
-             chunk->owner()->identity() == PROPERTY_CELL_SPACE ||
-             chunk->scan_on_scavenge()) {
-    chunk->ClearFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
-    chunk->ClearFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
   } else {
     chunk->ClearFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
     chunk->SetFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
@@ -370,10 +341,7 @@ void IncrementalMarking::DeactivateIncrementalWriteBarrierForSpace(
 
 
 void IncrementalMarking::DeactivateIncrementalWriteBarrier() {
-  DeactivateIncrementalWriteBarrierForSpace(heap_->old_pointer_space());
-  DeactivateIncrementalWriteBarrierForSpace(heap_->old_data_space());
-  DeactivateIncrementalWriteBarrierForSpace(heap_->cell_space());
-  DeactivateIncrementalWriteBarrierForSpace(heap_->property_cell_space());
+  DeactivateIncrementalWriteBarrierForSpace(heap_->old_space());
   DeactivateIncrementalWriteBarrierForSpace(heap_->map_space());
   DeactivateIncrementalWriteBarrierForSpace(heap_->code_space());
   DeactivateIncrementalWriteBarrierForSpace(heap_->new_space());
@@ -405,10 +373,7 @@ void IncrementalMarking::ActivateIncrementalWriteBarrier(NewSpace* space) {
 
 
 void IncrementalMarking::ActivateIncrementalWriteBarrier() {
-  ActivateIncrementalWriteBarrier(heap_->old_pointer_space());
-  ActivateIncrementalWriteBarrier(heap_->old_data_space());
-  ActivateIncrementalWriteBarrier(heap_->cell_space());
-  ActivateIncrementalWriteBarrier(heap_->property_cell_space());
+  ActivateIncrementalWriteBarrier(heap_->old_space());
   ActivateIncrementalWriteBarrier(heap_->map_space());
   ActivateIncrementalWriteBarrier(heap_->code_space());
   ActivateIncrementalWriteBarrier(heap_->new_space());
@@ -484,7 +449,7 @@ static void PatchIncrementalMarkingRecordWriteStubs(
 }
 
 
-void IncrementalMarking::Start(CompactionFlag flag) {
+void IncrementalMarking::Start() {
   if (FLAG_trace_incremental_marking) {
     PrintF("[IncrementalMarking] Start\n");
   }
@@ -499,7 +464,7 @@ void IncrementalMarking::Start(CompactionFlag flag) {
   was_activated_ = true;
 
   if (!heap_->mark_compact_collector()->sweeping_in_progress()) {
-    StartMarking(flag);
+    StartMarking();
   } else {
     if (FLAG_trace_incremental_marking) {
       PrintF("[IncrementalMarking] Start sweeping.\n");
@@ -511,12 +476,12 @@ void IncrementalMarking::Start(CompactionFlag flag) {
 }
 
 
-void IncrementalMarking::StartMarking(CompactionFlag flag) {
+void IncrementalMarking::StartMarking() {
   if (FLAG_trace_incremental_marking) {
     PrintF("[IncrementalMarking] Start marking\n");
   }
 
-  is_compacting_ = !FLAG_never_compact && (flag == ALLOW_COMPACTION) &&
+  is_compacting_ = !FLAG_never_compact &&
                    heap_->mark_compact_collector()->StartCompaction(
                        MarkCompactCollector::INCREMENTAL_COMPACTION);
 
@@ -556,6 +521,35 @@ void IncrementalMarking::StartMarking(CompactionFlag flag) {
   if (FLAG_trace_incremental_marking) {
     PrintF("[IncrementalMarking] Running\n");
   }
+}
+
+
+void IncrementalMarking::MarkObjectGroups() {
+  DCHECK(FLAG_overapproximate_weak_closure);
+  DCHECK(!weak_closure_was_overapproximated_);
+
+  int old_marking_deque_top =
+      heap_->mark_compact_collector()->marking_deque()->top();
+
+  heap_->mark_compact_collector()->MarkImplicitRefGroups(&MarkObject);
+
+  IncrementalMarkingRootMarkingVisitor visitor(this);
+  heap_->isolate()->global_handles()->IterateObjectGroups(
+      &visitor, &MarkCompactCollector::IsUnmarkedHeapObjectWithHeap);
+
+  int marking_progress =
+      abs(old_marking_deque_top -
+          heap_->mark_compact_collector()->marking_deque()->top());
+
+  ++weak_closure_approximation_rounds_;
+  if ((weak_closure_approximation_rounds_ >=
+       FLAG_max_object_groups_marking_rounds) ||
+      (marking_progress < FLAG_min_progress_during_object_groups_marking)) {
+    weak_closure_was_overapproximated_ = true;
+  }
+
+  heap_->isolate()->global_handles()->RemoveImplicitRefGroups();
+  heap_->isolate()->global_handles()->RemoveObjectGroups();
 }
 
 
@@ -636,6 +630,14 @@ void IncrementalMarking::VisitObject(Map* map, HeapObject* obj, int size) {
                Marking::IsBlack(mark_bit)));
 #endif
   MarkBlackOrKeepBlack(obj, mark_bit, size);
+}
+
+
+void IncrementalMarking::MarkObject(Heap* heap, HeapObject* obj) {
+  MarkBit mark_bit = Marking::MarkBitFrom(obj);
+  if (Marking::IsWhite(mark_bit)) {
+    heap->incremental_marking()->WhiteToGreyAndPush(obj, mark_bit);
+  }
 }
 
 
@@ -771,15 +773,16 @@ void IncrementalMarking::Finalize() {
 }
 
 
-void IncrementalMarking::OverApproximateWeakClosure() {
+void IncrementalMarking::OverApproximateWeakClosure(CompletionAction action) {
   DCHECK(FLAG_overapproximate_weak_closure);
   DCHECK(!weak_closure_was_overapproximated_);
   if (FLAG_trace_incremental_marking) {
     PrintF("[IncrementalMarking] requesting weak closure overapproximation.\n");
   }
-  set_should_hurry(true);
   request_type_ = OVERAPPROXIMATION;
-  heap_->isolate()->stack_guard()->RequestGC();
+  if (action == GC_VIA_STACK_GUARD) {
+    heap_->isolate()->stack_guard()->RequestGC();
+  }
 }
 
 
@@ -794,8 +797,8 @@ void IncrementalMarking::MarkingComplete(CompletionAction action) {
   if (FLAG_trace_incremental_marking) {
     PrintF("[IncrementalMarking] Complete (normal).\n");
   }
+  request_type_ = COMPLETE_MARKING;
   if (action == GC_VIA_STACK_GUARD) {
-    request_type_ = COMPLETE_MARKING;
     heap_->isolate()->stack_guard()->RequestGC();
   }
 }
@@ -804,14 +807,13 @@ void IncrementalMarking::MarkingComplete(CompletionAction action) {
 void IncrementalMarking::Epilogue() {
   was_activated_ = false;
   weak_closure_was_overapproximated_ = false;
+  weak_closure_approximation_rounds_ = 0;
 }
 
 
 void IncrementalMarking::OldSpaceStep(intptr_t allocated) {
   if (IsStopped() && ShouldActivate()) {
-    // TODO(hpayer): Let's play safe for now, but compaction should be
-    // in principle possible.
-    Start(PREVENT_COMPACTION);
+    Start();
   } else {
     Step(allocated * kFastMarking / kInitialMarkingSpeed, GC_VIA_STACK_GUARD);
   }
@@ -940,7 +942,7 @@ intptr_t IncrementalMarking::Step(intptr_t allocated_bytes,
       }
       if (!heap_->mark_compact_collector()->sweeping_in_progress()) {
         bytes_scanned_ = 0;
-        StartMarking(PREVENT_COMPACTION);
+        StartMarking();
       }
     } else if (state_ == MARKING) {
       bytes_processed = ProcessMarkingDeque(bytes_to_process);
@@ -948,9 +950,8 @@ intptr_t IncrementalMarking::Step(intptr_t allocated_bytes,
         if (completion == FORCE_COMPLETION ||
             IsIdleMarkingDelayCounterLimitReached()) {
           if (FLAG_overapproximate_weak_closure &&
-              !weak_closure_was_overapproximated_ &&
-              action == GC_VIA_STACK_GUARD) {
-            OverApproximateWeakClosure();
+              !weak_closure_was_overapproximated_) {
+            OverApproximateWeakClosure(action);
           } else {
             MarkingComplete(action);
           }

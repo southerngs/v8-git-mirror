@@ -1430,18 +1430,18 @@ void MacroAssembler::Mfhc1(Register rt, FPURegister fs) {
 }
 
 
-void MacroAssembler::BranchF(Label* target,
-                             Label* nan,
-                             Condition cc,
-                             FPURegister cmp1,
-                             FPURegister cmp2,
-                             BranchDelaySlot bd) {
+void MacroAssembler::BranchFCommon(SecondaryField sizeField, Label* target,
+                                   Label* nan, Condition cc, FPURegister cmp1,
+                                   FPURegister cmp2, BranchDelaySlot bd) {
   BlockTrampolinePoolScope block_trampoline_pool(this);
   if (cc == al) {
     Branch(bd, target);
     return;
   }
 
+  if (IsMipsArchVariant(kMips32r6)) {
+    sizeField = sizeField == D ? L : W;
+  }
   DCHECK(nan || target);
   // Check for unordered (NaN) cases.
   if (nan) {
@@ -1463,35 +1463,35 @@ void MacroAssembler::BranchF(Label* target,
       // have been handled by the caller.
       switch (cc) {
         case lt:
-          c(OLT, D, cmp1, cmp2);
+          c(OLT, sizeField, cmp1, cmp2);
           bc1t(target);
           break;
         case gt:
-          c(ULE, D, cmp1, cmp2);
+          c(ULE, sizeField, cmp1, cmp2);
           bc1f(target);
           break;
         case ge:
-          c(ULT, D, cmp1, cmp2);
+          c(ULT, sizeField, cmp1, cmp2);
           bc1f(target);
           break;
         case le:
-          c(OLE, D, cmp1, cmp2);
+          c(OLE, sizeField, cmp1, cmp2);
           bc1t(target);
           break;
         case eq:
-          c(EQ, D, cmp1, cmp2);
+          c(EQ, sizeField, cmp1, cmp2);
           bc1t(target);
           break;
         case ueq:
-          c(UEQ, D, cmp1, cmp2);
+          c(UEQ, sizeField, cmp1, cmp2);
           bc1t(target);
           break;
         case ne:
-          c(EQ, D, cmp1, cmp2);
+          c(EQ, sizeField, cmp1, cmp2);
           bc1f(target);
           break;
         case nue:
-          c(UEQ, D, cmp1, cmp2);
+          c(UEQ, sizeField, cmp1, cmp2);
           bc1f(target);
           break;
         default:
@@ -1508,35 +1508,35 @@ void MacroAssembler::BranchF(Label* target,
       DCHECK(!cmp1.is(kDoubleCompareReg) && !cmp2.is(kDoubleCompareReg));
       switch (cc) {
         case lt:
-          cmp(OLT, L, kDoubleCompareReg, cmp1, cmp2);
+          cmp(OLT, sizeField, kDoubleCompareReg, cmp1, cmp2);
           bc1nez(target, kDoubleCompareReg);
           break;
         case gt:
-          cmp(ULE, L, kDoubleCompareReg, cmp1, cmp2);
+          cmp(ULE, sizeField, kDoubleCompareReg, cmp1, cmp2);
           bc1eqz(target, kDoubleCompareReg);
           break;
         case ge:
-          cmp(ULT, L, kDoubleCompareReg, cmp1, cmp2);
+          cmp(ULT, sizeField, kDoubleCompareReg, cmp1, cmp2);
           bc1eqz(target, kDoubleCompareReg);
           break;
         case le:
-          cmp(OLE, L, kDoubleCompareReg, cmp1, cmp2);
+          cmp(OLE, sizeField, kDoubleCompareReg, cmp1, cmp2);
           bc1nez(target, kDoubleCompareReg);
           break;
         case eq:
-          cmp(EQ, L, kDoubleCompareReg, cmp1, cmp2);
+          cmp(EQ, sizeField, kDoubleCompareReg, cmp1, cmp2);
           bc1nez(target, kDoubleCompareReg);
           break;
         case ueq:
-          cmp(UEQ, L, kDoubleCompareReg, cmp1, cmp2);
+          cmp(UEQ, sizeField, kDoubleCompareReg, cmp1, cmp2);
           bc1nez(target, kDoubleCompareReg);
           break;
         case ne:
-          cmp(EQ, L, kDoubleCompareReg, cmp1, cmp2);
+          cmp(EQ, sizeField, kDoubleCompareReg, cmp1, cmp2);
           bc1eqz(target, kDoubleCompareReg);
           break;
         case nue:
-          cmp(UEQ, L, kDoubleCompareReg, cmp1, cmp2);
+          cmp(UEQ, sizeField, kDoubleCompareReg, cmp1, cmp2);
           bc1eqz(target, kDoubleCompareReg);
           break;
         default:
@@ -3092,24 +3092,6 @@ void MacroAssembler::Ret(Condition cond,
 }
 
 
-void MacroAssembler::J(Label* L, BranchDelaySlot bdslot) {
-  BlockTrampolinePoolScope block_trampoline_pool(this);
-
-  uint32_t imm28;
-  imm28 = jump_address(L);
-  imm28 &= kImm28Mask;
-  { BlockGrowBufferScope block_buf_growth(this);
-    // Buffer growth (and relocation) must be blocked for internal references
-    // until associated instructions are emitted and available to be patched.
-    RecordRelocInfo(RelocInfo::INTERNAL_REFERENCE_ENCODED);
-    j(imm28);
-  }
-  // Emit a nop in the branch delay slot if required.
-  if (bdslot == PROTECT)
-    nop();
-}
-
-
 void MacroAssembler::Jr(Label* L, BranchDelaySlot bdslot) {
   BlockTrampolinePoolScope block_trampoline_pool(this);
 
@@ -3151,6 +3133,7 @@ void MacroAssembler::Jalr(Label* L, BranchDelaySlot bdslot) {
 
 
 void MacroAssembler::DropAndRet(int drop) {
+  DCHECK(is_int16(drop * kPointerSize));
   Ret(USE_DELAY_SLOT);
   addiu(sp, sp, drop * kPointerSize);
 }
@@ -3188,7 +3171,7 @@ void MacroAssembler::Drop(int count,
      Branch(&skip, NegateCondition(cond), reg, op);
   }
 
-  addiu(sp, sp, count * kPointerSize);
+  Addu(sp, sp, Operand(count * kPointerSize));
 
   if (cond != al) {
     bind(&skip);
@@ -3235,43 +3218,22 @@ void MacroAssembler::DebugBreak() {
 // ---------------------------------------------------------------------------
 // Exception handling.
 
-void MacroAssembler::PushTryHandler(StackHandler::Kind kind,
-                                    int handler_index) {
+void MacroAssembler::PushStackHandler() {
   // Adjust this code if not the case.
-  STATIC_ASSERT(StackHandlerConstants::kSize == 3 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kSize == 1 * kPointerSize);
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kStateOffset == 1 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kContextOffset == 2 * kPointerSize);
-
-  // For the JSEntry handler, we must preserve a0-a3 and s0.
-  // t1-t3 are available. We will build up the handler from the bottom by
-  // pushing on the stack.
-  // Set up the the state (t2) for pushing.
-  unsigned state =
-      StackHandler::IndexField::encode(handler_index) |
-      StackHandler::KindField::encode(kind);
-  li(t2, Operand(state));
-
-  // Push the context and state.
-  if (kind == StackHandler::JS_ENTRY) {
-    DCHECK(Smi::FromInt(0) == 0);
-    // The zero_reg indicates no context.
-    // The operands are reversed to match the order of MultiPush/Pop.
-    Push(zero_reg, t2);
-  } else {
-    MultiPush(t2.bit() | cp.bit());
-  }
 
   // Link the current handler as the next handler.
   li(t2, Operand(ExternalReference(Isolate::kHandlerAddress, isolate())));
   lw(t1, MemOperand(t2));
   push(t1);
+
   // Set this new handler as the current one.
   sw(sp, MemOperand(t2));
 }
 
 
-void MacroAssembler::PopTryHandler() {
+void MacroAssembler::PopStackHandler() {
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0);
   pop(a1);
   Addu(sp, sp, Operand(StackHandlerConstants::kSize - kPointerSize));
@@ -3349,12 +3311,11 @@ void MacroAssembler::Allocate(int object_size,
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
     // Align the next allocation. Storing the filler map without checking top is
     // safe in new-space because the limit of the heap is aligned there.
-    DCHECK((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     DCHECK(kPointerAlignment * 2 == kDoubleAlignment);
     And(scratch2, result, Operand(kDoubleAlignmentMask));
     Label aligned;
     Branch(&aligned, eq, scratch2, Operand(zero_reg));
-    if ((flags & PRETENURE_OLD_DATA_SPACE) != 0) {
+    if ((flags & PRETENURE) != 0) {
       Branch(gc_required, Ugreater_equal, result, Operand(t9));
     }
     li(scratch2, Operand(isolate()->factory()->one_pointer_filler_map()));
@@ -3436,12 +3397,11 @@ void MacroAssembler::Allocate(Register object_size,
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
     // Align the next allocation. Storing the filler map without checking top is
     // safe in new-space because the limit of the heap is aligned there.
-    DCHECK((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     DCHECK(kPointerAlignment * 2 == kDoubleAlignment);
     And(scratch2, result, Operand(kDoubleAlignmentMask));
     Label aligned;
     Branch(&aligned, eq, scratch2, Operand(zero_reg));
-    if ((flags & PRETENURE_OLD_DATA_SPACE) != 0) {
+    if ((flags & PRETENURE) != 0) {
       Branch(gc_required, Ugreater_equal, result, Operand(t9));
     }
     li(scratch2, Operand(isolate()->factory()->one_pointer_filler_map()));

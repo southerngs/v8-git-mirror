@@ -45,7 +45,6 @@
 #include "src/objects.h"
 #include "src/parser.h"
 #include "src/smart-pointers.h"
-#include "src/snapshot.h"
 #include "src/unicode-inl.h"
 #include "src/utils.h"
 #include "src/vm-state.h"
@@ -608,7 +607,7 @@ TEST(MakingExternalUnalignedOneByteString) {
       "slice('abcdefghijklmnopqrstuvwxyz');"));
 
   // Trigger GCs so that the newly allocated string moves to old gen.
-  SimulateFullSpace(CcTest::heap()->old_pointer_space());
+  SimulateFullSpace(CcTest::heap()->old_space());
   CcTest::heap()->CollectGarbage(i::NEW_SPACE);  // in survivor space now
   CcTest::heap()->CollectGarbage(i::NEW_SPACE);  // in old gen now
 
@@ -694,28 +693,23 @@ class RandomLengthOneByteResource
 
 
 THREADED_TEST(NewExternalForVeryLongString) {
+  auto isolate = CcTest::isolate();
   {
-    LocalContext env;
-    v8::HandleScope scope(env->GetIsolate());
+    v8::HandleScope scope(isolate);
     v8::TryCatch try_catch;
     RandomLengthOneByteResource r(1 << 30);
-    v8::Local<v8::String> str = v8::String::NewExternal(CcTest::isolate(), &r);
+    v8::Local<v8::String> str = v8::String::NewExternal(isolate, &r);
     CHECK(str.IsEmpty());
-    CHECK(try_catch.HasCaught());
-    String::Utf8Value exception_value(try_catch.Exception());
-    CHECK_EQ(0, strcmp("RangeError: Invalid string length", *exception_value));
+    CHECK(!try_catch.HasCaught());
   }
 
   {
-    LocalContext env;
-    v8::HandleScope scope(env->GetIsolate());
+    v8::HandleScope scope(isolate);
     v8::TryCatch try_catch;
     RandomLengthResource r(1 << 30);
-    v8::Local<v8::String> str = v8::String::NewExternal(CcTest::isolate(), &r);
+    v8::Local<v8::String> str = v8::String::NewExternal(isolate, &r);
     CHECK(str.IsEmpty());
-    CHECK(try_catch.HasCaught());
-    String::Utf8Value exception_value(try_catch.Exception());
-    CHECK_EQ(0, strcmp("RangeError: Invalid string length", *exception_value));
+    CHECK(!try_catch.HasCaught());
   }
 }
 
@@ -733,11 +727,10 @@ THREADED_TEST(ScavengeExternalString) {
     i::Handle<i::String> istring = v8::Utils::OpenHandle(*string);
     CcTest::heap()->CollectGarbage(i::NEW_SPACE);
     in_new_space = CcTest::heap()->InNewSpace(*istring);
-    CHECK(in_new_space || CcTest::heap()->old_data_space()->Contains(*istring));
+    CHECK(in_new_space || CcTest::heap()->old_space()->Contains(*istring));
     CHECK_EQ(0, dispose_count);
   }
-  CcTest::heap()->CollectGarbage(
-      in_new_space ? i::NEW_SPACE : i::OLD_DATA_SPACE);
+  CcTest::heap()->CollectGarbage(in_new_space ? i::NEW_SPACE : i::OLD_SPACE);
   CHECK_EQ(1, dispose_count);
 }
 
@@ -756,11 +749,10 @@ THREADED_TEST(ScavengeExternalOneByteString) {
     i::Handle<i::String> istring = v8::Utils::OpenHandle(*string);
     CcTest::heap()->CollectGarbage(i::NEW_SPACE);
     in_new_space = CcTest::heap()->InNewSpace(*istring);
-    CHECK(in_new_space || CcTest::heap()->old_data_space()->Contains(*istring));
+    CHECK(in_new_space || CcTest::heap()->old_space()->Contains(*istring));
     CHECK_EQ(0, dispose_count);
   }
-  CcTest::heap()->CollectGarbage(
-      in_new_space ? i::NEW_SPACE : i::OLD_DATA_SPACE);
+  CcTest::heap()->CollectGarbage(in_new_space ? i::NEW_SPACE : i::OLD_SPACE);
   CHECK_EQ(1, dispose_count);
 }
 
@@ -3104,6 +3096,123 @@ THREADED_TEST(Global) {
 }
 
 
+namespace {
+
+class TwoPassCallbackData;
+void FirstPassCallback(const v8::WeakCallbackInfo<TwoPassCallbackData>& data);
+void SecondPassCallback(const v8::WeakCallbackInfo<TwoPassCallbackData>& data);
+
+
+class TwoPassCallbackData {
+ public:
+  TwoPassCallbackData(v8::Isolate* isolate, int* instance_counter)
+      : first_pass_called_(false),
+        second_pass_called_(false),
+        trigger_gc_(false),
+        instance_counter_(instance_counter) {
+    HandleScope scope(isolate);
+    i::ScopedVector<char> buffer(40);
+    i::SNPrintF(buffer, "%p", static_cast<void*>(this));
+    auto string =
+        v8::String::NewFromUtf8(isolate, buffer.start(),
+                                v8::NewStringType::kNormal).ToLocalChecked();
+    cell_.Reset(isolate, string);
+    (*instance_counter_)++;
+  }
+
+  ~TwoPassCallbackData() {
+    CHECK(first_pass_called_);
+    CHECK(second_pass_called_);
+    CHECK(cell_.IsEmpty());
+    (*instance_counter_)--;
+  }
+
+  void FirstPass() {
+    CHECK(!first_pass_called_);
+    CHECK(!second_pass_called_);
+    CHECK(!cell_.IsEmpty());
+    cell_.Reset();
+    first_pass_called_ = true;
+  }
+
+  void SecondPass() {
+    CHECK(first_pass_called_);
+    CHECK(!second_pass_called_);
+    CHECK(cell_.IsEmpty());
+    second_pass_called_ = true;
+    delete this;
+  }
+
+  void SetWeak() {
+    cell_.SetWeak(this, FirstPassCallback, v8::WeakCallbackType::kParameter);
+  }
+
+  void MarkTriggerGc() { trigger_gc_ = true; }
+  bool trigger_gc() { return trigger_gc_; }
+
+  int* instance_counter() { return instance_counter_; }
+
+ private:
+  bool first_pass_called_;
+  bool second_pass_called_;
+  bool trigger_gc_;
+  v8::Global<v8::String> cell_;
+  int* instance_counter_;
+};
+
+
+void SecondPassCallback(const v8::WeakCallbackInfo<TwoPassCallbackData>& data) {
+  ApiTestFuzzer::Fuzz();
+  bool trigger_gc = data.GetParameter()->trigger_gc();
+  int* instance_counter = data.GetParameter()->instance_counter();
+  data.GetParameter()->SecondPass();
+  if (!trigger_gc) return;
+  auto data_2 = new TwoPassCallbackData(data.GetIsolate(), instance_counter);
+  data_2->SetWeak();
+  CcTest::heap()->CollectAllGarbage(i::Heap::kAbortIncrementalMarkingMask);
+}
+
+
+void FirstPassCallback(const v8::WeakCallbackInfo<TwoPassCallbackData>& data) {
+  data.GetParameter()->FirstPass();
+  data.SetSecondPassCallback(SecondPassCallback);
+}
+
+}  // namespace
+
+
+TEST(TwoPassPhantomCallbacks) {
+  auto isolate = CcTest::isolate();
+  const size_t kLength = 20;
+  int instance_counter = 0;
+  for (size_t i = 0; i < kLength; ++i) {
+    auto data = new TwoPassCallbackData(isolate, &instance_counter);
+    data->SetWeak();
+  }
+  CHECK_EQ(static_cast<int>(kLength), instance_counter);
+  CcTest::heap()->CollectAllGarbage(i::Heap::kAbortIncrementalMarkingMask);
+  CHECK_EQ(0, instance_counter);
+}
+
+
+TEST(TwoPassPhantomCallbacksNestedGc) {
+  auto isolate = CcTest::isolate();
+  const size_t kLength = 20;
+  TwoPassCallbackData* array[kLength];
+  int instance_counter = 0;
+  for (size_t i = 0; i < kLength; ++i) {
+    array[i] = new TwoPassCallbackData(isolate, &instance_counter);
+    array[i]->SetWeak();
+  }
+  array[5]->MarkTriggerGc();
+  array[10]->MarkTriggerGc();
+  array[15]->MarkTriggerGc();
+  CHECK_EQ(static_cast<int>(kLength), instance_counter);
+  CcTest::heap()->CollectAllGarbage(i::Heap::kAbortIncrementalMarkingMask);
+  CHECK_EQ(0, instance_counter);
+}
+
+
 template <typename K, typename V>
 class WeakStdMapTraits : public v8::StdMapTraits<K, V> {
  public:
@@ -3195,6 +3304,126 @@ TEST(PersistentValueMap) {
                                  WeakStdMapTraits<int, v8::Object>>
       WeakPersistentValueMap;
   TestPersistentValueMap<WeakPersistentValueMap>();
+}
+
+
+namespace {
+
+void* IntKeyToVoidPointer(int key) { return reinterpret_cast<void*>(key << 1); }
+
+
+Local<v8::Object> NewObjectForIntKey(
+    v8::Isolate* isolate, const v8::Global<v8::ObjectTemplate>& templ,
+    int key) {
+  auto local = Local<v8::ObjectTemplate>::New(isolate, templ);
+  auto obj = local->NewInstance();
+  obj->SetAlignedPointerInInternalField(0, IntKeyToVoidPointer(key));
+  return obj;
+}
+
+
+template <typename K, typename V>
+class PhantomStdMapTraits : public v8::StdMapTraits<K, V> {
+ public:
+  typedef typename v8::GlobalValueMap<K, V, PhantomStdMapTraits<K, V>> MapType;
+  static const v8::PersistentContainerCallbackType kCallbackType =
+      v8::kWeakWithInternalFields;
+  struct WeakCallbackDataType {
+    MapType* map;
+    K key;
+  };
+  static WeakCallbackDataType* WeakCallbackParameter(MapType* map, const K& key,
+                                                     Local<V> value) {
+    WeakCallbackDataType* data = new WeakCallbackDataType;
+    data->map = map;
+    data->key = key;
+    return data;
+  }
+  static MapType* MapFromWeakCallbackInfo(
+      const v8::WeakCallbackInfo<WeakCallbackDataType>& data) {
+    return data.GetParameter()->map;
+  }
+  static K KeyFromWeakCallbackInfo(
+      const v8::WeakCallbackInfo<WeakCallbackDataType>& data) {
+    return data.GetParameter()->key;
+  }
+  static void DisposeCallbackData(WeakCallbackDataType* data) { delete data; }
+  static void Dispose(v8::Isolate* isolate, v8::Global<V> value, K key) {
+    CHECK_EQ(IntKeyToVoidPointer(key),
+             v8::Object::GetAlignedPointerFromInternalField(value, 0));
+  }
+  static void DisposeWeak(
+      const v8::WeakCallbackInfo<WeakCallbackDataType>& info) {
+    K key = KeyFromWeakCallbackInfo(info);
+    CHECK_EQ(IntKeyToVoidPointer(key), info.GetInternalField(0));
+    DisposeCallbackData(info.GetParameter());
+  }
+};
+
+}  // namespace
+
+
+TEST(GlobalValueMap) {
+  typedef v8::GlobalValueMap<int, v8::Object,
+                             PhantomStdMapTraits<int, v8::Object>> Map;
+  LocalContext env;
+  v8::Isolate* isolate = env->GetIsolate();
+  v8::Global<ObjectTemplate> templ;
+  {
+    HandleScope scope(isolate);
+    auto t = ObjectTemplate::New(isolate);
+    t->SetInternalFieldCount(1);
+    templ.Reset(isolate, t);
+  }
+  Map map(isolate);
+  v8::internal::GlobalHandles* global_handles =
+      reinterpret_cast<v8::internal::Isolate*>(isolate)->global_handles();
+  int initial_handle_count = global_handles->global_handles_count();
+  CHECK_EQ(0, static_cast<int>(map.Size()));
+  {
+    HandleScope scope(isolate);
+    Local<v8::Object> obj = map.Get(7);
+    CHECK(obj.IsEmpty());
+    Local<v8::Object> expected = v8::Object::New(isolate);
+    map.Set(7, expected);
+    CHECK_EQ(1, static_cast<int>(map.Size()));
+    obj = map.Get(7);
+    CHECK(expected->Equals(obj));
+    {
+      Map::PersistentValueReference ref = map.GetReference(7);
+      CHECK(expected->Equals(ref.NewLocal(isolate)));
+    }
+    v8::Global<v8::Object> removed = map.Remove(7);
+    CHECK_EQ(0, static_cast<int>(map.Size()));
+    CHECK(expected == removed);
+    removed = map.Remove(7);
+    CHECK(removed.IsEmpty());
+    map.Set(8, expected);
+    CHECK_EQ(1, static_cast<int>(map.Size()));
+    map.Set(8, expected);
+    CHECK_EQ(1, static_cast<int>(map.Size()));
+    {
+      Map::PersistentValueReference ref;
+      Local<v8::Object> expected2 = NewObjectForIntKey(isolate, templ, 8);
+      removed = map.Set(8, v8::Global<v8::Object>(isolate, expected2), &ref);
+      CHECK_EQ(1, static_cast<int>(map.Size()));
+      CHECK(expected == removed);
+      CHECK(expected2->Equals(ref.NewLocal(isolate)));
+    }
+  }
+  CHECK_EQ(initial_handle_count + 1, global_handles->global_handles_count());
+  CcTest::i_isolate()->heap()->CollectAllGarbage(
+      i::Heap::kAbortIncrementalMarkingMask);
+  CHECK_EQ(0, static_cast<int>(map.Size()));
+  CHECK_EQ(initial_handle_count, global_handles->global_handles_count());
+  {
+    HandleScope scope(isolate);
+    Local<v8::Object> value = NewObjectForIntKey(isolate, templ, 9);
+    map.Set(9, value);
+    map.Clear();
+  }
+  CHECK_EQ(0, static_cast<int>(map.Size()));
+  CHECK_EQ(initial_handle_count, global_handles->global_handles_count());
 }
 
 
@@ -5083,7 +5312,7 @@ void TryCatchMixedNestingCheck(v8::TryCatch* try_catch) {
   CHECK_EQ(0,
            strcmp(*v8::String::Utf8Value(message->Get()), "Uncaught Error: a"));
   CHECK_EQ(1, message->GetLineNumber());
-  CHECK_EQ(6, message->GetStartColumn());
+  CHECK_EQ(0, message->GetStartColumn());
 }
 
 
@@ -6268,12 +6497,13 @@ THREADED_TEST(ErrorWithMissingScriptInfo) {
 
 struct FlagAndPersistent {
   bool flag;
-  v8::Persistent<v8::Object> handle;
+  v8::Global<v8::Object> handle;
 };
 
 
 static void SetFlag(const v8::WeakCallbackInfo<FlagAndPersistent>& data) {
   data.GetParameter()->flag = true;
+  data.GetParameter()->handle.Reset();
 }
 
 
@@ -8620,6 +8850,32 @@ TEST(SuperAccessControl) {
 }
 
 
+TEST(Regress470113) {
+  i::FLAG_harmony_classes = true;
+  i::FLAG_harmony_object_literals = true;
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope handle_scope(isolate);
+  v8::Handle<v8::ObjectTemplate> obj_template =
+      v8::ObjectTemplate::New(isolate);
+  obj_template->SetAccessCheckCallbacks(AccessAlwaysBlocked, NULL);
+  LocalContext env;
+  env->Global()->Set(v8_str("prohibited"), obj_template->NewInstance());
+
+  {
+    v8::TryCatch try_catch;
+    CompileRun(
+        "'use strict';\n"
+        "class C extends Object {\n"
+        "   m() { super.powned = 'Powned!'; }\n"
+        "}\n"
+        "let c = new C();\n"
+        "c.m.call(prohibited)");
+
+    CHECK(try_catch.HasCaught());
+  }
+}
+
+
 static void ConstTenGetter(Local<String> name,
                            const v8::PropertyCallbackInfo<v8::Value>& info) {
   info.GetReturnValue().Set(v8_num(10));
@@ -9905,7 +10161,11 @@ THREADED_TEST(CallAsFunction) {
     CHECK(try_catch.HasCaught());
     String::Utf8Value exception_value1(try_catch.Exception());
     // TODO(verwaest): Better message
-    CHECK_EQ(0, strcmp("TypeError: obj2 is not a function", *exception_value1));
+    // TODO(3995): Our compilers disagree about the position (and message).
+    if (!i::FLAG_always_opt) {
+      CHECK_EQ(0,
+               strcmp("TypeError: obj2 is not a function", *exception_value1));
+    }
     try_catch.Reset();
 
     // Call an object without call-as-function handler through the API
@@ -10461,8 +10721,11 @@ THREADED_PROFILED_TEST(InterceptorCallICFastApi_SimpleSignature_Miss3) {
       "}");
   CHECK(try_catch.HasCaught());
   // TODO(verwaest): Adjust message.
-  CHECK(v8_str("TypeError: receiver.method is not a function")
-            ->Equals(try_catch.Exception()->ToString(isolate)));
+  // TODO(3995): Our compilers disagree about the position (and message).
+  if (!i::FLAG_always_opt) {
+    CHECK(v8_str("TypeError: receiver.method is not a function")
+              ->Equals(try_catch.Exception()->ToString(isolate)));
+  }
   CHECK_EQ(42, context->Global()->Get(v8_str("saved_result"))->Int32Value());
   CHECK_GE(interceptor_call_count, 50);
 }
@@ -10636,8 +10899,11 @@ THREADED_PROFILED_TEST(CallICFastApi_SimpleSignature_Miss2) {
       "}");
   CHECK(try_catch.HasCaught());
   // TODO(verwaest): Adjust message.
-  CHECK(v8_str("TypeError: receiver.method is not a function")
-            ->Equals(try_catch.Exception()->ToString(isolate)));
+  // TODO(3995): Our compilers disagree about the position (and message).
+  if (!i::FLAG_always_opt) {
+    CHECK(v8_str("TypeError: receiver.method is not a function")
+              ->Equals(try_catch.Exception()->ToString(isolate)));
+  }
   CHECK_EQ(42, context->Global()->Get(v8_str("saved_result"))->Int32Value());
 }
 
@@ -14734,11 +15000,9 @@ void AnalyzeStackInNativeCode(const v8::FunctionCallbackInfo<v8::Value>& args) {
     checkStackFrame(origin, "foo", 6, 3, false, false,
                     stackTrace->GetFrame(1));
     // This is the source string inside the eval which has the call to foo.
-    checkStackFrame(NULL, "", 1, 5, false, false,
-                    stackTrace->GetFrame(2));
+    checkStackFrame(NULL, "", 1, 1, false, false, stackTrace->GetFrame(2));
     // The last frame is an anonymous function which has the initial eval call.
-    checkStackFrame(origin, "", 8, 7, false, false,
-                    stackTrace->GetFrame(3));
+    checkStackFrame(origin, "", 8, 7, false, false, stackTrace->GetFrame(3));
 
     CHECK(stackTrace->AsArray()->IsArray());
   } else if (testGroup == kDetailedTest) {
@@ -14751,11 +15015,9 @@ void AnalyzeStackInNativeCode(const v8::FunctionCallbackInfo<v8::Value>& args) {
                     stackTrace->GetFrame(1));
     bool is_eval = true;
     // This is the source string inside the eval which has the call to baz.
-    checkStackFrame(NULL, "", 1, 5, is_eval, false,
-                    stackTrace->GetFrame(2));
+    checkStackFrame(NULL, "", 1, 1, is_eval, false, stackTrace->GetFrame(2));
     // The last frame is an anonymous function which has the initial eval call.
-    checkStackFrame(origin, "", 10, 1, false, false,
-                    stackTrace->GetFrame(3));
+    checkStackFrame(origin, "", 10, 1, false, false, stackTrace->GetFrame(3));
 
     CHECK(stackTrace->AsArray()->IsArray());
   }
@@ -15560,7 +15822,7 @@ void AnalyzeStackOfInlineScriptWithSourceURL(
   v8::Handle<v8::StackTrace> stackTrace = v8::StackTrace::CurrentStackTrace(
       args.GetIsolate(), 10, v8::StackTrace::kDetailed);
   CHECK_EQ(4, stackTrace->GetFrameCount());
-  v8::Handle<v8::String> url = v8_str("url");
+  v8::Handle<v8::String> url = v8_str("source_url");
   for (int i = 0; i < 3; i++) {
     v8::Handle<v8::String> name =
         stackTrace->GetFrame(i)->GetScriptNameOrSourceURL();
@@ -15727,30 +15989,10 @@ static void CreateGarbageInOldSpace() {
 }
 
 
-// Test that idle notification can be handled and eventually returns true.
-TEST(IdleNotification) {
-  const intptr_t MB = 1024 * 1024;
-  const int IdlePauseInMs = 1000;
-  LocalContext env;
-  v8::HandleScope scope(env->GetIsolate());
-  intptr_t initial_size = CcTest::heap()->SizeOfObjects();
-  CreateGarbageInOldSpace();
-  intptr_t size_with_garbage = CcTest::heap()->SizeOfObjects();
-  CHECK_GT(size_with_garbage, initial_size + MB);
-  bool finished = false;
-  for (int i = 0; i < 200 && !finished; i++) {
-    finished = env->GetIsolate()->IdleNotification(IdlePauseInMs);
-  }
-  intptr_t final_size = CcTest::heap()->SizeOfObjects();
-  CHECK(finished);
-  CHECK_LT(final_size, initial_size + 1);
-}
-
-
 // Test that idle notification can be handled and eventually collects garbage.
-TEST(IdleNotificationWithSmallHint) {
+TEST(TestIdleNotification) {
   const intptr_t MB = 1024 * 1024;
-  const int IdlePauseInMs = 900;
+  const double IdlePauseInSeconds = 1.0;
   LocalContext env;
   v8::HandleScope scope(env->GetIsolate());
   intptr_t initial_size = CcTest::heap()->SizeOfObjects();
@@ -15759,27 +16001,10 @@ TEST(IdleNotificationWithSmallHint) {
   CHECK_GT(size_with_garbage, initial_size + MB);
   bool finished = false;
   for (int i = 0; i < 200 && !finished; i++) {
-    finished = env->GetIsolate()->IdleNotification(IdlePauseInMs);
-  }
-  intptr_t final_size = CcTest::heap()->SizeOfObjects();
-  CHECK(finished);
-  CHECK_LT(final_size, initial_size + 1);
-}
-
-
-// Test that idle notification can be handled and eventually collects garbage.
-TEST(IdleNotificationWithLargeHint) {
-  const intptr_t MB = 1024 * 1024;
-  const int IdlePauseInMs = 900;
-  LocalContext env;
-  v8::HandleScope scope(env->GetIsolate());
-  intptr_t initial_size = CcTest::heap()->SizeOfObjects();
-  CreateGarbageInOldSpace();
-  intptr_t size_with_garbage = CcTest::heap()->SizeOfObjects();
-  CHECK_GT(size_with_garbage, initial_size + MB);
-  bool finished = false;
-  for (int i = 0; i < 200 && !finished; i++) {
-    finished = env->GetIsolate()->IdleNotification(IdlePauseInMs);
+    finished = env->GetIsolate()->IdleNotificationDeadline(
+        (v8::base::TimeTicks::HighResolutionNow().ToInternalValue() /
+         static_cast<double>(v8::base::Time::kMicrosecondsPerSecond)) +
+        IdlePauseInSeconds);
   }
   intptr_t final_size = CcTest::heap()->SizeOfObjects();
   CHECK(finished);
@@ -15923,8 +16148,7 @@ TEST(ExternalizeOldSpaceTwoByteCons) {
       CompileRun("'Romeo Montague ' + 'Juliet Capulet'")->ToString(isolate);
   CHECK(v8::Utils::OpenHandle(*cons)->IsConsString());
   CcTest::heap()->CollectAllAvailableGarbage();
-  CHECK(CcTest::heap()->old_pointer_space()->Contains(
-            *v8::Utils::OpenHandle(*cons)));
+  CHECK(CcTest::heap()->old_space()->Contains(*v8::Utils::OpenHandle(*cons)));
 
   TestResource* resource = new TestResource(
       AsciiToTwoByteString("Romeo Montague Juliet Capulet"));
@@ -15946,8 +16170,7 @@ TEST(ExternalizeOldSpaceOneByteCons) {
       CompileRun("'Romeo Montague ' + 'Juliet Capulet'")->ToString(isolate);
   CHECK(v8::Utils::OpenHandle(*cons)->IsConsString());
   CcTest::heap()->CollectAllAvailableGarbage();
-  CHECK(CcTest::heap()->old_pointer_space()->Contains(
-            *v8::Utils::OpenHandle(*cons)));
+  CHECK(CcTest::heap()->old_space()->Contains(*v8::Utils::OpenHandle(*cons)));
 
   TestOneByteResource* resource =
       new TestOneByteResource(i::StrDup("Romeo Montague Juliet Capulet"));
@@ -20023,6 +20246,26 @@ class RequestMultipleInterrupts : public RequestInterruptTestBase {
 TEST(RequestMultipleInterrupts) { RequestMultipleInterrupts().RunTest(); }
 
 
+static bool interrupt_was_called = false;
+
+
+void SmallScriptsInterruptCallback(v8::Isolate* isolate, void* data) {
+  interrupt_was_called = true;
+}
+
+
+TEST(RequestInterruptSmallScripts) {
+  LocalContext env;
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+
+  interrupt_was_called = false;
+  isolate->RequestInterrupt(&SmallScriptsInterruptCallback, NULL);
+  CompileRun("(function(x){return x;})(1);");
+  CHECK(interrupt_was_called);
+}
+
+
 static Local<Value> function_new_expected_env;
 static void FunctionNewCallback(const v8::FunctionCallbackInfo<Value>& info) {
   CHECK(function_new_expected_env->Equals(info.Data()));
@@ -21508,6 +21751,7 @@ TEST(TurboAsmDisablesNeuter) {
       "Module(this, {}, buffer).load();"
       "buffer";
 
+  i::FLAG_turbo_osr = false;  // TODO(titzer): test requires eager TF.
   v8::Local<v8::ArrayBuffer> result = CompileRun(load).As<v8::ArrayBuffer>();
   CHECK_EQ(should_be_neuterable, result->IsNeuterable());
 
@@ -21522,6 +21766,7 @@ TEST(TurboAsmDisablesNeuter) {
       "Module(this, {}, buffer).store();"
       "buffer";
 
+  i::FLAG_turbo_osr = false;  // TODO(titzer): test requires eager TF.
   result = CompileRun(store).As<v8::ArrayBuffer>();
   CHECK_EQ(should_be_neuterable, result->IsNeuterable());
 }
@@ -21618,7 +21863,6 @@ TEST(StreamingScriptWithSourceMappingURLInTheMiddle) {
 TEST(NewStringRangeError) {
   v8::Isolate* isolate = CcTest::isolate();
   v8::HandleScope handle_scope(isolate);
-  LocalContext env;
   const int length = i::String::kMaxLength + 1;
   const int buffer_size = length * sizeof(uint16_t);
   void* buffer = malloc(buffer_size);
@@ -21629,21 +21873,53 @@ TEST(NewStringRangeError) {
     char* data = reinterpret_cast<char*>(buffer);
     CHECK(v8::String::NewFromUtf8(isolate, data, v8::String::kNormalString,
                                   length).IsEmpty());
-    CHECK(try_catch.HasCaught());
+    CHECK(!try_catch.HasCaught());
   }
   {
     v8::TryCatch try_catch;
     uint8_t* data = reinterpret_cast<uint8_t*>(buffer);
     CHECK(v8::String::NewFromOneByte(isolate, data, v8::String::kNormalString,
                                      length).IsEmpty());
-    CHECK(try_catch.HasCaught());
+    CHECK(!try_catch.HasCaught());
   }
   {
     v8::TryCatch try_catch;
     uint16_t* data = reinterpret_cast<uint16_t*>(buffer);
     CHECK(v8::String::NewFromTwoByte(isolate, data, v8::String::kNormalString,
                                      length).IsEmpty());
-    CHECK(try_catch.HasCaught());
+    CHECK(!try_catch.HasCaught());
   }
   free(buffer);
+}
+
+
+TEST(SealHandleScope) {
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope handle_scope(isolate);
+  LocalContext env;
+
+  v8::SealHandleScope seal(isolate);
+
+  // Should fail
+  v8::Local<v8::Object> obj = v8::Object::New(isolate);
+
+  USE(obj);
+}
+
+
+TEST(SealHandleScopeNested) {
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope handle_scope(isolate);
+  LocalContext env;
+
+  v8::SealHandleScope seal(isolate);
+
+  {
+    v8::HandleScope handle_scope(isolate);
+
+    // Should work
+    v8::Local<v8::Object> obj = v8::Object::New(isolate);
+
+    USE(obj);
+  }
 }

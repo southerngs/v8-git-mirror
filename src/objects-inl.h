@@ -755,6 +755,14 @@ bool Object::IsDeoptimizationOutputData() const {
 }
 
 
+bool Object::IsHandlerTable() const {
+  if (!IsFixedArray()) return false;
+  // There's actually no way to see the difference between a fixed array and
+  // a handler table array.
+  return true;
+}
+
+
 bool Object::IsDependentCode() const {
   if (!IsFixedArray()) return false;
   // There's actually no way to see the difference between a fixed array and
@@ -1888,28 +1896,9 @@ void Oddball::set_kind(byte value) {
 }
 
 
-Object* Cell::value() const {
-  return READ_FIELD(this, kValueOffset);
-}
-
-
-void Cell::set_value(Object* val, WriteBarrierMode ignored) {
-  // The write barrier is not used for global property cells.
-  DCHECK(!val->IsPropertyCell() && !val->IsCell());
-  WRITE_FIELD(this, kValueOffset, val);
-}
-
+ACCESSORS(Cell, value, Object, kValueOffset)
 ACCESSORS(PropertyCell, dependent_code, DependentCode, kDependentCodeOffset)
-
-Object* PropertyCell::type_raw() const {
-  return READ_FIELD(this, kTypeOffset);
-}
-
-
-void PropertyCell::set_type_raw(Object* val, WriteBarrierMode ignored) {
-  WRITE_FIELD(this, kTypeOffset, val);
-}
-
+ACCESSORS(PropertyCell, value, Object, kValueOffset)
 
 Object* WeakCell::value() const { return READ_FIELD(this, kValueOffset); }
 
@@ -2358,6 +2347,7 @@ void FixedDoubleArray::FillWithHoles(int from, int to) {
 Object* WeakFixedArray::Get(int index) const {
   Object* raw = FixedArray::cast(this)->get(index + kFirstIndex);
   if (raw->IsSmi()) return raw;
+  DCHECK(raw->IsWeakCell());
   return WeakCell::cast(raw)->value();
 }
 
@@ -3158,7 +3148,7 @@ HeapType* DescriptorArray::GetFieldType(int descriptor_number) {
   DCHECK(GetDetails(descriptor_number).location() == kField);
   Object* value = GetValue(descriptor_number);
   if (value->IsWeakCell()) {
-    if (WeakCell::cast(value)->cleared()) return HeapType::Any();
+    if (WeakCell::cast(value)->cleared()) return HeapType::None();
     value = WeakCell::cast(value)->value();
   }
   return HeapType::cast(value);
@@ -3350,6 +3340,7 @@ CAST_ACCESSOR(FixedDoubleArray)
 CAST_ACCESSOR(FixedTypedArrayBase)
 CAST_ACCESSOR(Foreign)
 CAST_ACCESSOR(GlobalObject)
+CAST_ACCESSOR(HandlerTable)
 CAST_ACCESSOR(HeapObject)
 CAST_ACCESSOR(JSArray)
 CAST_ACCESSOR(JSArrayBuffer)
@@ -4224,7 +4215,7 @@ void* FixedTypedArrayBase::DataPtr() {
 }
 
 
-int FixedTypedArrayBase::DataSize(InstanceType type) {
+int FixedTypedArrayBase::ElementSize(InstanceType type) {
   int element_size;
   switch (type) {
 #define TYPED_ARRAY_CASE(Type, type, TYPE, ctype, size)                       \
@@ -4238,7 +4229,12 @@ int FixedTypedArrayBase::DataSize(InstanceType type) {
       UNREACHABLE();
       return 0;
   }
-  return length() * element_size;
+  return element_size;
+}
+
+
+int FixedTypedArrayBase::DataSize(InstanceType type) {
+  return length() * ElementSize(type);
 }
 
 
@@ -4254,6 +4250,11 @@ int FixedTypedArrayBase::size() {
 
 int FixedTypedArrayBase::TypedArraySize(InstanceType type) {
   return OBJECT_POINTER_ALIGN(kDataOffset + DataSize(type));
+}
+
+
+int FixedTypedArrayBase::TypedArraySize(InstanceType type, int length) {
+  return OBJECT_POINTER_ALIGN(kDataOffset + length * ElementSize(type));
 }
 
 
@@ -4573,9 +4574,7 @@ void Map::set_unused_property_fields(int value) {
 }
 
 
-byte Map::bit_field() {
-  return READ_BYTE_FIELD(this, kBitFieldOffset);
-}
+byte Map::bit_field() const { return READ_BYTE_FIELD(this, kBitFieldOffset); }
 
 
 void Map::set_bit_field(byte value) {
@@ -4583,9 +4582,7 @@ void Map::set_bit_field(byte value) {
 }
 
 
-byte Map::bit_field2() {
-  return READ_BYTE_FIELD(this, kBitField2Offset);
-}
+byte Map::bit_field2() const { return READ_BYTE_FIELD(this, kBitField2Offset); }
 
 
 void Map::set_bit_field2(byte value) {
@@ -4648,7 +4645,7 @@ void Map::set_is_prototype_map(bool value) {
   set_bit_field2(IsPrototypeMapBits::update(bit_field2(), value));
 }
 
-bool Map::is_prototype_map() {
+bool Map::is_prototype_map() const {
   return IsPrototypeMapBits::decode(bit_field2());
 }
 
@@ -5342,7 +5339,7 @@ void Map::set_bit_field3(uint32_t bits) {
 }
 
 
-uint32_t Map::bit_field3() {
+uint32_t Map::bit_field3() const {
   return READ_UINT32_FIELD(this, kBitField3Offset);
 }
 
@@ -5384,7 +5381,21 @@ Map* Map::ElementsTransitionMap() {
 }
 
 
-ACCESSORS(Map, raw_transitions, Object, kTransitionsOffset)
+ACCESSORS(Map, raw_transitions, Object, kTransitionsOrPrototypeInfoOffset)
+
+
+Object* Map::prototype_info() const {
+  DCHECK(is_prototype_map());
+  return READ_FIELD(this, Map::kTransitionsOrPrototypeInfoOffset);
+}
+
+
+void Map::set_prototype_info(Object* value, WriteBarrierMode mode) {
+  DCHECK(is_prototype_map());
+  WRITE_FIELD(this, Map::kTransitionsOrPrototypeInfoOffset, value);
+  CONDITIONAL_WRITE_BARRIER(
+      GetHeap(), this, Map::kTransitionsOrPrototypeInfoOffset, value, mode);
+}
 
 
 void Map::SetBackPointer(Object* value, WriteBarrierMode mode) {
@@ -5444,6 +5455,9 @@ ACCESSORS(ExecutableAccessorInfo, data, Object, kDataOffset)
 
 ACCESSORS(Box, value, Object, kValueOffset)
 
+ACCESSORS(PrototypeInfo, prototype_users, Object, kPrototypeUsersOffset)
+ACCESSORS(PrototypeInfo, validity_cell, Object, kValidityCellOffset)
+
 ACCESSORS(AccessorPair, getter, Object, kGetterOffset)
 ACCESSORS(AccessorPair, setter, Object, kSetterOffset)
 
@@ -5461,6 +5475,7 @@ SMI_ACCESSORS(InterceptorInfo, flags, kFlagsOffset)
 BOOL_ACCESSORS(InterceptorInfo, flags, can_intercept_symbols,
                kCanInterceptSymbolsBit)
 BOOL_ACCESSORS(InterceptorInfo, flags, all_can_read, kAllCanReadBit)
+BOOL_ACCESSORS(InterceptorInfo, flags, non_masking, kNonMasking)
 
 ACCESSORS(CallHandlerInfo, callback, Object, kCallbackOffset)
 ACCESSORS(CallHandlerInfo, data, Object, kDataOffset)
@@ -5581,6 +5596,8 @@ BOOL_ACCESSORS(FunctionTemplateInfo, flag, remove_prototype,
 BOOL_ACCESSORS(FunctionTemplateInfo, flag, do_not_cache,
                kDoNotCacheBit)
 BOOL_ACCESSORS(FunctionTemplateInfo, flag, instantiated, kInstantiatedBit)
+BOOL_ACCESSORS(FunctionTemplateInfo, flag, accept_any_receiver,
+               kAcceptAnyReceiver)
 BOOL_ACCESSORS(SharedFunctionInfo, start_position_and_type, is_expression,
                kIsExpressionBit)
 BOOL_ACCESSORS(SharedFunctionInfo, start_position_and_type, is_toplevel,
@@ -5841,7 +5858,10 @@ void SharedFunctionInfo::set_scope_info(ScopeInfo* value,
 
 
 bool SharedFunctionInfo::is_compiled() {
-  return code() != GetIsolate()->builtins()->builtin(Builtins::kCompileLazy);
+  Builtins* builtins = GetIsolate()->builtins();
+  DCHECK(code() != builtins->builtin(Builtins::kCompileOptimizedConcurrent));
+  DCHECK(code() != builtins->builtin(Builtins::kCompileOptimized));
+  return code() != builtins->builtin(Builtins::kCompileLazy);
 }
 
 
@@ -6124,7 +6144,10 @@ bool JSFunction::should_have_prototype() {
 
 
 bool JSFunction::is_compiled() {
-  return code() != GetIsolate()->builtins()->builtin(Builtins::kCompileLazy);
+  Builtins* builtins = GetIsolate()->builtins();
+  return code() != builtins->builtin(Builtins::kCompileLazy) &&
+         code() != builtins->builtin(Builtins::kCompileOptimized) &&
+         code() != builtins->builtin(Builtins::kCompileOptimizedConcurrent);
 }
 
 
@@ -6236,7 +6259,6 @@ ACCESSORS(JSGeneratorObject, context, Context, kContextOffset)
 ACCESSORS(JSGeneratorObject, receiver, Object, kReceiverOffset)
 SMI_ACCESSORS(JSGeneratorObject, continuation, kContinuationOffset)
 ACCESSORS(JSGeneratorObject, operand_stack, FixedArray, kOperandStackOffset)
-SMI_ACCESSORS(JSGeneratorObject, stack_handler_index, kStackHandlerIndexOffset)
 
 bool JSGeneratorObject::is_suspended() {
   DCHECK_LT(kGeneratorExecuting, kGeneratorClosed);

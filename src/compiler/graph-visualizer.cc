@@ -27,9 +27,9 @@ namespace compiler {
 
 FILE* OpenVisualizerLogFile(CompilationInfo* info, const char* phase,
                             const char* suffix, const char* mode) {
-  EmbeddedVector<char, 256> filename;
+  EmbeddedVector<char, 256> filename(0);
   SmartArrayPointer<char> function_name;
-  if (!info->shared_info().is_null()) {
+  if (info->has_shared_info()) {
     function_name = info->shared_info()->DebugName()->ToCString();
     if (strlen(function_name.get()) > 0) {
       SNPrintF(filename, "turbo-%s", function_name.get());
@@ -593,10 +593,12 @@ void GraphC1Visualizer::PrintSchedule(const char* phase,
     if (instruction_block->code_start() >= 0) {
       int first_index = instruction_block->first_instruction_index();
       int last_index = instruction_block->last_instruction_index();
-      PrintIntProperty("first_lir_id", LifetimePosition::FromInstructionIndex(
-                                           first_index).Value());
-      PrintIntProperty("last_lir_id", LifetimePosition::FromInstructionIndex(
-                                          last_index).Value());
+      PrintIntProperty(
+          "first_lir_id",
+          LifetimePosition::GapFromInstructionIndex(first_index).Value());
+      PrintIntProperty("last_lir_id",
+                       LifetimePosition::InstructionFromInstructionIndex(
+                           last_index).Value());
     }
 
     {
@@ -706,7 +708,7 @@ void GraphC1Visualizer::PrintLiveRange(LiveRange* range, const char* type) {
     PrintIndent();
     os_ << range->id() << " " << type;
     if (range->HasRegisterAssigned()) {
-      InstructionOperand op = range->GetAssignedOperand();
+      AllocatedOperand op = AllocatedOperand::cast(range->GetAssignedOperand());
       int assigned_reg = op.index();
       if (op.IsDoubleRegister()) {
         os_ << " \"" << DoubleRegister::AllocationIndexToString(assigned_reg)
@@ -716,18 +718,21 @@ void GraphC1Visualizer::PrintLiveRange(LiveRange* range, const char* type) {
         os_ << " \"" << Register::AllocationIndexToString(assigned_reg) << "\"";
       }
     } else if (range->IsSpilled()) {
+      auto top = range->TopLevel();
       int index = -1;
-      if (range->TopLevel()->HasSpillRange()) {
+      if (top->HasSpillRange()) {
         index = kMaxInt;  // This hasn't been set yet.
+      } else if (top->GetSpillOperand()->IsConstant()) {
+        os_ << " \"const(nostack):"
+            << ConstantOperand::cast(top->GetSpillOperand())->virtual_register()
+            << "\"";
       } else {
-        index = range->TopLevel()->GetSpillOperand()->index();
-      }
-      if (range->TopLevel()->Kind() == DOUBLE_REGISTERS) {
-        os_ << " \"double_stack:" << index << "\"";
-      } else if (range->TopLevel()->Kind() == GENERAL_REGISTERS) {
-        os_ << " \"stack:" << index << "\"";
-      } else {
-        os_ << " \"const(nostack):" << index << "\"";
+        index = AllocatedOperand::cast(top->GetSpillOperand())->index();
+        if (top->Kind() == DOUBLE_REGISTERS) {
+          os_ << " \"double_stack:" << index << "\"";
+        } else if (top->Kind() == GENERAL_REGISTERS) {
+          os_ << " \"stack:" << index << "\"";
+        }
       }
     }
     int parent_index = -1;

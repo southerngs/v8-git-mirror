@@ -72,10 +72,12 @@ VariableProxy::VariableProxy(Zone* zone, Variable* var, int start_position,
 }
 
 
-VariableProxy::VariableProxy(Zone* zone, const AstRawString* name, bool is_this,
-                             int start_position, int end_position)
+VariableProxy::VariableProxy(Zone* zone, const AstRawString* name,
+                             Variable::Kind variable_kind, int start_position,
+                             int end_position)
     : Expression(zone, start_position),
-      bit_field_(IsThisField::encode(is_this) | IsAssignedField::encode(false) |
+      bit_field_(IsThisField::encode(variable_kind == Variable::THIS) |
+                 IsAssignedField::encode(false) |
                  IsResolvedField::encode(false)),
       variable_feedback_slot_(FeedbackVectorICSlot::Invalid()),
       raw_name_(name),
@@ -366,6 +368,7 @@ void ObjectLiteral::BuildConstantProperties(Isolate* isolate) {
   constant_properties_ = constant_properties;
   fast_elements_ =
       (max_element_index <= 32) || ((2 * elements) >= max_element_index);
+  has_elements_ = elements > 0;
   set_is_simple(is_simple);
   set_depth(depth_acc);
 }
@@ -619,25 +622,6 @@ Call::CallType Call::GetCallType(Isolate* isolate) const {
 
   Property* property = expression()->AsProperty();
   return property != NULL ? PROPERTY_CALL : OTHER_CALL;
-}
-
-
-bool Call::ComputeGlobalTarget(Handle<GlobalObject> global,
-                               LookupIterator* it) {
-  target_ = Handle<JSFunction>::null();
-  cell_ = Handle<Cell>::null();
-  DCHECK(it->IsFound() && it->GetHolder<JSObject>().is_identical_to(global));
-  cell_ = it->GetPropertyCell();
-  if (cell_->value()->IsJSFunction()) {
-    Handle<JSFunction> candidate(JSFunction::cast(cell_->value()));
-    // If the function is in new space we assume it's more likely to
-    // change and thus prefer the general IC code.
-    if (!it->isolate()->heap()->InNewSpace(*candidate)) {
-      target_ = candidate;
-      return true;
-    }
-  }
-  return false;
 }
 
 
@@ -1020,7 +1004,7 @@ uint32_t Literal::Hash() {
 bool Literal::Match(void* literal1, void* literal2) {
   const AstValue* x = static_cast<Literal*>(literal1)->raw_value();
   const AstValue* y = static_cast<Literal*>(literal2)->raw_value();
-  return (x->IsString() && y->IsString() && *x->AsString() == *y->AsString()) ||
+  return (x->IsString() && y->IsString() && x->AsString() == y->AsString()) ||
          (x->IsNumber() && y->IsNumber() && x->AsNumber() == y->AsNumber());
 }
 

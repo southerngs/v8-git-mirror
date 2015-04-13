@@ -1221,6 +1221,28 @@ RUNTIME_FUNCTION(Runtime_NewString) {
 }
 
 
+RUNTIME_FUNCTION(Runtime_NewConsString) {
+  HandleScope scope(isolate);
+  DCHECK(args.length() == 4);
+  CONVERT_INT32_ARG_CHECKED(length, 0);
+  CONVERT_BOOLEAN_ARG_CHECKED(is_one_byte, 1);
+  CONVERT_ARG_HANDLE_CHECKED(String, left, 2);
+  CONVERT_ARG_HANDLE_CHECKED(String, right, 3);
+
+  Handle<String> result;
+  if (is_one_byte) {
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, result,
+        isolate->factory()->NewOneByteConsString(length, left, right));
+  } else {
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, result,
+        isolate->factory()->NewTwoByteConsString(length, left, right));
+  }
+  return *result;
+}
+
+
 RUNTIME_FUNCTION(Runtime_StringEquals) {
   HandleScope handle_scope(isolate);
   DCHECK(args.length() == 2);
@@ -1265,6 +1287,15 @@ RUNTIME_FUNCTION(Runtime_StringCharAt) {
 }
 
 
+RUNTIME_FUNCTION(Runtime_OneByteSeqStringGetChar) {
+  SealHandleScope shs(isolate);
+  DCHECK(args.length() == 2);
+  CONVERT_ARG_CHECKED(SeqOneByteString, string, 0);
+  CONVERT_INT32_ARG_CHECKED(index, 1);
+  return Smi::FromInt(string->SeqOneByteStringGet(index));
+}
+
+
 RUNTIME_FUNCTION(Runtime_OneByteSeqStringSetChar) {
   SealHandleScope shs(isolate);
   DCHECK(args.length() == 3);
@@ -1273,6 +1304,15 @@ RUNTIME_FUNCTION(Runtime_OneByteSeqStringSetChar) {
   CONVERT_ARG_CHECKED(SeqOneByteString, string, 2);
   string->SeqOneByteStringSet(index, value);
   return string;
+}
+
+
+RUNTIME_FUNCTION(Runtime_TwoByteSeqStringGetChar) {
+  SealHandleScope shs(isolate);
+  DCHECK(args.length() == 2);
+  CONVERT_ARG_CHECKED(SeqTwoByteString, string, 0);
+  CONVERT_INT32_ARG_CHECKED(index, 1);
+  return Smi::FromInt(string->SeqTwoByteStringGet(index));
 }
 
 
@@ -1300,6 +1340,14 @@ RUNTIME_FUNCTION(Runtime_StringCharCodeAt) {
 RUNTIME_FUNCTION(Runtime_IsStringWrapperSafeForDefaultValueOf) {
   UNIMPLEMENTED();
   return NULL;
+}
+
+
+RUNTIME_FUNCTION(Runtime_StringGetLength) {
+  HandleScope scope(isolate);
+  DCHECK(args.length() == 1);
+  CONVERT_ARG_HANDLE_CHECKED(String, s, 0);
+  return Smi::FromInt(s->length());
 }
 }
 }  // namespace v8::internal

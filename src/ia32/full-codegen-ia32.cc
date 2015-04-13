@@ -95,7 +95,8 @@ class JumpPatchSite BASE_EMBEDDED {
 void FullCodeGenerator::Generate() {
   CompilationInfo* info = info_;
   handler_table_ =
-      isolate()->factory()->NewFixedArray(function()->handler_count(), TENURED);
+      Handle<HandlerTable>::cast(isolate()->factory()->NewFixedArray(
+          HandlerTable::LengthForRange(function()->handler_count()), TENURED));
 
   profiling_counter_ = isolate()->factory()->NewCell(
       Handle<Smi>(Smi::FromInt(FLAG_interrupt_budget), isolate()));
@@ -188,7 +189,7 @@ void FullCodeGenerator::Generate() {
     Comment cmnt(masm_, "[ Allocate context");
     bool need_write_barrier = true;
     // Argument to NewContext is the function, which is still in edi.
-    if (FLAG_harmony_scoping && info->scope()->is_script_scope()) {
+    if (info->scope()->is_script_scope()) {
       __ push(edi);
       __ Push(info->scope()->GetScopeInfo(info->isolate()));
       __ CallRuntime(Runtime::kNewScriptContext, 2);
@@ -236,6 +237,11 @@ void FullCodeGenerator::Generate() {
     }
   }
 
+  ArgumentsAccessStub::HasNewTarget has_new_target =
+      IsSubclassConstructor(info->function()->kind())
+          ? ArgumentsAccessStub::HAS_NEW_TARGET
+          : ArgumentsAccessStub::NO_NEW_TARGET;
+
   // Possibly allocate RestParameters
   int rest_index;
   Variable* rest_param = scope()->rest_parameter(&rest_index);
@@ -244,6 +250,11 @@ void FullCodeGenerator::Generate() {
 
     int num_parameters = info->scope()->num_parameters();
     int offset = num_parameters * kPointerSize;
+    if (has_new_target == ArgumentsAccessStub::HAS_NEW_TARGET) {
+      --num_parameters;
+      ++rest_index;
+    }
+
     __ lea(edx,
            Operand(ebp, StandardFrameConstants::kCallerSPOffset + offset));
     __ push(edx);
@@ -284,10 +295,7 @@ void FullCodeGenerator::Generate() {
     } else {
       type = ArgumentsAccessStub::NEW_SLOPPY_FAST;
     }
-    ArgumentsAccessStub::HasNewTarget has_new_target =
-        IsSubclassConstructor(info->function()->kind())
-            ? ArgumentsAccessStub::HAS_NEW_TARGET
-            : ArgumentsAccessStub::NO_NEW_TARGET;
+
     ArgumentsAccessStub stub(isolate(), type, has_new_target);
     __ CallStub(&stub);
 
@@ -1614,17 +1622,10 @@ void FullCodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
 
   expr->BuildConstantProperties(isolate());
   Handle<FixedArray> constant_properties = expr->constant_properties();
-  int flags = expr->fast_elements()
-      ? ObjectLiteral::kFastElements
-      : ObjectLiteral::kNoFlags;
-  flags |= expr->has_function()
-      ? ObjectLiteral::kHasFunction
-      : ObjectLiteral::kNoFlags;
-  int properties_count = constant_properties->length() / 2;
-  if (expr->may_store_doubles() || expr->depth() > 1 ||
-      masm()->serializer_enabled() ||
-      flags != ObjectLiteral::kFastElements ||
-      properties_count > FastCloneShallowObjectStub::kMaximumClonedProperties) {
+  int flags = expr->ComputeFlags();
+  // If any of the keys would store to the elements array, then we shouldn't
+  // allow it.
+  if (MustCreateObjectLiteralWithRuntime(expr)) {
     __ mov(edi, Operand(ebp, JavaScriptFrameConstants::kFunctionOffset));
     __ push(FieldOperand(edi, JSFunction::kLiteralsOffset));
     __ push(Immediate(Smi::FromInt(expr->literal_index())));
@@ -1637,7 +1638,7 @@ void FullCodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
     __ mov(ebx, Immediate(Smi::FromInt(expr->literal_index())));
     __ mov(ecx, Immediate(constant_properties));
     __ mov(edx, Immediate(Smi::FromInt(flags)));
-    FastCloneShallowObjectStub stub(isolate(), properties_count);
+    FastCloneShallowObjectStub stub(isolate(), expr->properties_count());
     __ CallStub(&stub);
   }
   PrepareForBailoutForId(expr->CreateLiteralId(), TOS_REG);
@@ -1816,20 +1817,9 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
   Comment cmnt(masm_, "[ ArrayLiteral");
 
   expr->BuildConstantElements(isolate());
-  int flags = expr->depth() == 1
-      ? ArrayLiteral::kShallowElements
-      : ArrayLiteral::kNoFlags;
-
-  ZoneList<Expression*>* subexprs = expr->values();
-  int length = subexprs->length();
   Handle<FixedArray> constant_elements = expr->constant_elements();
-  DCHECK_EQ(2, constant_elements->length());
-  ElementsKind constant_elements_kind =
-      static_cast<ElementsKind>(Smi::cast(constant_elements->get(0))->value());
   bool has_constant_fast_elements =
-      IsFastObjectElementsKind(constant_elements_kind);
-  Handle<FixedArrayBase> constant_elements_values(
-      FixedArrayBase::cast(constant_elements->get(1)));
+      IsFastObjectElementsKind(expr->constant_elements_kind());
 
   AllocationSiteMode allocation_site_mode = TRACK_ALLOCATION_SITE;
   if (has_constant_fast_elements && !FLAG_allocation_site_pretenuring) {
@@ -1838,12 +1828,12 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
     allocation_site_mode = DONT_TRACK_ALLOCATION_SITE;
   }
 
-  if (expr->depth() > 1 || length > JSObject::kInitialMaxFastElementArray) {
+  if (MustCreateArrayLiteralWithRuntime(expr)) {
     __ mov(ebx, Operand(ebp, JavaScriptFrameConstants::kFunctionOffset));
     __ push(FieldOperand(ebx, JSFunction::kLiteralsOffset));
     __ push(Immediate(Smi::FromInt(expr->literal_index())));
     __ push(Immediate(constant_elements));
-    __ push(Immediate(Smi::FromInt(flags)));
+    __ push(Immediate(Smi::FromInt(expr->ComputeFlags())));
     __ CallRuntime(Runtime::kCreateArrayLiteral, 4);
   } else {
     __ mov(ebx, Operand(ebp, JavaScriptFrameConstants::kFunctionOffset));
@@ -1856,6 +1846,8 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
   PrepareForBailoutForId(expr->CreateLiteralId(), TOS_REG);
 
   bool result_saved = false;  // Is the result saved to the stack?
+  ZoneList<Expression*>* subexprs = expr->values();
+  int length = subexprs->length();
 
   // Emit code to evaluate all the non-constant subexpressions and to store
   // them into the newly cloned array.
@@ -1872,7 +1864,7 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
     }
     VisitForAccumulatorValue(subexpr);
 
-    if (IsFastObjectElementsKind(constant_elements_kind)) {
+    if (has_constant_fast_elements) {
       // Fast-case array literal with ElementsKind of FAST_*_ELEMENTS, they
       // cannot transition and don't need to call the runtime stub.
       int offset = FixedArray::kHeaderSize + (i * kPointerSize);
@@ -2114,7 +2106,6 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
 
       // catch (e) { receiver = iter; f = 'throw'; arg = e; goto l_call; }
       __ bind(&l_catch);
-      handler_table()->set(expr->index(), Smi::FromInt(l_catch.pos()));
       __ mov(load_name, isolate()->factory()->throw_string());  // "throw"
       __ push(load_name);                                       // "throw"
       __ push(Operand(esp, 2 * kPointerSize));                  // iter
@@ -2126,16 +2117,17 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
       // re-boxing.
       __ bind(&l_try);
       __ pop(eax);                                       // result
-      __ PushTryHandler(StackHandler::CATCH, expr->index());
-      const int handler_size = StackHandlerConstants::kSize;
+      EnterTryBlock(expr->index(), &l_catch);
+      const int try_block_size = TryCatch::kElementCount * kPointerSize;
       __ push(eax);                                      // result
       __ jmp(&l_suspend);
       __ bind(&l_continuation);
       __ jmp(&l_resume);
       __ bind(&l_suspend);
-      const int generator_object_depth = kPointerSize + handler_size;
+      const int generator_object_depth = kPointerSize + try_block_size;
       __ mov(eax, Operand(esp, generator_object_depth));
       __ push(eax);                                      // g
+      __ push(Immediate(Smi::FromInt(expr->index())));   // handler-index
       DCHECK(l_continuation.pos() > 0 && Smi::IsValid(l_continuation.pos()));
       __ mov(FieldOperand(eax, JSGeneratorObject::kContinuationOffset),
              Immediate(Smi::FromInt(l_continuation.pos())));
@@ -2143,13 +2135,13 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
       __ mov(ecx, esi);
       __ RecordWriteField(eax, JSGeneratorObject::kContextOffset, ecx, edx,
                           kDontSaveFPRegs);
-      __ CallRuntime(Runtime::kSuspendJSGeneratorObject, 1);
+      __ CallRuntime(Runtime::kSuspendJSGeneratorObject, 2);
       __ mov(context_register(),
              Operand(ebp, StandardFrameConstants::kContextOffset));
       __ pop(eax);                                       // result
       EmitReturnSequence();
       __ bind(&l_resume);                                // received in eax
-      __ PopTryHandler();
+      ExitTryBlock(expr->index());
 
       // receiver = iter; f = iter.next; arg = received;
       __ bind(&l_next);
@@ -3013,6 +3005,21 @@ void FullCodeGenerator::EmitLoadSuperConstructor() {
 }
 
 
+void FullCodeGenerator::EmitInitializeThisAfterSuper(
+    SuperReference* super_ref) {
+  Variable* this_var = super_ref->this_var()->var();
+  GetVar(ecx, this_var);
+  __ cmp(ecx, isolate()->factory()->the_hole_value());
+  Label uninitialized_this;
+  __ j(equal, &uninitialized_this);
+  __ push(Immediate(this_var->name()));
+  __ CallRuntime(Runtime::kThrowReferenceError, 1);
+  __ bind(&uninitialized_this);
+
+  EmitVariableAssignment(this_var, Token::INIT_CONST);
+}
+
+
 void FullCodeGenerator::VisitCall(Call* expr) {
 #ifdef DEBUG
   // We want to verify that RecordJSReturnSite gets called on all paths
@@ -3227,17 +3234,7 @@ void FullCodeGenerator::EmitSuperConstructorCall(Call* expr) {
 
   RecordJSReturnSite(expr);
 
-  SuperReference* super_ref = expr->expression()->AsSuperReference();
-  Variable* this_var = super_ref->this_var()->var();
-  GetVar(ecx, this_var);
-  __ cmp(ecx, isolate()->factory()->the_hole_value());
-  Label uninitialized_this;
-  __ j(equal, &uninitialized_this);
-  __ push(Immediate(this_var->name()));
-  __ CallRuntime(Runtime::kThrowReferenceError, 1);
-  __ bind(&uninitialized_this);
-
-  EmitVariableAssignment(this_var, Token::INIT_CONST);
+  EmitInitializeThisAfterSuper(expr->expression()->AsSuperReference());
   context()->Plug(eax);
 }
 
@@ -4000,7 +3997,7 @@ void FullCodeGenerator::EmitStringCharCodeAt(CallRuntime* expr) {
   __ jmp(&done);
 
   NopRuntimeCallHelper call_helper;
-  generator.GenerateSlow(masm_, call_helper);
+  generator.GenerateSlow(masm_, NOT_PART_OF_IC_HANDLER, call_helper);
 
   __ bind(&done);
   context()->Plug(result);
@@ -4048,7 +4045,7 @@ void FullCodeGenerator::EmitStringCharAt(CallRuntime* expr) {
   __ jmp(&done);
 
   NopRuntimeCallHelper call_helper;
-  generator.GenerateSlow(masm_, call_helper);
+  generator.GenerateSlow(masm_, NOT_PART_OF_IC_HANDLER, call_helper);
 
   __ bind(&done);
   context()->Plug(result);
@@ -4539,26 +4536,79 @@ void FullCodeGenerator::EmitDebugIsActive(CallRuntime* expr) {
 }
 
 
+void FullCodeGenerator::EmitCallSuperWithSpread(CallRuntime* expr) {
+  // Assert: expr == CallRuntime("ReflectConstruct")
+  CallRuntime* call = expr->arguments()->at(0)->AsCallRuntime();
+  ZoneList<Expression*>* args = call->arguments();
+  DCHECK_EQ(3, args->length());
+
+  SuperReference* super_reference = args->at(0)->AsSuperReference();
+
+  // Load ReflectConstruct function
+  EmitLoadJSRuntimeFunction(call);
+
+  // Push the target function under the receiver
+  __ push(Operand(esp, 0));
+  __ mov(Operand(esp, kPointerSize), eax);
+
+  // Push super
+  EmitLoadSuperConstructor();
+  __ Push(result_register());
+
+  // Push arguments array
+  VisitForStackValue(args->at(1));
+
+  // Push NewTarget
+  DCHECK(args->at(2)->IsVariableProxy());
+  VisitForStackValue(args->at(2));
+
+  EmitCallJSRuntimeFunction(call);
+
+  // Restore context register.
+  __ mov(esi, Operand(ebp, StandardFrameConstants::kContextOffset));
+  context()->DropAndPlug(1, eax);
+
+  EmitInitializeThisAfterSuper(super_reference);
+}
+
+
+void FullCodeGenerator::EmitLoadJSRuntimeFunction(CallRuntime* expr) {
+  // Push the builtins object as receiver.
+  __ mov(eax, GlobalObjectOperand());
+  __ push(FieldOperand(eax, GlobalObject::kBuiltinsOffset));
+
+  // Load the function from the receiver.
+  __ mov(LoadDescriptor::ReceiverRegister(), Operand(esp, 0));
+  __ mov(LoadDescriptor::NameRegister(), Immediate(expr->name()));
+  if (FLAG_vector_ics) {
+    __ mov(VectorLoadICDescriptor::SlotRegister(),
+           Immediate(SmiFromSlot(expr->CallRuntimeFeedbackSlot())));
+    CallLoadIC(NOT_CONTEXTUAL);
+  } else {
+    CallLoadIC(NOT_CONTEXTUAL, expr->CallRuntimeFeedbackId());
+  }
+}
+
+
+void FullCodeGenerator::EmitCallJSRuntimeFunction(CallRuntime* expr) {
+  ZoneList<Expression*>* args = expr->arguments();
+  int arg_count = args->length();
+
+  // Record source position of the IC call.
+  SetSourcePosition(expr->position());
+  CallFunctionStub stub(isolate(), arg_count, NO_CALL_FUNCTION_FLAGS);
+  __ mov(edi, Operand(esp, (arg_count + 1) * kPointerSize));
+  __ CallStub(&stub);
+}
+
+
 void FullCodeGenerator::VisitCallRuntime(CallRuntime* expr) {
   ZoneList<Expression*>* args = expr->arguments();
   int arg_count = args->length();
 
   if (expr->is_jsruntime()) {
     Comment cmnt(masm_, "[ CallRuntime");
-    // Push the builtins object as receiver.
-    __ mov(eax, GlobalObjectOperand());
-    __ push(FieldOperand(eax, GlobalObject::kBuiltinsOffset));
-
-    // Load the function from the receiver.
-    __ mov(LoadDescriptor::ReceiverRegister(), Operand(esp, 0));
-    __ mov(LoadDescriptor::NameRegister(), Immediate(expr->name()));
-    if (FLAG_vector_ics) {
-      __ mov(VectorLoadICDescriptor::SlotRegister(),
-             Immediate(SmiFromSlot(expr->CallRuntimeFeedbackSlot())));
-      CallLoadIC(NOT_CONTEXTUAL);
-    } else {
-      CallLoadIC(NOT_CONTEXTUAL, expr->CallRuntimeFeedbackId());
-    }
+    EmitLoadJSRuntimeFunction(expr);
 
     // Push the target function under the receiver.
     __ push(Operand(esp, 0));
@@ -4569,11 +4619,7 @@ void FullCodeGenerator::VisitCallRuntime(CallRuntime* expr) {
       VisitForStackValue(args->at(i));
     }
 
-    // Record source position of the IC call.
-    SetSourcePosition(expr->position());
-    CallFunctionStub stub(isolate(), arg_count, NO_CALL_FUNCTION_FLAGS);
-    __ mov(edi, Operand(esp, (arg_count + 1) * kPointerSize));
-    __ CallStub(&stub);
+    EmitCallJSRuntimeFunction(expr);
 
     // Restore context register.
     __ mov(esi, Operand(ebp, StandardFrameConstants::kContextOffset));
@@ -5273,33 +5319,6 @@ void FullCodeGenerator::ExitFinallyBlock() {
   __ jmp(edx);
 }
 
-
-#undef __
-
-#define __ ACCESS_MASM(masm())
-
-FullCodeGenerator::NestedStatement* FullCodeGenerator::TryFinally::Exit(
-    int* stack_depth,
-    int* context_length) {
-  // The macros used here must preserve the result register.
-
-  // Because the handler block contains the context of the finally
-  // code, we can restore it directly from there for the finally code
-  // rather than iteratively unwinding contexts via their previous
-  // links.
-  __ Drop(*stack_depth);  // Down to the handler block.
-  if (*context_length > 0) {
-    // Restore the context to its dedicated register and the stack.
-    __ mov(esi, Operand(esp, StackHandlerConstants::kContextOffset));
-    __ mov(Operand(ebp, StandardFrameConstants::kContextOffset), esi);
-  }
-  __ PopTryHandler();
-  __ call(finally_entry_);
-
-  *stack_depth = 0;
-  *context_length = 0;
-  return previous_;
-}
 
 #undef __
 

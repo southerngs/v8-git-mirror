@@ -543,11 +543,23 @@ class IsEffectSetMatcher FINAL : public NodeMatcher {
   }
 
   bool MatchAndExplain(Node* node, MatchResultListener* listener) const FINAL {
-    return (NodeMatcher::MatchAndExplain(node, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetEffectInput(node, 0),
-                                 "effect0", effect0_matcher_, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetEffectInput(node, 1),
-                                 "effect1", effect1_matcher_, listener));
+    if (!NodeMatcher::MatchAndExplain(node, listener)) return false;
+
+    Node* effect0 = NodeProperties::GetEffectInput(node, 0);
+    Node* effect1 = NodeProperties::GetEffectInput(node, 1);
+
+    {
+      // Try matching in the reverse order first.
+      StringMatchResultListener value_listener;
+      if (effect0_matcher_.MatchAndExplain(effect1, &value_listener) &&
+          effect1_matcher_.MatchAndExplain(effect0, &value_listener)) {
+        return true;
+      }
+    }
+
+    return PrintMatchAndExplain(effect0, "effect0", effect0_matcher_,
+                                listener) &&
+           PrintMatchAndExplain(effect1, "effect1", effect1_matcher_, listener);
   }
 
  private:
@@ -1590,6 +1602,8 @@ IS_BINOP_MATCHER(Int32MulHigh)
 IS_BINOP_MATCHER(Int32LessThan)
 IS_BINOP_MATCHER(Uint32LessThan)
 IS_BINOP_MATCHER(Uint32LessThanOrEqual)
+IS_BINOP_MATCHER(Float32Max)
+IS_BINOP_MATCHER(Float32Min)
 IS_BINOP_MATCHER(Float64Max)
 IS_BINOP_MATCHER(Float64Min)
 IS_BINOP_MATCHER(Float64Sub)
@@ -1602,7 +1616,6 @@ IS_BINOP_MATCHER(Float64InsertHighWord32)
   Matcher<Node*> Is##Name(const Matcher<Node*>& input_matcher) {             \
     return MakeMatcher(new IsUnopMatcher(IrOpcode::k##Name, input_matcher)); \
   }
-IS_UNOP_MATCHER(AnyToBoolean)
 IS_UNOP_MATCHER(BooleanNot)
 IS_UNOP_MATCHER(ChangeFloat64ToInt32)
 IS_UNOP_MATCHER(ChangeFloat64ToUint32)
@@ -1613,6 +1626,8 @@ IS_UNOP_MATCHER(ChangeUint32ToUint64)
 IS_UNOP_MATCHER(TruncateFloat64ToFloat32)
 IS_UNOP_MATCHER(TruncateFloat64ToInt32)
 IS_UNOP_MATCHER(TruncateInt64ToInt32)
+IS_UNOP_MATCHER(Float32Abs)
+IS_UNOP_MATCHER(Float64Abs)
 IS_UNOP_MATCHER(Float64Sqrt)
 IS_UNOP_MATCHER(Float64RoundDown)
 IS_UNOP_MATCHER(Float64RoundTruncate)
@@ -1623,6 +1638,7 @@ IS_UNOP_MATCHER(NumberToInt32)
 IS_UNOP_MATCHER(NumberToUint32)
 IS_UNOP_MATCHER(ObjectIsSmi)
 IS_UNOP_MATCHER(ObjectIsNonNegativeSmi)
+IS_UNOP_MATCHER(Word32Clz)
 #undef IS_UNOP_MATCHER
 
 }  // namespace compiler

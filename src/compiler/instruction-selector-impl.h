@@ -15,6 +15,17 @@ namespace v8 {
 namespace internal {
 namespace compiler {
 
+// Helper struct containing data about a table or lookup switch.
+struct SwitchInfo {
+  int32_t min_value;           // minimum value of {case_values}
+  int32_t max_value;           // maximum value of {case_values}
+  size_t value_range;          // |max_value - min_value| + 1
+  size_t case_count;           // number of cases
+  int32_t* case_values;        // actual case values, unsorted
+  BasicBlock** case_branches;  // basic blocks corresponding to case values
+  BasicBlock* default_branch;  // default branch target
+};
+
 // A helper class for the instruction selector that simplifies construction of
 // Operands. This class implements a base for architecture-specific helpers.
 class OperandGenerator {
@@ -75,6 +86,11 @@ class OperandGenerator {
                                         GetVReg(node)));
   }
 
+  InstructionOperand UseUniqueSlot(Node* node) {
+    return Use(node, UnallocatedOperand(UnallocatedOperand::MUST_HAVE_SLOT,
+                                        GetVReg(node)));
+  }
+
   // Use register or operand for the node. If a register is chosen, it won't
   // alias any temporary or output registers.
   InstructionOperand UseUnique(Node* node) {
@@ -103,8 +119,7 @@ class OperandGenerator {
   }
 
   InstructionOperand UseImmediate(Node* node) {
-    int index = sequence()->AddImmediate(ToConstant(node));
-    return ImmediateOperand(index);
+    return sequence()->AddImmediate(ToConstant(node));
   }
 
   InstructionOperand UseLocation(Node* node, LinkageLocation location,
@@ -133,8 +148,7 @@ class OperandGenerator {
   }
 
   InstructionOperand TempImmediate(int32_t imm) {
-    int index = sequence()->AddImmediate(Constant(imm));
-    return ImmediateOperand(index);
+    return sequence()->AddImmediate(Constant(imm));
   }
 
   InstructionOperand TempLocation(LinkageLocation location, MachineType type) {
@@ -143,9 +157,8 @@ class OperandGenerator {
   }
 
   InstructionOperand Label(BasicBlock* block) {
-    int index = sequence()->AddImmediate(
+    return sequence()->AddImmediate(
         Constant(RpoNumber::FromInt(block->rpo_number())));
-    return ImmediateOperand(index);
   }
 
  protected:

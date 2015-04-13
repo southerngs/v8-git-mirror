@@ -36,7 +36,6 @@
 #include "src/debug.h"
 #include "src/hashmap.h"
 #include "src/heap-profiler.h"
-#include "src/snapshot.h"
 #include "src/utils-inl.h"
 #include "test/cctest/cctest.h"
 
@@ -1044,9 +1043,12 @@ static TestStatsStream GetHeapStatsUpdate(
     v8::HeapProfiler* heap_profiler,
     v8::SnapshotObjectId* object_id = NULL) {
   TestStatsStream stream;
-  v8::SnapshotObjectId last_seen_id = heap_profiler->GetHeapStats(&stream);
+  int64_t timestamp = -1;
+  v8::SnapshotObjectId last_seen_id =
+      heap_profiler->GetHeapStats(&stream, &timestamp);
   if (object_id)
     *object_id = last_seen_id;
+  CHECK_NE(-1, timestamp);
   CHECK_EQ(1, stream.eos_signaled());
   return stream;
 }

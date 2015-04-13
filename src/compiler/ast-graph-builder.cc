@@ -7,11 +7,14 @@
 #include "src/compiler.h"
 #include "src/compiler/ast-loop-assignment-analyzer.h"
 #include "src/compiler/control-builders.h"
+#include "src/compiler/js-type-feedback.h"
 #include "src/compiler/linkage.h"
+#include "src/compiler/liveness-analyzer.h"
 #include "src/compiler/machine-operator.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/node-properties.h"
 #include "src/compiler/operator-properties.h"
+#include "src/compiler/state-values-utils.h"
 #include "src/full-codegen.h"
 #include "src/parser.h"
 #include "src/scopes.h"
@@ -109,7 +112,7 @@ class AstGraphBuilder::ContextScope BASE_EMBEDDED {
       : builder_(builder),
         outer_(builder->execution_context()),
         scope_(scope),
-        depth_(builder_->environment()->ContextStackDepth()) {
+        depth_(builder_->environment()->context_chain_length()) {
     builder_->environment()->PushContext(context);  // Push.
     builder_->set_execution_context(this);
   }
@@ -117,7 +120,7 @@ class AstGraphBuilder::ContextScope BASE_EMBEDDED {
   ~ContextScope() {
     builder_->set_execution_context(outer_);  // Pop.
     builder_->environment()->PopContext();
-    CHECK_EQ(depth_, builder_->environment()->ContextStackDepth());
+    CHECK_EQ(depth_, builder_->environment()->context_chain_length());
   }
 
   // Current scope during visitation.
@@ -143,6 +146,7 @@ class AstGraphBuilder::ControlScope BASE_EMBEDDED {
   explicit ControlScope(AstGraphBuilder* builder)
       : builder_(builder),
         outer_(builder->execution_control()),
+        context_length_(builder->environment()->context_chain_length()),
         stack_height_(builder->environment()->stack_height()) {
     builder_->set_execution_control(this);  // Push.
   }
@@ -190,11 +194,13 @@ class AstGraphBuilder::ControlScope BASE_EMBEDDED {
 
   Environment* environment() { return builder_->environment(); }
   AstGraphBuilder* builder() const { return builder_; }
+  int context_length() const { return context_length_; }
   int stack_height() const { return stack_height_; }
 
  private:
   AstGraphBuilder* builder_;
   ControlScope* outer_;
+  int context_length_;
   int stack_height_;
 };
 
@@ -379,7 +385,8 @@ class AstGraphBuilder::ControlScopeForFinally : public ControlScope {
 
 
 AstGraphBuilder::AstGraphBuilder(Zone* local_zone, CompilationInfo* info,
-                                 JSGraph* jsgraph, LoopAssignmentAnalysis* loop)
+                                 JSGraph* jsgraph, LoopAssignmentAnalysis* loop,
+                                 JSTypeFeedbackTable* js_type_feedback)
     : local_zone_(local_zone),
       info_(info),
       jsgraph_(jsgraph),
@@ -392,7 +399,11 @@ AstGraphBuilder::AstGraphBuilder(Zone* local_zone, CompilationInfo* info,
       input_buffer_size_(0),
       input_buffer_(nullptr),
       exit_control_(nullptr),
-      loop_assignment_analysis_(loop) {
+      loop_assignment_analysis_(loop),
+      state_values_cache_(jsgraph),
+      liveness_analyzer_(static_cast<size_t>(info->scope()->num_stack_slots()),
+                         local_zone),
+      js_type_feedback_(js_type_feedback) {
   InitializeAstVisitor(info->isolate(), local_zone);
 }
 
@@ -442,9 +453,6 @@ bool AstGraphBuilder::CreateGraph(bool constant_context, bool stack_check) {
   Environment env(this, scope, graph()->start());
   set_environment(&env);
 
-  // Initialize control scope.
-  ControlScope control(this);
-
   if (info()->is_osr()) {
     // Use OSR normal entry as the start of the top-level environment.
     // It will be replaced with {Dead} after typing and optimizations.
@@ -454,6 +462,9 @@ bool AstGraphBuilder::CreateGraph(bool constant_context, bool stack_check) {
   // Initialize the incoming context.
   CreateFunctionContext(constant_context);
   ContextScope incoming(this, scope, function_context_.get());
+
+  // Initialize control scope.
+  ControlScope control(this);
 
   // Build receiver check for sloppy mode if necessary.
   // TODO(mstarzinger/verwaest): Should this be moved back into the CallIC?
@@ -465,9 +476,7 @@ bool AstGraphBuilder::CreateGraph(bool constant_context, bool stack_check) {
   int heap_slots = info()->num_heap_slots() - Context::MIN_CONTEXT_SLOTS;
   if (heap_slots > 0) {
     // Push a new inner context scope for the function.
-    Node* closure = GetFunctionClosure();
-    Node* inner_context =
-        BuildLocalFunctionContext(function_context_.get(), closure);
+    Node* inner_context = BuildLocalFunctionContext(function_context_.get());
     ContextScope top_context(this, scope, inner_context);
     CreateGraphBody(stack_check);
   } else {
@@ -477,6 +486,10 @@ bool AstGraphBuilder::CreateGraph(bool constant_context, bool stack_check) {
 
   // Finish the basic structure of the graph.
   graph()->SetEnd(graph()->NewNode(common()->End(), exit_control()));
+
+  // Compute local variable liveness information and use it to relax
+  // frame states.
+  ClearNonLiveSlotsInFrameStates();
 
   // Failures indicated by stack overflow.
   return !HasStackOverflow();
@@ -528,6 +541,24 @@ void AstGraphBuilder::CreateGraphBody(bool stack_check) {
 }
 
 
+void AstGraphBuilder::ClearNonLiveSlotsInFrameStates() {
+  if (!FLAG_analyze_environment_liveness) return;
+
+  NonLiveFrameStateSlotReplacer replacer(
+      &state_values_cache_, jsgraph()->UndefinedConstant(),
+      liveness_analyzer()->local_count(), local_zone());
+  Variable* arguments = info()->scope()->arguments();
+  if (arguments != nullptr && arguments->IsStackAllocated()) {
+    replacer.MarkPermanentlyLive(arguments->index());
+  }
+  liveness_analyzer()->Run(&replacer);
+  if (FLAG_trace_environment_liveness) {
+    OFStream os(stdout);
+    liveness_analyzer()->Print(os);
+  }
+}
+
+
 // Left-hand side can only be a property, a global or a variable slot.
 enum LhsKind { VARIABLE, NAMED_PROPERTY, KEYED_PROPERTY };
 
@@ -550,6 +581,7 @@ AstGraphBuilder::Environment::Environment(AstGraphBuilder* builder,
     : builder_(builder),
       parameters_count_(scope->num_parameters() + 1),
       locals_count_(scope->num_stack_slots()),
+      liveness_block_(builder_->liveness_analyzer()->NewBlock()),
       values_(builder_->local_zone()),
       contexts_(builder_->local_zone()),
       control_dependency_(control_dependency),
@@ -578,8 +610,7 @@ AstGraphBuilder::Environment::Environment(AstGraphBuilder* builder,
 }
 
 
-AstGraphBuilder::Environment::Environment(
-    const AstGraphBuilder::Environment* copy)
+AstGraphBuilder::Environment::Environment(AstGraphBuilder::Environment* copy)
     : builder_(copy->builder_),
       parameters_count_(copy->parameters_count_),
       locals_count_(copy->locals_count_),
@@ -596,13 +627,72 @@ AstGraphBuilder::Environment::Environment(
   contexts_.reserve(copy->contexts_.size());
   contexts_.insert(contexts_.begin(), copy->contexts_.begin(),
                    copy->contexts_.end());
+
+  if (FLAG_analyze_environment_liveness) {
+    // Split the liveness blocks.
+    copy->liveness_block_ =
+        builder_->liveness_analyzer()->NewBlock(copy->liveness_block());
+    liveness_block_ =
+        builder_->liveness_analyzer()->NewBlock(copy->liveness_block());
+  }
+}
+
+
+void AstGraphBuilder::Environment::Bind(Variable* variable, Node* node) {
+  DCHECK(variable->IsStackAllocated());
+  if (variable->IsParameter()) {
+    // The parameter indices are shifted by 1 (receiver is parameter
+    // index -1 but environment index 0).
+    values()->at(variable->index() + 1) = node;
+  } else {
+    DCHECK(variable->IsStackLocal());
+    values()->at(variable->index() + parameters_count_) = node;
+    if (FLAG_analyze_environment_liveness) {
+      liveness_block()->Bind(variable->index());
+    }
+  }
+}
+
+
+Node* AstGraphBuilder::Environment::Lookup(Variable* variable) {
+  DCHECK(variable->IsStackAllocated());
+  if (variable->IsParameter()) {
+    // The parameter indices are shifted by 1 (receiver is parameter
+    // index -1 but environment index 0).
+    return values()->at(variable->index() + 1);
+  } else {
+    DCHECK(variable->IsStackLocal());
+    if (FLAG_analyze_environment_liveness) {
+      liveness_block()->Lookup(variable->index());
+    }
+    return values()->at(variable->index() + parameters_count_);
+  }
+}
+
+
+void AstGraphBuilder::Environment::MarkAllLocalsLive() {
+  if (FLAG_analyze_environment_liveness) {
+    for (int i = 0; i < locals_count_; i++) {
+      liveness_block()->Lookup(i);
+    }
+  }
+}
+
+
+AstGraphBuilder::Environment*
+AstGraphBuilder::Environment::CopyAndShareLiveness() {
+  Environment* env = new (zone()) Environment(this);
+  if (FLAG_analyze_environment_liveness) {
+    env->liveness_block_ = liveness_block();
+  }
+  return env;
 }
 
 
 void AstGraphBuilder::Environment::UpdateStateValues(Node** state_values,
                                                      int offset, int count) {
   bool should_update = false;
-  Node** env_values = (count == 0) ? NULL : &values()->at(offset);
+  Node** env_values = (count == 0) ? nullptr : &values()->at(offset);
   if (*state_values == NULL || (*state_values)->InputCount() != count) {
     should_update = true;
   } else {
@@ -621,20 +711,32 @@ void AstGraphBuilder::Environment::UpdateStateValues(Node** state_values,
 }
 
 
+void AstGraphBuilder::Environment::UpdateStateValuesWithCache(
+    Node** state_values, int offset, int count) {
+  Node** env_values = (count == 0) ? nullptr : &values()->at(offset);
+  *state_values = builder_->state_values_cache_.GetNodeForValues(
+      env_values, static_cast<size_t>(count));
+}
+
+
 Node* AstGraphBuilder::Environment::Checkpoint(
     BailoutId ast_id, OutputFrameStateCombine combine) {
   if (!FLAG_turbo_deoptimization) return nullptr;
 
   UpdateStateValues(&parameters_node_, 0, parameters_count());
-  UpdateStateValues(&locals_node_, parameters_count(), locals_count());
+  UpdateStateValuesWithCache(&locals_node_, parameters_count(), locals_count());
   UpdateStateValues(&stack_node_, parameters_count() + locals_count(),
                     stack_height());
 
   const Operator* op = common()->FrameState(JS_FRAME, ast_id, combine);
 
-  return graph()->NewNode(op, parameters_node_, locals_node_, stack_node_,
-                          builder()->current_context(),
-                          builder()->jsgraph()->UndefinedConstant());
+  Node* result = graph()->NewNode(op, parameters_node_, locals_node_,
+                                  stack_node_, builder()->current_context(),
+                                  builder()->jsgraph()->UndefinedConstant());
+  if (FLAG_analyze_environment_liveness) {
+    liveness_block()->Checkpoint(result);
+  }
+  return result;
 }
 
 
@@ -712,7 +814,8 @@ void AstGraphBuilder::ControlScope::PerformCommand(Command command,
   Environment* env = environment()->CopyAsUnreachable();
   ControlScope* current = this;
   while (current != NULL) {
-    environment()->Trim(current->stack_height());
+    environment()->TrimStack(current->stack_height());
+    environment()->TrimContextChain(current->context_length());
     if (current->Execute(command, target, value)) break;
     current = current->outer_;
   }
@@ -1236,7 +1339,10 @@ void AstGraphBuilder::VisitTryCatchStatement(TryCatchStatement* stmt) {
   try_control.BeginTry();
   {
     ControlScopeForCatch scope(this, &try_control);
+    STATIC_ASSERT(TryBlockConstant::kElementCount == 1);
+    environment()->Push(current_context());
     Visit(stmt->try_block());
+    environment()->Pop();
   }
   try_control.EndTry();
 
@@ -1283,7 +1389,10 @@ void AstGraphBuilder::VisitTryFinallyStatement(TryFinallyStatement* stmt) {
   try_control.BeginTry();
   {
     ControlScopeForFinally scope(this, commands, &try_control);
+    STATIC_ASSERT(TryBlockConstant::kElementCount == 1);
+    environment()->Push(current_context());
     Visit(stmt->try_block());
+    environment()->Pop();
   }
   try_control.EndTry(commands->GetFallThroughToken(), fallthrough_result);
 
@@ -1297,9 +1406,10 @@ void AstGraphBuilder::VisitTryFinallyStatement(TryFinallyStatement* stmt) {
 
   // The result value, dispatch token and message is expected on the operand
   // stack (this is in sync with FullCodeGenerator::EnterFinallyBlock).
+  Node* message = BuildLoadExternal(message_object, kMachAnyTagged);
   environment()->Push(token);  // TODO(mstarzinger): Cook token!
   environment()->Push(result);
-  environment()->Push(BuildLoadExternal(message_object, kMachAnyTagged));
+  environment()->Push(message);
 
   // Evaluate the finally-block.
   Visit(stmt->finally_block());
@@ -1307,9 +1417,10 @@ void AstGraphBuilder::VisitTryFinallyStatement(TryFinallyStatement* stmt) {
 
   // The result value, dispatch token and message is restored from the operand
   // stack (this is in sync with FullCodeGenerator::ExitFinallyBlock).
-  BuildStoreExternal(message_object, kMachAnyTagged, environment()->Pop());
+  message = environment()->Pop();
   result = environment()->Pop();
   token = environment()->Pop();  // TODO(mstarzinger): Uncook token!
+  BuildStoreExternal(message_object, kMachAnyTagged, message);
 
   // Dynamic dispatch after the finally-block.
   commands->ApplyDeferredCommands(token, result);
@@ -1320,9 +1431,9 @@ void AstGraphBuilder::VisitTryFinallyStatement(TryFinallyStatement* stmt) {
 
 
 void AstGraphBuilder::VisitDebuggerStatement(DebuggerStatement* stmt) {
-  // TODO(turbofan): Do we really need a separate reloc-info for this?
   Node* node = NewNode(javascript()->CallRuntime(Runtime::kDebugBreak, 0));
   PrepareFrameState(node, stmt->DebugBreakId());
+  environment()->MarkAllLocalsLive();
 }
 
 
@@ -1396,17 +1507,17 @@ void AstGraphBuilder::VisitClassLiteralContents(ClassLiteral* expr) {
     environment()->Push(property->is_static() ? literal : proto);
 
     VisitForValue(property->key());
-    environment()->Push(
-        BuildToName(environment()->Pop(), expr->GetIdForProperty(i)));
+    Node* name = BuildToName(environment()->Pop(), expr->GetIdForProperty(i));
+    environment()->Push(name);
 
     // The static prototype property is read only. We handle the non computed
     // property name case in the parser. Since this is the only case where we
     // need to check for an own read only property we special case this so we do
     // not need to do this for every property.
     if (property->is_static() && property->is_computed_name()) {
-      Node* name = environment()->Pop();
-      environment()->Push(
-          BuildThrowIfStaticPrototype(name, expr->GetIdForProperty(i)));
+      Node* check = BuildThrowIfStaticPrototype(environment()->Pop(),
+                                                expr->GetIdForProperty(i));
+      environment()->Push(check);
     }
 
     VisitForValue(property->value());
@@ -1518,7 +1629,7 @@ void AstGraphBuilder::VisitObjectLiteral(ObjectLiteral* expr) {
       BuildLoadObjectField(closure, JSFunction::kLiteralsOffset);
   Node* literal_index = jsgraph()->Constant(expr->literal_index());
   Node* constants = jsgraph()->Constant(expr->constant_properties());
-  Node* flags = jsgraph()->Constant(expr->ComputeFlags());
+  Node* flags = jsgraph()->Constant(expr->ComputeFlags(true));
   const Operator* op =
       javascript()->CallRuntime(Runtime::kCreateObjectLiteral, 4);
   Node* literal = NewNode(op, literals_array, literal_index, constants, flags);
@@ -1557,7 +1668,8 @@ void AstGraphBuilder::VisitObjectLiteral(ObjectLiteral* expr) {
             VisitForValue(property->value());
             Node* value = environment()->Pop();
             Handle<Name> name = key->AsPropertyName();
-            Node* store = BuildNamedStore(literal, name, value);
+            Node* store =
+                BuildNamedStore(literal, name, value, TypeFeedbackId::None());
             PrepareFrameState(store, key->id());
             BuildSetHomeObject(value, literal, property->value());
           } else {
@@ -1640,8 +1752,9 @@ void AstGraphBuilder::VisitObjectLiteral(ObjectLiteral* expr) {
 
     environment()->Push(literal);  // Duplicate receiver.
     VisitForValue(property->key());
-    environment()->Push(BuildToName(environment()->Pop(),
-                                    expr->GetIdForProperty(property_index)));
+    Node* name = BuildToName(environment()->Pop(),
+                             expr->GetIdForProperty(property_index));
+    environment()->Push(name);
     // TODO(mstarzinger): For ObjectLiteral::Property::PROTOTYPE the key should
     // not be on the operand stack while the value is being evaluated. Come up
     // with a repro for this and fix it. Also find a nice way to do so. :)
@@ -1708,7 +1821,7 @@ void AstGraphBuilder::VisitArrayLiteral(ArrayLiteral* expr) {
       BuildLoadObjectField(closure, JSFunction::kLiteralsOffset);
   Node* literal_index = jsgraph()->Constant(expr->literal_index());
   Node* constants = jsgraph()->Constant(expr->constant_elements());
-  Node* flags = jsgraph()->Constant(expr->ComputeFlags());
+  Node* flags = jsgraph()->Constant(expr->ComputeFlags(true));
   const Operator* op =
       javascript()->CallRuntime(Runtime::kCreateArrayLiteral, 4);
   Node* literal = NewNode(op, literals_array, literal_index, constants, flags);
@@ -1727,10 +1840,15 @@ void AstGraphBuilder::VisitArrayLiteral(ArrayLiteral* expr) {
     if (CompileTimeValue::IsCompileTimeValue(subexpr)) continue;
 
     VisitForValue(subexpr);
+    Node* frame_state_before = environment()->Checkpoint(
+        subexpr->id(), OutputFrameStateCombine::PokeAt(0));
     Node* value = environment()->Pop();
     Node* index = jsgraph()->Constant(i);
-    Node* store = BuildKeyedStore(literal, index, value);
-    PrepareFrameState(store, expr->GetIdForElement(i));
+    Node* store =
+        BuildKeyedStore(literal, index, value, TypeFeedbackId::None());
+    PrepareFrameStateAfterAndBefore(store, expr->GetIdForElement(i),
+                                    OutputFrameStateCombine::Ignore(),
+                                    frame_state_before);
   }
 
   environment()->Pop();  // Array literal index.
@@ -1759,7 +1877,8 @@ void AstGraphBuilder::VisitForInAssignment(Expression* expr, Node* value,
       Node* object = environment()->Pop();
       value = environment()->Pop();
       Handle<Name> name = property->key()->AsLiteral()->AsPropertyName();
-      Node* store = BuildNamedStore(object, name, value);
+      Node* store =
+          BuildNamedStore(object, name, value, TypeFeedbackId::None());
       PrepareFrameState(store, bailout_id);
       break;
     }
@@ -1770,8 +1889,11 @@ void AstGraphBuilder::VisitForInAssignment(Expression* expr, Node* value,
       Node* key = environment()->Pop();
       Node* object = environment()->Pop();
       value = environment()->Pop();
-      Node* store = BuildKeyedStore(object, key, value);
-      PrepareFrameState(store, bailout_id);
+      Node* store = BuildKeyedStore(object, key, value, TypeFeedbackId::None());
+      // TODO(jarin) Provide a real frame state before.
+      PrepareFrameStateAfterAndBefore(store, bailout_id,
+                                      OutputFrameStateCombine::Ignore(),
+                                      jsgraph()->EmptyFrameState());
       break;
     }
   }
@@ -1802,6 +1924,8 @@ void AstGraphBuilder::VisitAssignment(Assignment* expr) {
 
   // Evaluate the value and potentially handle compound assignments by loading
   // the left-hand side value and performing a binary operation.
+  Node* frame_state_before_store = nullptr;
+  bool needs_frame_state_before = (assign_type == KEYED_PROPERTY);
   if (expr->is_compound()) {
     Node* old_value = NULL;
     switch (assign_type) {
@@ -1817,7 +1941,8 @@ void AstGraphBuilder::VisitAssignment(Assignment* expr) {
         Handle<Name> name = property->key()->AsLiteral()->AsPropertyName();
         VectorSlotPair pair =
             CreateVectorSlotPair(property->PropertyFeedbackSlot());
-        old_value = BuildNamedLoad(object, name, pair);
+        old_value =
+            BuildNamedLoad(object, name, pair, property->PropertyFeedbackId());
         PrepareFrameState(old_value, property->LoadId(),
                           OutputFrameStateCombine::Push());
         break;
@@ -1827,7 +1952,8 @@ void AstGraphBuilder::VisitAssignment(Assignment* expr) {
         Node* object = environment()->Peek(1);
         VectorSlotPair pair =
             CreateVectorSlotPair(property->PropertyFeedbackSlot());
-        old_value = BuildKeyedLoad(object, key, pair);
+        old_value =
+            BuildKeyedLoad(object, key, pair, property->PropertyFeedbackId());
         PrepareFrameState(old_value, property->LoadId(),
                           OutputFrameStateCombine::Push());
         break;
@@ -1843,8 +1969,21 @@ void AstGraphBuilder::VisitAssignment(Assignment* expr) {
                                     OutputFrameStateCombine::Push(),
                                     frame_state_before);
     environment()->Push(value);
+    if (needs_frame_state_before) {
+      frame_state_before_store = environment()->Checkpoint(
+          expr->binary_operation()->id(), OutputFrameStateCombine::PokeAt(0));
+    }
   } else {
     VisitForValue(expr->value());
+    if (needs_frame_state_before) {
+      // This frame state can be used for lazy-deopting from a to-number
+      // conversion if we are storing into a typed array. It is important
+      // that the frame state is usable for such lazy deopt (i.e., it has
+      // to specify how to override the value before the conversion, in this
+      // case, it overwrites the stack top).
+      frame_state_before_store = environment()->Checkpoint(
+          expr->value()->id(), OutputFrameStateCombine::PokeAt(0));
+    }
   }
 
   // Store the value.
@@ -1859,15 +1998,19 @@ void AstGraphBuilder::VisitAssignment(Assignment* expr) {
     case NAMED_PROPERTY: {
       Node* object = environment()->Pop();
       Handle<Name> name = property->key()->AsLiteral()->AsPropertyName();
-      Node* store = BuildNamedStore(object, name, value);
+      Node* store =
+          BuildNamedStore(object, name, value, expr->AssignmentFeedbackId());
       PrepareFrameState(store, expr->id(), ast_context()->GetStateCombine());
       break;
     }
     case KEYED_PROPERTY: {
       Node* key = environment()->Pop();
       Node* object = environment()->Pop();
-      Node* store = BuildKeyedStore(object, key, value);
-      PrepareFrameState(store, expr->id(), ast_context()->GetStateCombine());
+      Node* store =
+          BuildKeyedStore(object, key, value, expr->AssignmentFeedbackId());
+      PrepareFrameStateAfterAndBefore(store, expr->id(),
+                                      ast_context()->GetStateCombine(),
+                                      frame_state_before_store);
       break;
     }
   }
@@ -1898,13 +2041,13 @@ void AstGraphBuilder::VisitProperty(Property* expr) {
     VisitForValue(expr->obj());
     Node* object = environment()->Pop();
     Handle<Name> name = expr->key()->AsLiteral()->AsPropertyName();
-    value = BuildNamedLoad(object, name, pair);
+    value = BuildNamedLoad(object, name, pair, expr->PropertyFeedbackId());
   } else {
     VisitForValue(expr->obj());
     VisitForValue(expr->key());
     Node* key = environment()->Pop();
     Node* object = environment()->Pop();
-    value = BuildKeyedLoad(object, key, pair);
+    value = BuildKeyedLoad(object, key, pair, expr->PropertyFeedbackId());
   }
   PrepareFrameState(value, expr->id(), ast_context()->GetStateCombine());
   ast_context()->ProduceValue(value);
@@ -1952,11 +2095,13 @@ void AstGraphBuilder::VisitCall(Call* expr) {
           CreateVectorSlotPair(property->PropertyFeedbackSlot());
       if (property->key()->IsPropertyName()) {
         Handle<Name> name = property->key()->AsLiteral()->AsPropertyName();
-        callee_value = BuildNamedLoad(object, name, pair);
+        callee_value =
+            BuildNamedLoad(object, name, pair, property->PropertyFeedbackId());
       } else {
         VisitForValue(property->key());
         Node* key = environment()->Pop();
-        callee_value = BuildKeyedLoad(object, key, pair);
+        callee_value =
+            BuildKeyedLoad(object, key, pair, property->PropertyFeedbackId());
       }
       PrepareFrameState(callee_value, property->LoadId(),
                         OutputFrameStateCombine::Push());
@@ -2052,7 +2197,8 @@ void AstGraphBuilder::VisitCallJSRuntime(CallRuntime* expr) {
   CallFunctionFlags flags = NO_CALL_FUNCTION_FLAGS;
   Node* receiver_value = BuildLoadBuiltinsObject();
   VectorSlotPair pair = CreateVectorSlotPair(expr->CallRuntimeFeedbackSlot());
-  Node* callee_value = BuildNamedLoad(receiver_value, name, pair);
+  Node* callee_value =
+      BuildNamedLoad(receiver_value, name, pair, expr->CallRuntimeFeedbackId());
   // TODO(jarin): Find/create a bailout id to deoptimize to (crankshaft
   // refuses to optimize functions with jsruntime calls).
   PrepareFrameState(callee_value, BailoutId::None(),
@@ -2140,7 +2286,8 @@ void AstGraphBuilder::VisitCountOperation(CountOperation* expr) {
       Handle<Name> name = property->key()->AsLiteral()->AsPropertyName();
       VectorSlotPair pair =
           CreateVectorSlotPair(property->PropertyFeedbackSlot());
-      old_value = BuildNamedLoad(object, name, pair);
+      old_value =
+          BuildNamedLoad(object, name, pair, property->PropertyFeedbackId());
       PrepareFrameState(old_value, property->LoadId(),
                         OutputFrameStateCombine::Push());
       stack_depth = 1;
@@ -2153,7 +2300,8 @@ void AstGraphBuilder::VisitCountOperation(CountOperation* expr) {
       Node* object = environment()->Peek(1);
       VectorSlotPair pair =
           CreateVectorSlotPair(property->PropertyFeedbackSlot());
-      old_value = BuildKeyedLoad(object, key, pair);
+      old_value =
+          BuildKeyedLoad(object, key, pair, property->PropertyFeedbackId());
       PrepareFrameState(old_value, property->LoadId(),
                         OutputFrameStateCombine::Push());
       stack_depth = 2;
@@ -2165,6 +2313,11 @@ void AstGraphBuilder::VisitCountOperation(CountOperation* expr) {
   old_value = NewNode(javascript()->ToNumber(), old_value);
   PrepareFrameState(old_value, expr->ToNumberId(),
                     OutputFrameStateCombine::Push());
+
+  Node* frame_state_before_store =
+      assign_type == KEYED_PROPERTY
+          ? environment()->Checkpoint(expr->ToNumberId())
+          : nullptr;
 
   // Save result for postfix expressions at correct stack depth.
   if (is_postfix) environment()->Poke(stack_depth, old_value);
@@ -2191,7 +2344,8 @@ void AstGraphBuilder::VisitCountOperation(CountOperation* expr) {
     case NAMED_PROPERTY: {
       Node* object = environment()->Pop();
       Handle<Name> name = property->key()->AsLiteral()->AsPropertyName();
-      Node* store = BuildNamedStore(object, name, value);
+      Node* store =
+          BuildNamedStore(object, name, value, expr->CountStoreFeedbackId());
       environment()->Push(value);
       PrepareFrameState(store, expr->AssignmentId());
       environment()->Pop();
@@ -2200,9 +2354,12 @@ void AstGraphBuilder::VisitCountOperation(CountOperation* expr) {
     case KEYED_PROPERTY: {
       Node* key = environment()->Pop();
       Node* object = environment()->Pop();
-      Node* store = BuildKeyedStore(object, key, value);
+      Node* store =
+          BuildKeyedStore(object, key, value, expr->CountStoreFeedbackId());
       environment()->Push(value);
-      PrepareFrameState(store, expr->AssignmentId());
+      PrepareFrameStateAfterAndBefore(store, expr->AssignmentId(),
+                                      OutputFrameStateCombine::Ignore(),
+                                      frame_state_before_store);
       environment()->Pop();
       break;
     }
@@ -2285,6 +2442,9 @@ void AstGraphBuilder::VisitCompareOperation(CompareOperation* expr) {
 }
 
 
+void AstGraphBuilder::VisitSpread(Spread* expr) { UNREACHABLE(); }
+
+
 void AstGraphBuilder::VisitThisFunction(ThisFunction* expr) {
   Node* value = GetFunctionClosure();
   ast_context()->ProduceValue(value);
@@ -2315,7 +2475,8 @@ void AstGraphBuilder::VisitDeclarations(ZoneList<Declaration*>* declarations) {
   Node* flags = jsgraph()->Constant(encoded_flags);
   Node* pairs = jsgraph()->Constant(data);
   const Operator* op = javascript()->CallRuntime(Runtime::kDeclareGlobals, 3);
-  NewNode(op, current_context(), pairs, flags);
+  Node* call = NewNode(op, current_context(), pairs, flags);
+  PrepareFrameState(call, BailoutId::Declarations());
   globals()->clear();
 }
 
@@ -2329,6 +2490,12 @@ void AstGraphBuilder::VisitIfNotNull(Statement* stmt) {
 void AstGraphBuilder::VisitIterationBody(IterationStatement* stmt,
                                          LoopBuilder* loop) {
   ControlScopeForIteration scope(this, stmt, loop);
+  // TODO(mstarzinger): For now we only allow to interrupt non-asm.js code,
+  // which is a gigantic hack and should be extended to all code at some point.
+  if (!info()->shared_info()->asm_function()) {
+    Node* node = NewNode(javascript()->StackCheck());
+    PrepareFrameState(node, stmt->StackCheckId());
+  }
   Visit(stmt->body());
 }
 
@@ -2465,7 +2632,8 @@ Node* AstGraphBuilder::BuildPatchReceiverToGlobalProxy(Node* receiver) {
   Node* check = NewNode(javascript()->StrictEqual(), receiver, undefined);
   receiver_check.If(check);
   receiver_check.Then();
-  environment()->Push(BuildLoadGlobalProxy());
+  Node* proxy = BuildLoadGlobalProxy();
+  environment()->Push(proxy);
   receiver_check.Else();
   environment()->Push(receiver);
   receiver_check.End();
@@ -2473,10 +2641,14 @@ Node* AstGraphBuilder::BuildPatchReceiverToGlobalProxy(Node* receiver) {
 }
 
 
-Node* AstGraphBuilder::BuildLocalFunctionContext(Node* context, Node* closure) {
+Node* AstGraphBuilder::BuildLocalFunctionContext(Node* context) {
+  Node* closure = GetFunctionClosure();
+
   // Allocate a new local context.
-  const Operator* op = javascript()->CreateFunctionContext();
-  Node* local_context = NewNode(op, closure);
+  Node* local_context =
+      info()->scope()->is_script_scope()
+          ? BuildLocalScriptContext(info()->scope())
+          : NewNode(javascript()->CreateFunctionContext(), closure);
 
   // Copy parameters into context if necessary.
   int num_parameters = info()->scope()->num_parameters();
@@ -2496,12 +2668,25 @@ Node* AstGraphBuilder::BuildLocalFunctionContext(Node* context, Node* closure) {
 }
 
 
+Node* AstGraphBuilder::BuildLocalScriptContext(Scope* scope) {
+  Node* closure = GetFunctionClosure();
+
+  // Allocate a new local context.
+  const Operator* op = javascript()->CreateScriptContext();
+  Node* scope_info = jsgraph()->Constant(scope->GetScopeInfo(isolate()));
+  Node* local_context = NewNode(op, closure, scope_info);
+  PrepareFrameState(local_context, BailoutId::FunctionEntry());
+
+  return local_context;
+}
+
+
 Node* AstGraphBuilder::BuildLocalBlockContext(Scope* scope) {
   Node* closure = GetFunctionClosure();
 
   // Allocate a new local context.
   const Operator* op = javascript()->CreateBlockContext();
-  Node* scope_info = jsgraph()->Constant(scope->GetScopeInfo(info_->isolate()));
+  Node* scope_info = jsgraph()->Constant(scope->GetScopeInfo(isolate()));
   Node* local_context = NewNode(op, scope_info, closure);
 
   return local_context;
@@ -2543,16 +2728,10 @@ Node* AstGraphBuilder::BuildRestArgumentsArray(Variable* rest, int index) {
 
 Node* AstGraphBuilder::BuildHoleCheckSilent(Node* value, Node* for_hole,
                                             Node* not_hole) {
-  IfBuilder hole_check(this);
   Node* the_hole = jsgraph()->TheHoleConstant();
   Node* check = NewNode(javascript()->StrictEqual(), value, the_hole);
-  hole_check.If(check);
-  hole_check.Then();
-  environment()->Push(for_hole);
-  hole_check.Else();
-  environment()->Push(not_hole);
-  hole_check.End();
-  return environment()->Pop();
+  return NewNode(common()->Select(kMachAnyTagged, BranchHint::kFalse), check,
+                 for_hole, not_hole);
 }
 
 
@@ -2564,7 +2743,8 @@ Node* AstGraphBuilder::BuildHoleCheckThrow(Node* value, Variable* variable,
   Node* check = NewNode(javascript()->StrictEqual(), value, the_hole);
   hole_check.If(check);
   hole_check.Then();
-  environment()->Push(BuildThrowReferenceError(variable, bailout_id));
+  Node* error = BuildThrowReferenceError(variable, bailout_id);
+  environment()->Push(error);
   hole_check.Else();
   environment()->Push(not_hole);
   hole_check.End();
@@ -2580,13 +2760,8 @@ Node* AstGraphBuilder::BuildThrowIfStaticPrototype(Node* name,
   Node* check = NewNode(javascript()->StrictEqual(), name, prototype_string);
   prototype_check.If(check);
   prototype_check.Then();
-  {
-    const Operator* op =
-        javascript()->CallRuntime(Runtime::kThrowStaticPrototypeError, 0);
-    Node* call = NewNode(op);
-    PrepareFrameState(call, bailout_id);
-    environment()->Push(call);
-  }
+  Node* error = BuildThrowStaticPrototypeError(bailout_id);
+  environment()->Push(error);
   prototype_check.Else();
   environment()->Push(name);
   prototype_check.End();
@@ -2605,7 +2780,8 @@ Node* AstGraphBuilder::BuildVariableLoad(Variable* variable,
       // Global var, const, or let variable.
       Node* global = BuildLoadGlobalObject();
       Handle<Name> name = variable->name();
-      Node* node = BuildNamedLoad(global, name, feedback, contextual_mode);
+      Node* node = BuildNamedLoad(global, name, feedback,
+                                  TypeFeedbackId::None(), contextual_mode);
       PrepareFrameState(node, bailout_id, OutputFrameStateCombine::Push());
       return node;
     }
@@ -2712,7 +2888,8 @@ Node* AstGraphBuilder::BuildVariableAssignment(
       // Global var, const, or let variable.
       Node* global = BuildLoadGlobalObject();
       Handle<Name> name = variable->name();
-      Node* store = BuildNamedStore(global, name, value);
+      Node* store =
+          BuildNamedStore(global, name, value, TypeFeedbackId::None());
       PrepareFrameState(store, bailout_id, combine);
       return store;
     }
@@ -2808,33 +2985,42 @@ Node* AstGraphBuilder::BuildVariableAssignment(
 }
 
 
+static inline Node* Record(JSTypeFeedbackTable* js_type_feedback, Node* node,
+                           TypeFeedbackId id) {
+  if (js_type_feedback) js_type_feedback->Record(node, id);
+  return node;
+}
+
+
 Node* AstGraphBuilder::BuildKeyedLoad(Node* object, Node* key,
-                                      const VectorSlotPair& feedback) {
+                                      const VectorSlotPair& feedback,
+                                      TypeFeedbackId id) {
   const Operator* op = javascript()->LoadProperty(feedback);
-  return NewNode(op, object, key);
+  return Record(js_type_feedback_, NewNode(op, object, key), id);
 }
 
 
 Node* AstGraphBuilder::BuildNamedLoad(Node* object, Handle<Name> name,
                                       const VectorSlotPair& feedback,
-                                      ContextualMode mode) {
+                                      TypeFeedbackId id, ContextualMode mode) {
   const Operator* op =
       javascript()->LoadNamed(MakeUnique(name), feedback, mode);
-  return NewNode(op, object);
+  return Record(js_type_feedback_, NewNode(op, object), id);
 }
 
 
-Node* AstGraphBuilder::BuildKeyedStore(Node* object, Node* key, Node* value) {
+Node* AstGraphBuilder::BuildKeyedStore(Node* object, Node* key, Node* value,
+                                       TypeFeedbackId id) {
   const Operator* op = javascript()->StoreProperty(language_mode());
-  return NewNode(op, object, key, value);
+  return Record(js_type_feedback_, NewNode(op, object, key, value), id);
 }
 
 
 Node* AstGraphBuilder::BuildNamedStore(Node* object, Handle<Name> name,
-                                       Node* value) {
+                                       Node* value, TypeFeedbackId id) {
   const Operator* op =
       javascript()->StoreNamed(language_mode(), MakeUnique(name));
-  return NewNode(op, object, value);
+  return Record(js_type_feedback_, NewNode(op, object, value), id);
 }
 
 
@@ -2923,7 +3109,8 @@ Node* AstGraphBuilder::BuildSetHomeObject(Node* value, Node* home_object,
                                           Expression* expr) {
   if (!FunctionLiteral::NeedsHomeObject(expr)) return value;
   Handle<Name> name = isolate()->factory()->home_object_symbol();
-  Node* store = BuildNamedStore(value, name, home_object);
+  Node* store =
+      BuildNamedStore(value, name, home_object, TypeFeedbackId::None());
   PrepareFrameState(store, BailoutId::None());
   return store;
 }
@@ -2933,7 +3120,9 @@ Node* AstGraphBuilder::BuildThrowError(Node* exception, BailoutId bailout_id) {
   const Operator* op = javascript()->CallRuntime(Runtime::kThrow, 1);
   Node* call = NewNode(op, exception);
   PrepareFrameState(call, bailout_id);
-  return call;
+  Node* control = NewNode(common()->Throw(), call);
+  UpdateControlDependencyToLeaveFunction(control);
+  return control;
 }
 
 
@@ -2944,7 +3133,9 @@ Node* AstGraphBuilder::BuildThrowReferenceError(Variable* variable,
       javascript()->CallRuntime(Runtime::kThrowReferenceError, 1);
   Node* call = NewNode(op, variable_name);
   PrepareFrameState(call, bailout_id);
-  return call;
+  Node* control = NewNode(common()->Throw(), call);
+  UpdateControlDependencyToLeaveFunction(control);
+  return control;
 }
 
 
@@ -2953,7 +3144,20 @@ Node* AstGraphBuilder::BuildThrowConstAssignError(BailoutId bailout_id) {
       javascript()->CallRuntime(Runtime::kThrowConstAssignError, 0);
   Node* call = NewNode(op);
   PrepareFrameState(call, bailout_id);
-  return call;
+  Node* control = NewNode(common()->Throw(), call);
+  UpdateControlDependencyToLeaveFunction(control);
+  return control;
+}
+
+
+Node* AstGraphBuilder::BuildThrowStaticPrototypeError(BailoutId bailout_id) {
+  const Operator* op =
+      javascript()->CallRuntime(Runtime::kThrowStaticPrototypeError, 0);
+  Node* call = NewNode(op);
+  PrepareFrameState(call, bailout_id);
+  Node* control = NewNode(common()->Throw(), call);
+  UpdateControlDependencyToLeaveFunction(control);
+  return control;
 }
 
 
@@ -3127,7 +3331,7 @@ Node* AstGraphBuilder::MakeNode(const Operator* op, int value_input_count,
       if (!result->op()->HasProperty(Operator::kNoThrow) && inside_try_scope) {
         Node* on_exception = graph()->NewNode(common()->IfException(), result);
         environment_->UpdateControlDependency(on_exception);
-        execution_control()->ThrowValue(result);
+        execution_control()->ThrowValue(on_exception);
       }
       // Add implicit success continuation for throwing nodes.
       if (!result->op()->HasProperty(Operator::kNoThrow)) {
@@ -3153,8 +3357,7 @@ void AstGraphBuilder::UpdateControlDependencyToLeaveFunction(Node* exit) {
 
 void AstGraphBuilder::Environment::Merge(Environment* other) {
   DCHECK(values_.size() == other->values_.size());
-  // TODO(titzer): make context stack heights match.
-  DCHECK(contexts_.size() <= other->contexts_.size());
+  DCHECK(contexts_.size() == other->contexts_.size());
 
   // Nothing to do if the other environment is dead.
   if (other->IsMarkedAsUnreachable()) return;
@@ -3164,15 +3367,25 @@ void AstGraphBuilder::Environment::Merge(Environment* other) {
   if (this->IsMarkedAsUnreachable()) {
     Node* other_control = other->control_dependency_;
     Node* inputs[] = {other_control};
+    liveness_block_ = other->liveness_block_;
     control_dependency_ =
         graph()->NewNode(common()->Merge(1), arraysize(inputs), inputs, true);
     effect_dependency_ = other->effect_dependency_;
     values_ = other->values_;
-    // TODO(titzer): make context stack heights match.
-    size_t min = std::min(contexts_.size(), other->contexts_.size());
     contexts_ = other->contexts_;
-    contexts_.resize(min, nullptr);
     return;
+  }
+
+  // Record the merge for the local variable liveness calculation.
+  // Unfortunately, we have to mirror the logic in the MergeControl method:
+  // connect before merge or loop, or create a new merge otherwise.
+  if (FLAG_analyze_environment_liveness) {
+    if (GetControlDependency()->opcode() != IrOpcode::kLoop &&
+        GetControlDependency()->opcode() != IrOpcode::kMerge) {
+      liveness_block_ =
+          builder_->liveness_analyzer()->NewBlock(liveness_block());
+    }
+    liveness_block()->AddPredecessor(other->liveness_block());
   }
 
   // Create a merge of the control dependencies of both environments and update

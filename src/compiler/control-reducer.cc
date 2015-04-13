@@ -15,6 +15,11 @@ namespace v8 {
 namespace internal {
 namespace compiler {
 
+#define TRACE(...)                                       \
+  do {                                                   \
+    if (FLAG_trace_turbo_reduction) PrintF(__VA_ARGS__); \
+  } while (false)
+
 enum VisitState { kUnvisited = 0, kOnStack = 1, kRevisit = 2, kVisited = 3 };
 enum Decision { kFalse, kUnknown, kTrue };
 
@@ -42,9 +47,6 @@ class ReachabilityMarker : public NodeMarker<uint8_t> {
 };
 
 
-#define TRACE(x) \
-  if (FLAG_trace_turbo_reduction) PrintF x
-
 class ControlReducerImpl {
  public:
   ControlReducerImpl(Zone* zone, JSGraph* jsgraph,
@@ -54,7 +56,8 @@ class ControlReducerImpl {
         common_(common),
         state_(jsgraph->graph()->NodeCount(), kUnvisited, zone_),
         stack_(zone_),
-        revisit_(zone_) {}
+        revisit_(zone_),
+        max_phis_for_select_(0) {}
 
   Zone* zone_;
   JSGraph* jsgraph_;
@@ -62,6 +65,7 @@ class ControlReducerImpl {
   ZoneVector<VisitState> state_;
   ZoneDeque<Node*> stack_;
   ZoneDeque<Node*> revisit_;
+  int max_phis_for_select_;
 
   void Reduce() {
     Push(graph()->end());
@@ -104,41 +108,46 @@ class ControlReducerImpl {
     marked.Push(start);
     marked.SetReachableFromStart(start);
 
-    // We use a stack of (Node, Node::Uses::const_iterator) pairs to avoid
+    // We use a stack of (Node, Node::UseEdges::iterator) pairs to avoid
     // O(n^2) traversal.
-    typedef std::pair<Node*, Node::Uses::const_iterator> FwIter;
+    typedef std::pair<Node*, Node::UseEdges::iterator> FwIter;
     ZoneVector<FwIter> fw_stack(zone_);
-    fw_stack.push_back(FwIter(start, start->uses().begin()));
+    fw_stack.push_back(FwIter(start, start->use_edges().begin()));
 
     while (!fw_stack.empty()) {
       Node* node = fw_stack.back().first;
-      TRACE(("ControlFw: #%d:%s\n", node->id(), node->op()->mnemonic()));
+      TRACE("ControlFw: #%d:%s\n", node->id(), node->op()->mnemonic());
       bool pop = true;
-      while (fw_stack.back().second != node->uses().end()) {
-        Node* succ = *(fw_stack.back().second);
-        if (marked.IsOnStack(succ) && !marked.IsReachableFromEnd(succ)) {
-          // {succ} is on stack and not reachable from end.
-          Node* added = ConnectNTL(succ);
-          nodes.push_back(added);
-          marked.SetReachableFromEnd(added);
-          AddBackwardsReachableNodes(marked, nodes, nodes.size() - 1);
+      while (fw_stack.back().second != node->use_edges().end()) {
+        Edge edge = *(fw_stack.back().second);
+        if (NodeProperties::IsControlEdge(edge) &&
+            edge.from()->op()->ControlOutputCount() > 0) {
+          // Only walk control edges to control nodes.
+          Node* succ = edge.from();
 
-          // Reset the use iterators for the entire stack.
-          for (size_t i = 0; i < fw_stack.size(); i++) {
-            FwIter& iter = fw_stack[i];
-            fw_stack[i] = FwIter(iter.first, iter.first->uses().begin());
+          if (marked.IsOnStack(succ) && !marked.IsReachableFromEnd(succ)) {
+            // {succ} is on stack and not reachable from end.
+            Node* added = ConnectNTL(succ);
+            nodes.push_back(added);
+            marked.SetReachableFromEnd(added);
+            AddBackwardsReachableNodes(marked, nodes, nodes.size() - 1);
+
+            // Reset the use iterators for the entire stack.
+            for (size_t i = 0; i < fw_stack.size(); i++) {
+              FwIter& iter = fw_stack[i];
+              fw_stack[i] = FwIter(iter.first, iter.first->use_edges().begin());
+            }
+            pop = false;  // restart traversing successors of this node.
+            break;
           }
-          pop = false;  // restart traversing successors of this node.
-          break;
-        }
-        if (succ->op()->ControlOutputCount() > 0 &&
-            !marked.IsReachableFromStart(succ)) {
-          // {succ} is a control node and not yet reached from start.
-          marked.Push(succ);
-          marked.SetReachableFromStart(succ);
-          fw_stack.push_back(FwIter(succ, succ->uses().begin()));
-          pop = false;  // "recurse" into successor control node.
-          break;
+          if (!marked.IsReachableFromStart(succ)) {
+            // {succ} is not yet reached from start.
+            marked.Push(succ);
+            marked.SetReachableFromStart(succ);
+            fw_stack.push_back(FwIter(succ, succ->use_edges().begin()));
+            pop = false;  // "recurse" into successor control node.
+            break;
+          }
         }
         ++fw_stack.back().second;
       }
@@ -165,7 +174,8 @@ class ControlReducerImpl {
 
   // Connect {loop}, the header of a non-terminating loop, to the end node.
   Node* ConnectNTL(Node* loop) {
-    TRACE(("ConnectNTL: #%d:%s\n", loop->id(), loop->op()->mnemonic()));
+    TRACE("ConnectNTL: #%d:%s\n", loop->id(), loop->op()->mnemonic());
+    DCHECK_EQ(IrOpcode::kLoop, loop->opcode());
 
     Node* always = graph()->NewNode(common_->Always());
     // Mark the node as visited so that we can revisit later.
@@ -280,9 +290,9 @@ class ControlReducerImpl {
       for (Edge edge : node->use_edges()) {
         Node* use = edge.from();
         if (!marked.IsReachableFromEnd(use)) {
-          TRACE(("DeadLink: #%d:%s(%d) -> #%d:%s\n", use->id(),
-                 use->op()->mnemonic(), edge.index(), node->id(),
-                 node->op()->mnemonic()));
+          TRACE("DeadLink: #%d:%s(%d) -> #%d:%s\n", use->id(),
+                use->op()->mnemonic(), edge.index(), node->id(),
+                node->op()->mnemonic());
           edge.UpdateTo(NULL);
         }
       }
@@ -322,7 +332,7 @@ class ControlReducerImpl {
 
     if (node->IsDead()) return Pop();  // Node was killed while on stack.
 
-    TRACE(("ControlReduce: #%d:%s\n", node->id(), node->op()->mnemonic()));
+    TRACE("ControlReduce: #%d:%s\n", node->id(), node->op()->mnemonic());
 
     // Recurse on an input if necessary.
     for (Node* const input : node->inputs()) {
@@ -374,7 +384,7 @@ class ControlReducerImpl {
   void Revisit(Node* node) {
     size_t id = static_cast<size_t>(node->id());
     if (id < state_.size() && state_[id] == kVisited) {
-      TRACE(("  Revisit #%d:%s\n", node->id(), node->op()->mnemonic()));
+      TRACE("  Revisit #%d:%s\n", node->id(), node->op()->mnemonic());
       state_[id] = kRevisit;
       revisit_.push_back(node);
     }
@@ -398,7 +408,7 @@ class ControlReducerImpl {
       // If a node has only one control input and it is dead, replace with dead.
       Node* control = NodeProperties::GetControlInput(node);
       if (control->opcode() == IrOpcode::kDead) {
-        TRACE(("ControlDead: #%d:%s\n", node->id(), node->op()->mnemonic()));
+        TRACE("ControlDead: #%d:%s\n", node->id(), node->op()->mnemonic());
         return control;
       }
     }
@@ -408,9 +418,9 @@ class ControlReducerImpl {
       case IrOpcode::kBranch:
         return ReduceBranch(node);
       case IrOpcode::kIfTrue:
-        return ReduceIfTrue(node);
+        return ReduceIfProjection(node, kTrue);
       case IrOpcode::kIfFalse:
-        return ReduceIfFalse(node);
+        return ReduceIfProjection(node, kFalse);
       case IrOpcode::kLoop:
       case IrOpcode::kMerge:
         return ReduceMerge(node);
@@ -425,7 +435,7 @@ class ControlReducerImpl {
   }
 
   // Try to statically fold a condition.
-  Decision DecideCondition(Node* cond) {
+  Decision DecideCondition(Node* cond, bool recurse = true) {
     switch (cond->opcode()) {
       case IrOpcode::kInt32Constant:
         return Int32Matcher(cond).Is(0) ? kFalse : kTrue;
@@ -436,13 +446,28 @@ class ControlReducerImpl {
       case IrOpcode::kHeapConstant: {
         Handle<Object> object =
             HeapObjectMatcher<Object>(cond).Value().handle();
-        if (object->IsTrue()) return kTrue;
-        if (object->IsFalse()) return kFalse;
-        // TODO(turbofan): decide more conditions for heap constants.
-        break;
+        return object->BooleanValue() ? kTrue : kFalse;
+      }
+      case IrOpcode::kPhi: {
+        if (!recurse) return kUnknown;  // Only go one level deep checking phis.
+        Decision result = kUnknown;
+        // Check if all inputs to a phi result in the same decision.
+        for (int i = cond->op()->ValueInputCount() - 1; i >= 0; i--) {
+          // Recurse only one level, since phis can be involved in cycles.
+          Decision decision = DecideCondition(cond->InputAt(i), false);
+          if (decision == kUnknown) return kUnknown;
+          if (result == kUnknown) result = decision;
+          if (result != decision) return kUnknown;
+        }
+        return result;
       }
       default:
         break;
+    }
+    if (NodeProperties::IsTyped(cond)) {
+      // If the node has a range type, check whether the range excludes 0.
+      Type* type = NodeProperties::GetBounds(cond).upper;
+      if (type->IsRange() && (type->Min() > 0 || type->Max() < 0)) return kTrue;
     }
     return kUnknown;
   }
@@ -507,13 +532,13 @@ class ControlReducerImpl {
       index++;
     }
 
-    TRACE(("ReduceMerge: #%d:%s (%d live)\n", node->id(),
-           node->op()->mnemonic(), live));
+    TRACE("ReduceMerge: #%d:%s (%d of %d live)\n", node->id(),
+          node->op()->mnemonic(), live, index);
 
     if (live == 0) return dead();  // no remaining inputs.
 
     // Gather phis and effect phis to be edited.
-    ZoneVector<Node*> phis(zone_);
+    NodeVector phis(zone_);
     for (Node* const use : node->uses()) {
       if (NodeProperties::IsPhi(use)) phis.push_back(use);
     }
@@ -530,8 +555,8 @@ class ControlReducerImpl {
     if (live < node->InputCount()) {
       // Edit phis in place, removing dead inputs and revisiting them.
       for (Node* const phi : phis) {
-        TRACE(("  PhiInMerge: #%d:%s (%d live)\n", phi->id(),
-               phi->op()->mnemonic(), live));
+        TRACE("  PhiInMerge: #%d:%s (%d live)\n", phi->id(),
+              phi->op()->mnemonic(), live);
         RemoveDeadInputs(node, phi);
         Revisit(phi);
       }
@@ -541,26 +566,34 @@ class ControlReducerImpl {
 
     DCHECK_EQ(live, node->InputCount());
 
-    // Check if it's an unused diamond.
-    if (live == 2 && phis.empty()) {
-      Node* node0 = node->InputAt(0);
-      Node* node1 = node->InputAt(1);
-      if (((node0->opcode() == IrOpcode::kIfTrue &&
-            node1->opcode() == IrOpcode::kIfFalse) ||
-           (node0->opcode() == IrOpcode::kIfTrue &&
-            node1->opcode() == IrOpcode::kIfFalse)) &&
-          node0->OwnedBy(node) && node1->OwnedBy(node)) {
-        Node* branch0 = NodeProperties::GetControlInput(node0);
-        Node* branch1 = NodeProperties::GetControlInput(node1);
-        if (branch0 == branch1) {
-          // It's a dead diamond, i.e. neither the IfTrue nor the IfFalse nodes
-          // have users except for the Merge and the Merge has no Phi or
-          // EffectPhi uses, so replace the Merge with the control input of the
-          // diamond.
-          TRACE(("  DeadDiamond: #%d:%s #%d:%s #%d:%s\n", node0->id(),
-                 node0->op()->mnemonic(), node1->id(), node1->op()->mnemonic(),
-                 branch0->id(), branch0->op()->mnemonic()));
-          return NodeProperties::GetControlInput(branch0);
+    // Try to remove dead diamonds or introduce selects.
+    if (live == 2 && CheckPhisForSelect(phis)) {
+      DiamondMatcher matcher(node);
+      if (matcher.Matched() && matcher.IfProjectionsAreOwned()) {
+        // Dead diamond, i.e. neither the IfTrue nor the IfFalse nodes
+        // have uses except for the Merge. Remove the branch if there
+        // are no phis or replace phis with selects.
+        Node* control = NodeProperties::GetControlInput(matcher.Branch());
+        if (phis.size() == 0) {
+          // No phis. Remove the branch altogether.
+          TRACE("  DeadDiamond: #%d:Branch #%d:IfTrue #%d:IfFalse\n",
+                matcher.Branch()->id(), matcher.IfTrue()->id(),
+                matcher.IfFalse()->id());
+          return control;
+        } else {
+          // A small number of phis. Replace with selects.
+          Node* cond = matcher.Branch()->InputAt(0);
+          for (Node* phi : phis) {
+            Node* select = graph()->NewNode(
+                common_->Select(OpParameter<MachineType>(phi),
+                                BranchHintOf(matcher.Branch()->op())),
+                cond, matcher.TrueInputOf(phi), matcher.FalseInputOf(phi));
+            TRACE("  MatchSelect: #%d:Branch #%d:IfTrue #%d:IfFalse -> #%d\n",
+                  matcher.Branch()->id(), matcher.IfTrue()->id(),
+                  matcher.IfFalse()->id(), select->id());
+            ReplaceNode(phi, select);
+          }
+          return control;
         }
       }
     }
@@ -568,29 +601,23 @@ class ControlReducerImpl {
     return node;
   }
 
-  // Reduce branches if they have constant inputs.
-  Node* ReduceIfTrue(Node* node) {
-    Node* branch = node->InputAt(0);
-    DCHECK_EQ(IrOpcode::kBranch, branch->opcode());
-    Decision result = DecideCondition(branch->InputAt(0));
-    if (result == kTrue) {
-      // fold a true branch by replacing IfTrue with the branch control.
-      TRACE(("BranchReduce: #%d:%s => #%d:%s\n", branch->id(),
-             branch->op()->mnemonic(), node->id(), node->op()->mnemonic()));
-      return branch->InputAt(1);
+  bool CheckPhisForSelect(const NodeVector& phis) {
+    if (phis.size() > static_cast<size_t>(max_phis_for_select_)) return false;
+    for (Node* phi : phis) {
+      if (phi->opcode() != IrOpcode::kPhi) return false;  // no EffectPhis.
     }
-    return result == kUnknown ? node : dead();
+    return true;
   }
 
-  // Reduce branches if they have constant inputs.
-  Node* ReduceIfFalse(Node* node) {
+  // Reduce if projections if the branch has a constant input.
+  Node* ReduceIfProjection(Node* node, Decision decision) {
     Node* branch = node->InputAt(0);
     DCHECK_EQ(IrOpcode::kBranch, branch->opcode());
     Decision result = DecideCondition(branch->InputAt(0));
-    if (result == kFalse) {
-      // fold a false branch by replacing IfFalse with the branch control.
-      TRACE(("BranchReduce: #%d:%s => #%d:%s\n", branch->id(),
-             branch->op()->mnemonic(), node->id(), node->op()->mnemonic()));
+    if (result == decision) {
+      // Fold a branch by replacing IfTrue/IfFalse with the branch control.
+      TRACE("  BranchReduce: #%d:%s => #%d:%s\n", branch->id(),
+            branch->op()->mnemonic(), node->id(), node->op()->mnemonic());
       return branch->InputAt(1);
     }
     return result == kUnknown ? node : dead();
@@ -622,9 +649,8 @@ class ControlReducerImpl {
   // Replace uses of {node} with {replacement} and revisit the uses.
   void ReplaceNode(Node* node, Node* replacement) {
     if (node == replacement) return;
-    TRACE(("  Replace: #%d:%s with #%d:%s\n", node->id(),
-           node->op()->mnemonic(), replacement->id(),
-           replacement->op()->mnemonic()));
+    TRACE("  Replace: #%d:%s with #%d:%s\n", node->id(), node->op()->mnemonic(),
+          replacement->id(), replacement->op()->mnemonic());
     for (Node* const use : node->uses()) {
       // Don't revisit this node if it refers to itself.
       if (use != node) Revisit(use);
@@ -638,8 +664,10 @@ class ControlReducerImpl {
 
 
 void ControlReducer::ReduceGraph(Zone* zone, JSGraph* jsgraph,
-                                 CommonOperatorBuilder* common) {
+                                 CommonOperatorBuilder* common,
+                                 int max_phis_for_select) {
   ControlReducerImpl impl(zone, jsgraph, common);
+  impl.max_phis_for_select_ = max_phis_for_select;
   impl.Reduce();
 }
 
@@ -651,9 +679,11 @@ void ControlReducer::TrimGraph(Zone* zone, JSGraph* jsgraph) {
 
 
 Node* ControlReducer::ReduceMerge(JSGraph* jsgraph,
-                                  CommonOperatorBuilder* common, Node* node) {
+                                  CommonOperatorBuilder* common, Node* node,
+                                  int max_phis_for_select) {
   Zone zone;
   ControlReducerImpl impl(&zone, jsgraph, common);
+  impl.max_phis_for_select_ = max_phis_for_select;
   return impl.ReduceMerge(node);
 }
 
@@ -674,9 +704,9 @@ Node* ControlReducer::ReduceIfNodeForTesting(JSGraph* jsgraph,
   ControlReducerImpl impl(&zone, jsgraph, common);
   switch (node->opcode()) {
     case IrOpcode::kIfTrue:
-      return impl.ReduceIfTrue(node);
+      return impl.ReduceIfProjection(node, kTrue);
     case IrOpcode::kIfFalse:
-      return impl.ReduceIfFalse(node);
+      return impl.ReduceIfProjection(node, kFalse);
     default:
       return node;
   }

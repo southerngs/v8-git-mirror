@@ -118,7 +118,7 @@ bool LCodeGen::GeneratePrologue() {
     // Sloppy mode functions and builtins need to replace the receiver with the
     // global proxy when called as functions (without an explicit receiver
     // object).
-    if (info_->this_has_uses() && is_sloppy(info_->language_mode()) &&
+    if (graph()->this_has_uses() && is_sloppy(info_->language_mode()) &&
         !info_->is_native()) {
       Label ok;
       int receiver_offset = info_->scope()->num_parameters() * kPointerSize;
@@ -175,6 +175,7 @@ bool LCodeGen::GeneratePrologue() {
     Comment(";;; Allocate local context");
     bool need_write_barrier = true;
     // Argument to NewContext is the function, which is in a1.
+    DCHECK(!info()->scope()->is_script_scope());
     if (heap_slots <= FastNewContextStub::kMaximumSlots) {
       FastNewContextStub stub(isolate(), heap_slots);
       __ CallStub(&stub);
@@ -301,48 +302,71 @@ bool LCodeGen::GenerateDeferredCode() {
 bool LCodeGen::GenerateJumpTable() {
   if (jump_table_.length() > 0) {
     Comment(";;; -------------------- Jump table --------------------");
-  }
-  Assembler::BlockTrampolinePoolScope block_trampoline_pool(masm_);
-  Label table_start, call_deopt_entry;
-  __ bind(&table_start);
-  Label needs_frame;
-  for (int i = 0; i < jump_table_.length(); i++) {
-    Deoptimizer::JumpTableEntry* table_entry = &jump_table_[i];
-    __ bind(&table_entry->label);
-    Address entry = table_entry->address;
-    DeoptComment(table_entry->deopt_info);
-    __ li(t9, Operand(ExternalReference::ForDeoptEntry(entry)));
-    if (table_entry->needs_frame) {
-      DCHECK(!info()->saves_caller_doubles());
-      Comment(";;; call deopt with frame");
-      __ MultiPush(cp.bit() | fp.bit() | ra.bit());
-      __ Call(&needs_frame);
-    } else {
-      __ Call(&call_deopt_entry);
+    Assembler::BlockTrampolinePoolScope block_trampoline_pool(masm_);
+    Label table_start, call_deopt_entry;
+
+    __ bind(&table_start);
+    Label needs_frame;
+    Address base = jump_table_[0]->address;
+    for (int i = 0; i < jump_table_.length(); i++) {
+      Deoptimizer::JumpTableEntry* table_entry = jump_table_[i];
+      __ bind(&table_entry->label);
+      Address entry = table_entry->address;
+      DeoptComment(table_entry->deopt_info);
+
+      // Second-level deopt table entries are contiguous and small, so instead
+      // of loading the full, absolute address of each one, load the base
+      // address and add an immediate offset.
+      if (is_int16(entry - base)) {
+        if (table_entry->needs_frame) {
+          DCHECK(!info()->saves_caller_doubles());
+          Comment(";;; call deopt with frame");
+          __ MultiPush(cp.bit() | fp.bit() | ra.bit());
+          __ BranchAndLink(&needs_frame, USE_DELAY_SLOT);
+          __ li(t9, Operand(entry - base));
+        } else {
+          __ BranchAndLink(&call_deopt_entry, USE_DELAY_SLOT);
+          __ li(t9, Operand(entry - base));
+        }
+
+      } else {
+        __ li(t9, Operand(entry - base));
+        if (table_entry->needs_frame) {
+          DCHECK(!info()->saves_caller_doubles());
+          Comment(";;; call deopt with frame");
+          __ MultiPush(cp.bit() | fp.bit() | ra.bit());
+          __ BranchAndLink(&needs_frame);
+        } else {
+          __ BranchAndLink(&call_deopt_entry);
+        }
+      }
+      info()->LogDeoptCallPosition(masm()->pc_offset(),
+                                   table_entry->deopt_info.inlining_id);
     }
+    if (needs_frame.is_linked()) {
+      __ bind(&needs_frame);
+      // This variant of deopt can only be used with stubs. Since we don't
+      // have a function pointer to install in the stack frame that we're
+      // building, install a special marker there instead.
+      DCHECK(info()->IsStub());
+      __ li(at, Operand(Smi::FromInt(StackFrame::STUB)));
+      __ push(at);
+      __ Daddu(fp, sp, Operand(StandardFrameConstants::kFixedFrameSizeFromFp));
+    }
+
+    Comment(";;; call deopt");
+    __ bind(&call_deopt_entry);
+
+    if (info()->saves_caller_doubles()) {
+      DCHECK(info()->IsStub());
+      RestoreCallerDoubles();
+    }
+
+    __ li(at,
+          Operand(reinterpret_cast<int64_t>(base), RelocInfo::RUNTIME_ENTRY));
+    __ Daddu(t9, t9, Operand(at));
+    __ Jump(t9);
   }
-  if (needs_frame.is_linked()) {
-    __ bind(&needs_frame);
-    // This variant of deopt can only be used with stubs. Since we don't
-    // have a function pointer to install in the stack frame that we're
-    // building, install a special marker there instead.
-    DCHECK(info()->IsStub());
-    __ li(at, Operand(Smi::FromInt(StackFrame::STUB)));
-    __ push(at);
-    __ Daddu(fp, sp, Operand(StandardFrameConstants::kFixedFrameSizeFromFp));
-  }
-
-  Comment(";;; call deopt");
-  __ bind(&call_deopt_entry);
-
-  if (info()->saves_caller_doubles()) {
-    DCHECK(info()->IsStub());
-    RestoreCallerDoubles();
-  }
-  __ Jump(t9);
-
-  __ RecordComment("]");
-
   // The deoptimization jump table is the last part of the instruction
   // sequence. Mark the generated code as done unless we bailed out.
   if (!is_aborted()) status_ = DONE;
@@ -811,8 +835,8 @@ void LCodeGen::DeoptimizeIf(Condition condition, LInstruction* instr,
     __ bind(&skip);
   }
 
-  Deoptimizer::DeoptInfo deopt_info(instr->hydrogen_value()->position(),
-                                    instr->Mnemonic(), deopt_reason);
+  Deoptimizer::DeoptInfo deopt_info = MakeDeoptInfo(instr, deopt_reason);
+
   DCHECK(info()->IsStub() || frame_is_built_);
   // Go through jump table if we need to handle condition, build frame, or
   // restore caller doubles.
@@ -820,17 +844,19 @@ void LCodeGen::DeoptimizeIf(Condition condition, LInstruction* instr,
       !info()->saves_caller_doubles()) {
     DeoptComment(deopt_info);
     __ Call(entry, RelocInfo::RUNTIME_ENTRY, condition, src1, src2);
+    info()->LogDeoptCallPosition(masm()->pc_offset(), deopt_info.inlining_id);
   } else {
-    Deoptimizer::JumpTableEntry table_entry(entry, deopt_info, bailout_type,
-                                            !frame_is_built_);
+    Deoptimizer::JumpTableEntry* table_entry =
+        new (zone()) Deoptimizer::JumpTableEntry(
+            entry, deopt_info, bailout_type, !frame_is_built_);
     // We often have several deopts to the same entry, reuse the last
     // jump entry if this is the case.
     if (FLAG_trace_deopt || isolate()->cpu_profiler()->is_profiling() ||
         jump_table_.is_empty() ||
-        !table_entry.IsEquivalentTo(jump_table_.last())) {
+        !table_entry->IsEquivalentTo(*jump_table_.last())) {
       jump_table_.Add(table_entry, zone());
     }
-    __ Branch(&jump_table_.last().label, condition, src1, src2);
+    __ Branch(&jump_table_.last()->label, condition, src1, src2);
   }
 }
 
@@ -2735,8 +2761,8 @@ void LCodeGen::DoInstanceOfKnownGlobal(LInstanceOfKnownGlobal* instr) {
   // root array to force relocation to be able to later patch with
   // the cached map.
   Handle<Cell> cell = factory()->NewCell(factory()->the_hole_value());
-  __ li(at, Operand(Handle<Object>(cell)));
-  __ ld(at, FieldMemOperand(at, PropertyCell::kValueOffset));
+  __ li(at, Operand(cell));
+  __ ld(at, FieldMemOperand(at, Cell::kValueOffset));
   __ BranchShort(&cache_miss, ne, map, Operand(at));
   // We use Factory::the_hole_value() on purpose instead of loading from the
   // root array to force relocation to be able to later patch
@@ -2876,17 +2902,6 @@ void LCodeGen::DoReturn(LReturn* instr) {
 }
 
 
-void LCodeGen::DoLoadGlobalCell(LLoadGlobalCell* instr) {
-  Register result = ToRegister(instr->result());
-  __ li(at, Operand(Handle<Object>(instr->hydrogen()->cell().handle())));
-  __ ld(result, FieldMemOperand(at, Cell::kValueOffset));
-  if (instr->hydrogen()->RequiresHoleCheck()) {
-    __ LoadRoot(at, Heap::kTheHoleValueRootIndex);
-    DeoptimizeIf(eq, instr, Deoptimizer::kHole, result, Operand(at));
-  }
-}
-
-
 template <class T>
 void LCodeGen::EmitVectorLoadICRegisters(T* instr) {
   DCHECK(FLAG_vector_ics);
@@ -2919,31 +2934,6 @@ void LCodeGen::DoLoadGlobalGeneric(LLoadGlobalGeneric* instr) {
   Handle<Code> ic = CodeFactory::LoadICInOptimizedCode(isolate(), mode,
                                                        PREMONOMORPHIC).code();
   CallCode(ic, RelocInfo::CODE_TARGET, instr);
-}
-
-
-void LCodeGen::DoStoreGlobalCell(LStoreGlobalCell* instr) {
-  Register value = ToRegister(instr->value());
-  Register cell = scratch0();
-
-  // Load the cell.
-  __ li(cell, Operand(instr->hydrogen()->cell().handle()));
-
-  // If the cell we are storing to contains the hole it could have
-  // been deleted from the property dictionary. In that case, we need
-  // to update the property details in the property dictionary to mark
-  // it as no longer deleted.
-  if (instr->hydrogen()->RequiresHoleCheck()) {
-    // We use a temp to check the payload.
-    Register payload = ToRegister(instr->temp());
-    __ ld(payload, FieldMemOperand(cell, Cell::kValueOffset));
-    __ LoadRoot(at, Heap::kTheHoleValueRootIndex);
-    DeoptimizeIf(eq, instr, Deoptimizer::kHole, payload, Operand(at));
-  }
-
-  // Store the value.
-  __ sd(value, FieldMemOperand(cell, Cell::kValueOffset));
-  // Cells are always rescanned, so no write barrier here.
 }
 
 
@@ -3407,7 +3397,7 @@ void LCodeGen::DoLoadKeyedGeneric(LLoadKeyedGeneric* instr) {
   DCHECK(ToRegister(instr->object()).is(LoadDescriptor::ReceiverRegister()));
   DCHECK(ToRegister(instr->key()).is(LoadDescriptor::NameRegister()));
 
-  if (FLAG_vector_ics) {
+  if (instr->hydrogen()->HasVectorAndSlot()) {
     EmitVectorLoadICRegisters<LLoadKeyedGeneric>(instr);
   }
 
@@ -5282,7 +5272,7 @@ void LCodeGen::DoCheckValue(LCheckValue* instr) {
   if (isolate()->heap()->InNewSpace(*object)) {
     Register reg = ToRegister(instr->value());
     Handle<Cell> cell = isolate()->factory()->NewCell(object);
-    __ li(at, Operand(Handle<Object>(cell)));
+    __ li(at, Operand(cell));
     __ ld(at, FieldMemOperand(at, Cell::kValueOffset));
     DeoptimizeIf(ne, instr, Deoptimizer::kValueMismatch, reg, Operand(at));
   } else {
@@ -5457,13 +5447,9 @@ void LCodeGen::DoAllocate(LAllocate* instr) {
   if (instr->hydrogen()->MustAllocateDoubleAligned()) {
     flags = static_cast<AllocationFlags>(flags | DOUBLE_ALIGNMENT);
   }
-  if (instr->hydrogen()->IsOldPointerSpaceAllocation()) {
-    DCHECK(!instr->hydrogen()->IsOldDataSpaceAllocation());
+  if (instr->hydrogen()->IsOldSpaceAllocation()) {
     DCHECK(!instr->hydrogen()->IsNewSpaceAllocation());
-    flags = static_cast<AllocationFlags>(flags | PRETENURE_OLD_POINTER_SPACE);
-  } else if (instr->hydrogen()->IsOldDataSpaceAllocation()) {
-    DCHECK(!instr->hydrogen()->IsNewSpaceAllocation());
-    flags = static_cast<AllocationFlags>(flags | PRETENURE_OLD_DATA_SPACE);
+    flags = static_cast<AllocationFlags>(flags | PRETENURE);
   }
   if (instr->size()->IsConstantOperand()) {
     int32_t size = ToInteger32(LConstantOperand::cast(instr->size()));
@@ -5526,13 +5512,9 @@ void LCodeGen::DoDeferredAllocate(LAllocate* instr) {
 
   int flags = AllocateDoubleAlignFlag::encode(
       instr->hydrogen()->MustAllocateDoubleAligned());
-  if (instr->hydrogen()->IsOldPointerSpaceAllocation()) {
-    DCHECK(!instr->hydrogen()->IsOldDataSpaceAllocation());
+  if (instr->hydrogen()->IsOldSpaceAllocation()) {
     DCHECK(!instr->hydrogen()->IsNewSpaceAllocation());
-    flags = AllocateTargetSpace::update(flags, OLD_POINTER_SPACE);
-  } else if (instr->hydrogen()->IsOldDataSpaceAllocation()) {
-    DCHECK(!instr->hydrogen()->IsNewSpaceAllocation());
-    flags = AllocateTargetSpace::update(flags, OLD_DATA_SPACE);
+    flags = AllocateTargetSpace::update(flags, OLD_SPACE);
   } else {
     flags = AllocateTargetSpace::update(flags, NEW_SPACE);
   }

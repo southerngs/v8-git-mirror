@@ -228,13 +228,20 @@ void Verifier::Visitor::Check(Node* node) {
       // Type is empty.
       CheckNotTyped(node);
       break;
-    case IrOpcode::kIfSuccess:
-    case IrOpcode::kIfException: {
+    case IrOpcode::kIfSuccess: {
       // IfSuccess and IfException continuation only on throwing nodes.
       Node* input = NodeProperties::GetControlInput(node, 0);
       CHECK(!input->op()->HasProperty(Operator::kNoThrow));
       // Type is empty.
       CheckNotTyped(node);
+      break;
+    }
+    case IrOpcode::kIfException: {
+      // IfSuccess and IfException continuation only on throwing nodes.
+      Node* input = NodeProperties::GetControlInput(node, 0);
+      CHECK(!input->op()->HasProperty(Operator::kNoThrow));
+      // Type can be anything.
+      CheckUpperIs(node, Type::Any());
       break;
     }
     case IrOpcode::kSwitch: {
@@ -427,6 +434,7 @@ void Verifier::Visitor::Check(Node* node) {
       // TODO(jarin): what are the constraints on these?
       break;
     case IrOpcode::kStateValues:
+    case IrOpcode::kTypedStateValues:
       // TODO(jarin): what are the constraints on these?
       break;
     case IrOpcode::kCall:
@@ -545,7 +553,6 @@ void Verifier::Visitor::Check(Node* node) {
     case IrOpcode::kJSCallFunction:
     case IrOpcode::kJSCallRuntime:
     case IrOpcode::kJSYield:
-    case IrOpcode::kJSDebugger:
       // Type can be anything.
       CheckUpperIs(node, Type::Any());
       break;
@@ -557,10 +564,6 @@ void Verifier::Visitor::Check(Node* node) {
 
     // Simplified operators
     // -------------------------------
-    case IrOpcode::kAnyToBoolean:
-      // Type is Boolean.
-      CheckUpperIs(node, Type::Boolean());
-      break;
     case IrOpcode::kBooleanNot:
       // Boolean -> Boolean
       CheckValueInputIs(node, 0, Type::Boolean());
@@ -622,10 +625,6 @@ void Verifier::Visitor::Check(Node* node) {
     case IrOpcode::kReferenceEqual: {
       // (Unique, Any) -> Boolean  and
       // (Any, Unique) -> Boolean
-      if (typing == TYPED) {
-        CHECK(bounds(ValueInput(node, 0)).upper->Is(Type::Unique()) ||
-              bounds(ValueInput(node, 1)).upper->Is(Type::Unique()));
-      }
       CheckUpperIs(node, Type::Boolean());
       break;
     }
@@ -754,6 +753,7 @@ void Verifier::Visitor::Check(Node* node) {
     case IrOpcode::kWord32Sar:
     case IrOpcode::kWord32Ror:
     case IrOpcode::kWord32Equal:
+    case IrOpcode::kWord32Clz:
     case IrOpcode::kWord64And:
     case IrOpcode::kWord64Or:
     case IrOpcode::kWord64Xor:
@@ -787,6 +787,17 @@ void Verifier::Visitor::Check(Node* node) {
     case IrOpcode::kUint64Div:
     case IrOpcode::kUint64Mod:
     case IrOpcode::kUint64LessThan:
+    case IrOpcode::kFloat32Add:
+    case IrOpcode::kFloat32Sub:
+    case IrOpcode::kFloat32Mul:
+    case IrOpcode::kFloat32Div:
+    case IrOpcode::kFloat32Max:
+    case IrOpcode::kFloat32Min:
+    case IrOpcode::kFloat32Abs:
+    case IrOpcode::kFloat32Sqrt:
+    case IrOpcode::kFloat32Equal:
+    case IrOpcode::kFloat32LessThan:
+    case IrOpcode::kFloat32LessThanOrEqual:
     case IrOpcode::kFloat64Add:
     case IrOpcode::kFloat64Sub:
     case IrOpcode::kFloat64Mul:
@@ -794,6 +805,7 @@ void Verifier::Visitor::Check(Node* node) {
     case IrOpcode::kFloat64Mod:
     case IrOpcode::kFloat64Max:
     case IrOpcode::kFloat64Min:
+    case IrOpcode::kFloat64Abs:
     case IrOpcode::kFloat64Sqrt:
     case IrOpcode::kFloat64RoundDown:
     case IrOpcode::kFloat64RoundTruncate:
@@ -829,7 +841,23 @@ void Verifier::Run(Graph* graph, Typing typing) {
   CHECK_NOT_NULL(graph->end());
   Zone zone;
   Visitor visitor(&zone, typing);
-  for (Node* node : AllNodes(&zone, graph).live) visitor.Check(node);
+  AllNodes all(&zone, graph);
+  for (Node* node : all.live) visitor.Check(node);
+
+  // Check the uniqueness of projections.
+  for (Node* proj : all.live) {
+    if (proj->opcode() != IrOpcode::kProjection) continue;
+    Node* node = proj->InputAt(0);
+    for (Node* other : node->uses()) {
+      if (all.IsLive(other) && other != proj &&
+          other->opcode() == IrOpcode::kProjection &&
+          ProjectionIndexOf(other->op()) == ProjectionIndexOf(proj->op())) {
+        V8_Fatal(__FILE__, __LINE__,
+                 "Node #%d:%s has duplicate projections #%d and #%d",
+                 node->id(), node->op()->mnemonic(), proj->id(), other->id());
+      }
+    }
+  }
 }
 
 

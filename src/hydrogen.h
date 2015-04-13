@@ -407,13 +407,11 @@ class HGraph FINAL : public ZoneObject {
     use_optimistic_licm_ = value;
   }
 
-  void MarkRecursive() {
-    is_recursive_ = true;
-  }
+  void MarkRecursive() { is_recursive_ = true; }
+  bool is_recursive() const { return is_recursive_; }
 
-  bool is_recursive() const {
-    return is_recursive_;
-  }
+  void MarkThisHasUses() { this_has_uses_ = true; }
+  bool this_has_uses() const { return this_has_uses_; }
 
   void MarkDependsOnEmptyArrayProtoElements() {
     // Add map dependency if not already added.
@@ -499,6 +497,7 @@ class HGraph FINAL : public ZoneObject {
   Zone* zone_;
 
   bool is_recursive_;
+  bool this_has_uses_;
   bool use_optimistic_licm_;
   bool depends_on_empty_array_proto_elements_;
   int type_change_checksum_;
@@ -1419,6 +1418,7 @@ class HGraphBuilder {
 
   HInstruction* AddLoadStringInstanceType(HValue* string);
   HInstruction* AddLoadStringLength(HValue* string);
+  HInstruction* BuildLoadStringLength(HValue* string);
   HStoreNamedField* AddStoreMapConstant(HValue* object, Handle<Map> map) {
     return Add<HStoreNamedField>(object, HObjectAccess::ForMap(),
                                  Add<HConstant>(map));
@@ -1869,12 +1869,14 @@ class HGraphBuilder {
 
  protected:
   void SetSourcePosition(int position) {
-    DCHECK(position != RelocInfo::kNoPosition);
-    position_.set_position(position - start_position_);
+    if (position != RelocInfo::kNoPosition) {
+      position_.set_position(position - start_position_);
+    }
+    // Otherwise position remains unknown.
   }
 
   void EnterInlinedSource(int start_position, int id) {
-    if (FLAG_hydrogen_track_positions) {
+    if (top_info()->is_tracking_positions()) {
       start_position_ = start_position;
       position_.set_inlining_id(id);
     }
@@ -2155,6 +2157,12 @@ class HOptimizedGraphBuilder : public HGraphBuilder, public AstVisitor {
   TestContext* inlined_test_context() const {
     return function_state()->test_context();
   }
+  Handle<SharedFunctionInfo> current_shared_info() const {
+    return current_info()->shared_info();
+  }
+  TypeFeedbackVector* current_feedback_vector() const {
+    return current_shared_info()->feedback_vector();
+  }
   void ClearInlinedTestContext() {
     function_state()->ClearInlinedTestContext();
   }
@@ -2198,6 +2206,8 @@ class HOptimizedGraphBuilder : public HGraphBuilder, public AstVisitor {
   F(GetFromCache)                      \
   F(NumberToString)                    \
   F(DebugIsActive)                     \
+  F(Likely)                            \
+  F(Unlikely)                          \
   /* Typed Arrays */                   \
   F(TypedArrayInitialize)              \
   F(DataViewInitialize)                \
@@ -2212,26 +2222,27 @@ class HOptimizedGraphBuilder : public HGraphBuilder, public AstVisitor {
   F(ConstructDouble)                   \
   F(DoubleHi)                          \
   F(DoubleLo)                          \
+  F(MathClz32)                         \
   F(MathFloor)                         \
-  F(MathSqrtRT)                        \
+  F(MathSqrt)                          \
   F(MathLogRT)                         \
   /* ES6 Collections */                \
   F(MapClear)                          \
-  F(MapDelete)                         \
-  F(MapGet)                            \
-  F(MapGetSize)                        \
-  F(MapHas)                            \
   F(MapInitialize)                     \
-  F(MapSet)                            \
-  F(SetAdd)                            \
   F(SetClear)                          \
-  F(SetDelete)                         \
-  F(SetGetSize)                        \
-  F(SetHas)                            \
   F(SetInitialize)                     \
+  F(FixedArrayGet)                     \
+  F(FixedArraySet)                     \
+  F(JSCollectionGetTable)              \
+  F(StringGetRawHashField)             \
+  F(TheHole)                           \
   /* Arrays */                         \
   F(HasFastPackedElements)             \
-  F(GetPrototype)
+  F(GetPrototype)                      \
+  /* Strings */                        \
+  F(StringGetLength)                   \
+  /* JSValue */                        \
+  F(JSValueGetValue)
 
 #define GENERATOR_DECLARATION(Name) void Generate##Name(CallRuntime* call);
   FOR_EACH_HYDROGEN_INTRINSIC(GENERATOR_DECLARATION)
@@ -2624,7 +2635,7 @@ class HOptimizedGraphBuilder : public HGraphBuilder, public AstVisitor {
     }
     void NotFound() {
       lookup_type_ = NOT_FOUND;
-      details_ = PropertyDetails(NONE, DATA, 0);
+      details_ = PropertyDetails::Empty();
     }
     Representation representation() const {
       DCHECK(IsFound());
@@ -2639,7 +2650,7 @@ class HOptimizedGraphBuilder : public HGraphBuilder, public AstVisitor {
     CompilationInfo* current_info() { return builder_->current_info(); }
 
     bool LoadResult(Handle<Map> map);
-    void LoadFieldMaps(Handle<Map> map);
+    bool LoadFieldMaps(Handle<Map> map);
     bool LookupDescriptor();
     bool LookupInPrototypes();
     bool IsIntegerIndexedExotic();

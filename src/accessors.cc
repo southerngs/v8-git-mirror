@@ -79,6 +79,14 @@ bool Accessors::IsJSObjectFieldAccessor(Handle<Map> map, Handle<Name> name,
         CheckForName(name, isolate->factory()->length_string(),
                      JSArray::kLengthOffset, object_offset);
     case JS_TYPED_ARRAY_TYPE:
+      // %TypedArray%.prototype is non-configurable, and so are the following
+      // named properties on %TypedArray%.prototype, so we can directly inline
+      // the field-load for typed array maps that still use their
+      // %TypedArray%.prototype.
+      if (JSFunction::cast(map->GetConstructor())->prototype() !=
+          map->prototype()) {
+        return false;
+      }
       return
         CheckForName(name, isolate->factory()->length_string(),
                      JSTypedArray::kLengthOffset, object_offset) ||
@@ -301,98 +309,6 @@ Handle<AccessorInfo> Accessors::StringLengthInfo(
                       &StringLengthGetter,
                       &StringLengthSetter,
                       attributes);
-}
-
-
-template <typename Char>
-inline int CountRequiredEscapes(Handle<String> source) {
-  DisallowHeapAllocation no_gc;
-  int escapes = 0;
-  Vector<const Char> src = source->GetCharVector<Char>();
-  for (int i = 0; i < src.length(); i++) {
-    if (src[i] == '/' && (i == 0 || src[i - 1] != '\\')) escapes++;
-  }
-  return escapes;
-}
-
-
-template <typename Char, typename StringType>
-inline Handle<StringType> WriteEscapedRegExpSource(Handle<String> source,
-                                                   Handle<StringType> result) {
-  DisallowHeapAllocation no_gc;
-  Vector<const Char> src = source->GetCharVector<Char>();
-  Vector<Char> dst(result->GetChars(), result->length());
-  int s = 0;
-  int d = 0;
-  while (s < src.length()) {
-    if (src[s] == '/' && (s == 0 || src[s - 1] != '\\')) dst[d++] = '\\';
-    dst[d++] = src[s++];
-  }
-  DCHECK_EQ(result->length(), d);
-  return result;
-}
-
-
-MaybeHandle<String> EscapeRegExpSource(Isolate* isolate,
-                                       Handle<String> source) {
-  String::Flatten(source);
-  if (source->length() == 0) return isolate->factory()->query_colon_string();
-  bool one_byte = source->IsOneByteRepresentationUnderneath();
-  int escapes = one_byte ? CountRequiredEscapes<uint8_t>(source)
-                         : CountRequiredEscapes<uc16>(source);
-  if (escapes == 0) return source;
-  int length = source->length() + escapes;
-  if (one_byte) {
-    Handle<SeqOneByteString> result;
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, result,
-                               isolate->factory()->NewRawOneByteString(length),
-                               String);
-    return WriteEscapedRegExpSource<uint8_t>(source, result);
-  } else {
-    Handle<SeqTwoByteString> result;
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, result,
-                               isolate->factory()->NewRawTwoByteString(length),
-                               String);
-    return WriteEscapedRegExpSource<uc16>(source, result);
-  }
-}
-
-
-// Implements ECMA262 ES6 draft 21.2.5.9
-void Accessors::RegExpSourceGetter(
-    v8::Local<v8::Name> name, const v8::PropertyCallbackInfo<v8::Value>& info) {
-  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
-  HandleScope scope(isolate);
-
-  Handle<Object> holder =
-      Utils::OpenHandle(*v8::Local<v8::Value>(info.Holder()));
-  Handle<JSRegExp> regexp = Handle<JSRegExp>::cast(holder);
-  Handle<String> result;
-  if (regexp->TypeTag() == JSRegExp::NOT_COMPILED) {
-    result = isolate->factory()->empty_string();
-  } else {
-    Handle<String> pattern(regexp->Pattern(), isolate);
-    MaybeHandle<String> maybe = EscapeRegExpSource(isolate, pattern);
-    if (!maybe.ToHandle(&result)) {
-      isolate->OptionalRescheduleException(false);
-      return;
-    }
-  }
-  info.GetReturnValue().Set(Utils::ToLocal(result));
-}
-
-
-void Accessors::RegExpSourceSetter(v8::Local<v8::Name> name,
-                                   v8::Local<v8::Value> value,
-                                   const v8::PropertyCallbackInfo<void>& info) {
-  UNREACHABLE();
-}
-
-
-Handle<AccessorInfo> Accessors::RegExpSourceInfo(
-    Isolate* isolate, PropertyAttributes attributes) {
-  return MakeAccessor(isolate, isolate->factory()->source_string(),
-                      &RegExpSourceGetter, &RegExpSourceSetter, attributes);
 }
 
 
@@ -1095,12 +1011,52 @@ void Accessors::FunctionLengthGetter(
 }
 
 
+MUST_USE_RESULT static MaybeHandle<Object> ReplaceAccessorWithDataProperty(
+    Isolate* isolate, Handle<JSObject> object, Handle<Name> name,
+    Handle<Object> value, bool is_observed, Handle<Object> old_value) {
+  LookupIterator it(object, name);
+  CHECK_EQ(LookupIterator::ACCESSOR, it.state());
+  DCHECK(it.HolderIsReceiverOrHiddenPrototype());
+  it.ReconfigureDataProperty(value, it.property_details().attributes());
+  value = it.WriteDataValue(value);
+
+  if (is_observed && !old_value->SameValue(*value)) {
+    return JSObject::EnqueueChangeRecord(object, "update", name, old_value);
+  }
+
+  return value;
+}
+
+
+MUST_USE_RESULT static MaybeHandle<Object> SetFunctionLength(
+    Isolate* isolate, Handle<JSFunction> function, Handle<Object> value) {
+  Handle<Object> old_value;
+  bool is_observed = function->map()->is_observed();
+  if (is_observed) {
+    old_value = handle(Smi::FromInt(function->shared()->length()), isolate);
+  }
+
+  return ReplaceAccessorWithDataProperty(isolate, function,
+                                         isolate->factory()->length_string(),
+                                         value, is_observed, old_value);
+}
+
+
 void Accessors::FunctionLengthSetter(
     v8::Local<v8::Name> name,
     v8::Local<v8::Value> val,
     const v8::PropertyCallbackInfo<void>& info) {
-  // Function length is non writable, non configurable.
-  UNREACHABLE();
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
+  HandleScope scope(isolate);
+  Handle<Object> value = Utils::OpenHandle(*val);
+
+  if (SetPropertyOnInstanceIfInherited(isolate, info, name, value)) return;
+
+  Handle<JSFunction> object =
+      Handle<JSFunction>::cast(Utils::OpenHandle(*info.Holder()));
+  if (SetFunctionLength(isolate, object, value).is_null()) {
+    isolate->OptionalRescheduleException(false);
+  }
 }
 
 
@@ -1139,18 +1095,9 @@ MUST_USE_RESULT static MaybeHandle<Object> SetFunctionName(
     old_value = handle(function->shared()->name(), isolate);
   }
 
-  Handle<Name> name = isolate->factory()->name_string();
-  LookupIterator it(function, name);
-  CHECK_EQ(LookupIterator::ACCESSOR, it.state());
-  DCHECK(it.HolderIsReceiverOrHiddenPrototype());
-  it.ReconfigureDataProperty(value, it.property_details().attributes());
-  value = it.WriteDataValue(value);
-
-  if (is_observed && !old_value->SameValue(*value)) {
-    return JSObject::EnqueueChangeRecord(function, "update", name, old_value);
-  }
-
-  return value;
+  return ReplaceAccessorWithDataProperty(isolate, function,
+                                         isolate->factory()->name_string(),
+                                         value, is_observed, old_value);
 }
 
 

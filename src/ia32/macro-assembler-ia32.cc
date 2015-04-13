@@ -14,7 +14,6 @@
 #include "src/debug.h"
 #include "src/isolate-inl.h"
 #include "src/runtime/runtime.h"
-#include "src/serialize.h"
 
 namespace v8 {
 namespace internal {
@@ -1023,36 +1022,21 @@ void MacroAssembler::LeaveApiExitFrame(bool restore_context) {
 }
 
 
-void MacroAssembler::PushTryHandler(StackHandler::Kind kind,
-                                    int handler_index) {
+void MacroAssembler::PushStackHandler() {
   // Adjust this code if not the case.
-  STATIC_ASSERT(StackHandlerConstants::kSize == 3 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kSize == 1 * kPointerSize);
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0);
-  STATIC_ASSERT(StackHandlerConstants::kStateOffset == 1 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kContextOffset == 2 * kPointerSize);
-
-  // We will build up the handler from the bottom by pushing on the stack.
-  // First push the context.
-  if (kind == StackHandler::JS_ENTRY) {
-    push(Immediate(Smi::FromInt(0)));  // No context.
-  } else {
-    push(esi);
-  }
-  // Push the state.
-  unsigned state =
-      StackHandler::IndexField::encode(handler_index) |
-      StackHandler::KindField::encode(kind);
-  push(Immediate(state));
 
   // Link the current handler as the next handler.
   ExternalReference handler_address(Isolate::kHandlerAddress, isolate());
   push(Operand::StaticVariable(handler_address));
+
   // Set this new handler as the current one.
   mov(Operand::StaticVariable(handler_address), esp);
 }
 
 
-void MacroAssembler::PopTryHandler() {
+void MacroAssembler::PopStackHandler() {
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0);
   ExternalReference handler_address(Isolate::kHandlerAddress, isolate());
   pop(Operand::StaticVariable(handler_address));
@@ -1326,12 +1310,11 @@ void MacroAssembler::Allocate(int object_size,
   // Align the next allocation. Storing the filler map without checking top is
   // safe in new-space because the limit of the heap is aligned there.
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
-    DCHECK((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     DCHECK(kPointerAlignment * 2 == kDoubleAlignment);
     Label aligned;
     test(result, Immediate(kDoubleAlignmentMask));
     j(zero, &aligned, Label::kNear);
-    if ((flags & PRETENURE_OLD_DATA_SPACE) != 0) {
+    if ((flags & PRETENURE) != 0) {
       cmp(result, Operand::StaticVariable(allocation_limit));
       j(above_equal, gc_required);
     }
@@ -1403,12 +1386,11 @@ void MacroAssembler::Allocate(int header_size,
   // Align the next allocation. Storing the filler map without checking top is
   // safe in new-space because the limit of the heap is aligned there.
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
-    DCHECK((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     DCHECK(kPointerAlignment * 2 == kDoubleAlignment);
     Label aligned;
     test(result, Immediate(kDoubleAlignmentMask));
     j(zero, &aligned, Label::kNear);
-    if ((flags & PRETENURE_OLD_DATA_SPACE) != 0) {
+    if ((flags & PRETENURE) != 0) {
       cmp(result, Operand::StaticVariable(allocation_limit));
       j(above_equal, gc_required);
     }
@@ -1478,12 +1460,11 @@ void MacroAssembler::Allocate(Register object_size,
   // Align the next allocation. Storing the filler map without checking top is
   // safe in new-space because the limit of the heap is aligned there.
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
-    DCHECK((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     DCHECK(kPointerAlignment * 2 == kDoubleAlignment);
     Label aligned;
     test(result, Immediate(kDoubleAlignmentMask));
     j(zero, &aligned, Label::kNear);
-    if ((flags & PRETENURE_OLD_DATA_SPACE) != 0) {
+    if ((flags & PRETENURE) != 0) {
       cmp(result, Operand::StaticVariable(allocation_limit));
       j(above_equal, gc_required);
     }
@@ -2396,11 +2377,11 @@ void MacroAssembler::Move(XMMRegister dst, uint32_t src) {
 
 
 void MacroAssembler::Move(XMMRegister dst, uint64_t src) {
-  uint32_t lower = static_cast<uint32_t>(src);
-  uint32_t upper = static_cast<uint32_t>(src >> 32);
-  if (upper == 0) {
-    Move(dst, lower);
+  if (src == 0) {
+    pxor(dst, dst);
   } else {
+    uint32_t lower = static_cast<uint32_t>(src);
+    uint32_t upper = static_cast<uint32_t>(src >> 32);
     unsigned cnt = base::bits::CountPopulation64(src);
     unsigned nlz = base::bits::CountLeadingZeros64(src);
     unsigned ntz = base::bits::CountTrailingZeros64(src);
@@ -2465,6 +2446,21 @@ void MacroAssembler::Pinsrd(XMMRegister dst, const Operand& src, int8_t imm8) {
     punpckldq(xmm0, dst);
     movaps(dst, xmm0);
   }
+}
+
+
+void MacroAssembler::Lzcnt(Register dst, const Operand& src) {
+  if (CpuFeatures::IsSupported(LZCNT)) {
+    CpuFeatureScope scope(this, LZCNT);
+    lzcnt(dst, src);
+    return;
+  }
+  Label not_zero_src;
+  bsr(dst, src);
+  j(not_zero, &not_zero_src, Label::kNear);
+  Move(dst, Immediate(63));  // 63^31 == 32
+  bind(&not_zero_src);
+  xor_(dst, Immediate(31));  // for x in [0..31], 31^x == 31-x.
 }
 
 

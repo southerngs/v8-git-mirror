@@ -30,8 +30,8 @@ class TestCode : public HandleAndZoneScope {
   int Jump(int target) {
     Start();
     InstructionOperand ops[] = {UseRpo(target)};
-    sequence_.AddInstruction(Instruction::New(main_zone(), kArchJmp, 0, NULL, 1,
-                                              ops, 0, NULL)->MarkAsControl());
+    sequence_.AddInstruction(
+        Instruction::New(main_zone(), kArchJmp, 0, NULL, 1, ops, 0, NULL));
     int pos = static_cast<int>(sequence_.instructions().size() - 1);
     End();
     return pos;
@@ -45,8 +45,8 @@ class TestCode : public HandleAndZoneScope {
     InstructionOperand ops[] = {UseRpo(ttarget), UseRpo(ftarget)};
     InstructionCode code = 119 | FlagsModeField::encode(kFlags_branch) |
                            FlagsConditionField::encode(kEqual);
-    sequence_.AddInstruction(Instruction::New(main_zone(), code, 0, NULL, 2,
-                                              ops, 0, NULL)->MarkAsControl());
+    sequence_.AddInstruction(
+        Instruction::New(main_zone(), code, 0, NULL, 2, ops, 0, NULL));
     int pos = static_cast<int>(sequence_.instructions().size() - 1);
     End();
     return pos;
@@ -58,16 +58,16 @@ class TestCode : public HandleAndZoneScope {
   void RedundantMoves() {
     Start();
     sequence_.AddInstruction(Instruction::New(main_zone(), kArchNop));
-    int index = static_cast<int>(sequence_.instructions().size()) - 2;
-    sequence_.AddGapMove(index, RegisterOperand::New(13, main_zone()),
-                         RegisterOperand::New(13, main_zone()));
+    int index = static_cast<int>(sequence_.instructions().size()) - 1;
+    AddGapMove(index, RegisterOperand::New(main_zone(), 13),
+               RegisterOperand::New(main_zone(), 13));
   }
   void NonRedundantMoves() {
     Start();
     sequence_.AddInstruction(Instruction::New(main_zone(), kArchNop));
-    int index = static_cast<int>(sequence_.instructions().size()) - 2;
-    sequence_.AddGapMove(index, ImmediateOperand::New(11, main_zone()),
-                         RegisterOperand::New(11, main_zone()));
+    int index = static_cast<int>(sequence_.instructions().size()) - 1;
+    AddGapMove(index, ConstantOperand::New(main_zone(), 11),
+               RegisterOperand::New(main_zone(), 11));
   }
   void Other() {
     Start();
@@ -80,8 +80,7 @@ class TestCode : public HandleAndZoneScope {
     rpo_number_ = RpoNumber::FromInt(rpo_number_.ToInt() + 1);
   }
   InstructionOperand UseRpo(int num) {
-    int index = sequence_.AddImmediate(Constant(RpoNumber::FromInt(num)));
-    return ImmediateOperand(index);
+    return sequence_.AddImmediate(Constant(RpoNumber::FromInt(num)));
   }
   void Start(bool deferred = false) {
     if (current_ == NULL) {
@@ -95,6 +94,11 @@ class TestCode : public HandleAndZoneScope {
   void Defer() {
     CHECK(current_ == NULL);
     Start(true);
+  }
+  void AddGapMove(int index, InstructionOperand* from, InstructionOperand* to) {
+    sequence_.InstructionAt(index)
+        ->GetOrCreateParallelMove(Instruction::START, main_zone())
+        ->AddMove(from, to, main_zone());
   }
 };
 

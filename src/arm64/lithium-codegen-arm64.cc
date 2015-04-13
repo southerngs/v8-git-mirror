@@ -435,7 +435,6 @@ void LCodeGen::DoCallFunction(LCallFunction* instr) {
     CallFunctionStub stub(isolate(), arity, flags);
     CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
   }
-  after_push_argument_ = false;
 }
 
 
@@ -450,7 +449,6 @@ void LCodeGen::DoCallNew(LCallNew* instr) {
 
   CallConstructStub stub(isolate(), NO_CALL_CONSTRUCTOR_FLAGS);
   CallCode(stub.GetCode(), RelocInfo::CONSTRUCT_CALL, instr);
-  after_push_argument_ = false;
 
   DCHECK(ToRegister(instr->result()).is(x0));
 }
@@ -498,7 +496,6 @@ void LCodeGen::DoCallNewArray(LCallNewArray* instr) {
     ArrayNArgumentsConstructorStub stub(isolate(), kind, override_mode);
     CallCode(stub.GetCode(), RelocInfo::CONSTRUCT_CALL, instr);
   }
-  after_push_argument_ = false;
 
   DCHECK(ToRegister(instr->result()).is(x0));
 }
@@ -520,7 +517,7 @@ void LCodeGen::LoadContextFromDeferred(LOperand* context) {
   if (context->IsRegister()) {
     __ Mov(cp, ToRegister(context));
   } else if (context->IsStackSlot()) {
-    __ Ldr(cp, ToMemOperand(context, kMustUseFramePointer));
+    __ Ldr(cp, ToMemOperand(context));
   } else if (context->IsConstantOperand()) {
     HConstant* constant =
         chunk_->LookupConstant(LConstantOperand::cast(context));
@@ -663,7 +660,7 @@ bool LCodeGen::GeneratePrologue() {
     // Sloppy mode functions and builtins need to replace the receiver with the
     // global proxy when called as functions (without an explicit receiver
     // object).
-    if (info_->this_has_uses() && is_sloppy(info_->language_mode()) &&
+    if (graph()->this_has_uses() && is_sloppy(info_->language_mode()) &&
         !info_->is_native()) {
       Label ok;
       int receiver_offset = info_->scope()->num_parameters() * kXRegSize;
@@ -706,6 +703,7 @@ bool LCodeGen::GeneratePrologue() {
     Comment(";;; Allocate local context");
     bool need_write_barrier = true;
     // Argument to NewContext is the function, which is in x1.
+    DCHECK(!info()->scope()->is_script_scope());
     if (heap_slots <= FastNewContextStub::kMaximumSlots) {
       FastNewContextStub stub(isolate(), heap_slots);
       __ CallStub(&stub);
@@ -876,6 +874,8 @@ bool LCodeGen::GenerateJumpTable() {
         // table.
         __ Bl(&call_deopt_entry);
       }
+      info()->LogDeoptCallPosition(masm()->pc_offset(),
+                                   table_entry->deopt_info.inlining_id);
 
       masm()->CheckConstPool(false, false);
     }
@@ -1053,14 +1053,15 @@ void LCodeGen::DeoptimizeBranch(
     __ Bind(&dont_trap);
   }
 
-  Deoptimizer::DeoptInfo deopt_info(instr->hydrogen_value()->position(),
-                                    instr->Mnemonic(), deopt_reason);
+  Deoptimizer::DeoptInfo deopt_info = MakeDeoptInfo(instr, deopt_reason);
+
   DCHECK(info()->IsStub() || frame_is_built_);
   // Go through jump table if we need to build frame, or restore caller doubles.
   if (branch_type == always &&
       frame_is_built_ && !info()->saves_caller_doubles()) {
     DeoptComment(deopt_info);
     __ Call(entry, RelocInfo::RUNTIME_ENTRY);
+    info()->LogDeoptCallPosition(masm()->pc_offset(), deopt_info.inlining_id);
   } else {
     Deoptimizer::JumpTableEntry* table_entry =
         new (zone()) Deoptimizer::JumpTableEntry(
@@ -1272,38 +1273,13 @@ static int64_t ArgumentsOffsetWithoutFrame(int index) {
 }
 
 
-MemOperand LCodeGen::ToMemOperand(LOperand* op, StackMode stack_mode) const {
+MemOperand LCodeGen::ToMemOperand(LOperand* op) const {
   DCHECK(op != NULL);
   DCHECK(!op->IsRegister());
   DCHECK(!op->IsDoubleRegister());
   DCHECK(op->IsStackSlot() || op->IsDoubleStackSlot());
   if (NeedsEagerFrame()) {
-    int fp_offset = StackSlotOffset(op->index());
-    if (op->index() >= 0) {
-      // Loads and stores have a bigger reach in positive offset than negative.
-      // When the load or the store can't be done in one instruction via fp
-      // (too big negative offset), we try to access via jssp (positive offset).
-      // We can reference a stack slot from jssp only if jssp references the end
-      // of the stack slots. It's not the case when:
-      //  - stack_mode != kCanUseStackPointer: this is the case when a deferred
-      //     code saved the registers.
-      //  - after_push_argument_: arguments has been pushed for a call.
-      //  - inlined_arguments_: inlined arguments have been pushed once. All the
-      //     remainder of the function cannot trust jssp any longer.
-      //  - saves_caller_doubles: some double registers have been pushed, jssp
-      //     references the end of the double registers and not the end of the
-      //     stack slots.
-      // Also, if the offset from fp is small enough to make a load/store in
-      // one instruction, we use a fp access.
-      if ((stack_mode == kCanUseStackPointer) && !after_push_argument_ &&
-          !inlined_arguments_ && !is_int9(fp_offset) &&
-          !info()->saves_caller_doubles()) {
-        int jssp_offset =
-            (GetStackSlotCount() - op->index() - 1) * kPointerSize;
-        return MemOperand(masm()->StackPointer(), jssp_offset);
-      }
-    }
-    return MemOperand(fp, fp_offset);
+    return MemOperand(fp, StackSlotOffset(op->index()));
   } else {
     // Retrieve parameter without eager stack-frame relative to the
     // stack-pointer.
@@ -1577,13 +1553,9 @@ void LCodeGen::DoAllocate(LAllocate* instr) {
     flags = static_cast<AllocationFlags>(flags | DOUBLE_ALIGNMENT);
   }
 
-  if (instr->hydrogen()->IsOldPointerSpaceAllocation()) {
-    DCHECK(!instr->hydrogen()->IsOldDataSpaceAllocation());
+  if (instr->hydrogen()->IsOldSpaceAllocation()) {
     DCHECK(!instr->hydrogen()->IsNewSpaceAllocation());
-    flags = static_cast<AllocationFlags>(flags | PRETENURE_OLD_POINTER_SPACE);
-  } else if (instr->hydrogen()->IsOldDataSpaceAllocation()) {
-    DCHECK(!instr->hydrogen()->IsNewSpaceAllocation());
-    flags = static_cast<AllocationFlags>(flags | PRETENURE_OLD_DATA_SPACE);
+    flags = static_cast<AllocationFlags>(flags | PRETENURE);
   }
 
   if (instr->size()->IsConstantOperand()) {
@@ -1638,13 +1610,9 @@ void LCodeGen::DoDeferredAllocate(LAllocate* instr) {
   }
   int flags = AllocateDoubleAlignFlag::encode(
       instr->hydrogen()->MustAllocateDoubleAligned());
-  if (instr->hydrogen()->IsOldPointerSpaceAllocation()) {
-    DCHECK(!instr->hydrogen()->IsOldDataSpaceAllocation());
+  if (instr->hydrogen()->IsOldSpaceAllocation()) {
     DCHECK(!instr->hydrogen()->IsNewSpaceAllocation());
-    flags = AllocateTargetSpace::update(flags, OLD_POINTER_SPACE);
-  } else if (instr->hydrogen()->IsOldDataSpaceAllocation()) {
-    DCHECK(!instr->hydrogen()->IsNewSpaceAllocation());
-    flags = AllocateTargetSpace::update(flags, OLD_DATA_SPACE);
+    flags = AllocateTargetSpace::update(flags, OLD_SPACE);
   } else {
     flags = AllocateTargetSpace::update(flags, NEW_SPACE);
   }
@@ -1707,10 +1675,6 @@ void LCodeGen::DoApplyArguments(LApplyArguments* instr) {
 
 
 void LCodeGen::DoArgumentsElements(LArgumentsElements* instr) {
-  // We push some arguments and they will be pop in an other block. We can't
-  // trust that jssp references the end of the stack slots until the end of
-  // the function.
-  inlined_arguments_ = true;
   Register result = ToRegister(instr->result());
 
   if (instr->hydrogen()->from_inlined()) {
@@ -2127,8 +2091,6 @@ void LCodeGen::DoCallWithDescriptor(LCallWithDescriptor* instr) {
     }
     generator.AfterCall();
   }
-
-  after_push_argument_ = false;
 }
 
 
@@ -2148,13 +2110,11 @@ void LCodeGen::DoCallJSFunction(LCallJSFunction* instr) {
   __ Call(x10);
 
   RecordSafepointWithLazyDeopt(instr, RECORD_SIMPLE_SAFEPOINT);
-  after_push_argument_ = false;
 }
 
 
 void LCodeGen::DoCallRuntime(LCallRuntime* instr) {
   CallRuntime(instr->function(), instr->arity(), instr);
-  after_push_argument_ = false;
 }
 
 
@@ -2180,7 +2140,6 @@ void LCodeGen::DoCallStub(LCallStub* instr) {
     default:
       UNREACHABLE();
   }
-  after_push_argument_ = false;
 }
 
 
@@ -2662,7 +2621,7 @@ void LCodeGen::DoCheckValue(LCheckValue* instr) {
     UseScratchRegisterScope temps(masm());
     Register temp = temps.AcquireX();
     Handle<Cell> cell = isolate()->factory()->NewCell(object);
-    __ Mov(temp, Operand(Handle<Object>(cell)));
+    __ Mov(temp, Operand(cell));
     __ Ldr(temp, FieldMemOperand(temp, Cell::kValueOffset));
     __ Cmp(reg, temp);
   } else {
@@ -3137,8 +3096,8 @@ void LCodeGen::DoInstanceOfKnownGlobal(LInstanceOfKnownGlobal* instr) {
     __ bind(&map_check);
     // Will be patched with the cached map.
     Handle<Cell> cell = factory()->NewCell(factory()->the_hole_value());
-    __ ldr(scratch, Immediate(Handle<Object>(cell)));
-    __ ldr(scratch, FieldMemOperand(scratch, PropertyCell::kValueOffset));
+    __ ldr(scratch, Immediate(cell));
+    __ ldr(scratch, FieldMemOperand(scratch, Cell::kValueOffset));
     __ cmp(map, scratch);
     __ b(&cache_miss, ne);
     // The address of this instruction is computed relative to the map check
@@ -3236,7 +3195,6 @@ void LCodeGen::DoInvokeFunction(LInvokeFunction* instr) {
                       instr->hydrogen()->formal_parameter_count(),
                       instr->arity(), instr);
   }
-  after_push_argument_ = false;
 }
 
 
@@ -3397,17 +3355,6 @@ void LCodeGen::DoLoadFunctionPrototype(LLoadFunctionPrototype* instr) {
 
   // All done.
   __ Bind(&done);
-}
-
-
-void LCodeGen::DoLoadGlobalCell(LLoadGlobalCell* instr) {
-  Register result = ToRegister(instr->result());
-  __ Mov(result, Operand(Handle<Object>(instr->hydrogen()->cell().handle())));
-  __ Ldr(result, FieldMemOperand(result, Cell::kValueOffset));
-  if (instr->hydrogen()->RequiresHoleCheck()) {
-    DeoptimizeIfRoot(result, Heap::kTheHoleValueRootIndex, instr,
-                     Deoptimizer::kHole);
-  }
 }
 
 
@@ -3688,7 +3635,8 @@ void LCodeGen::DoLoadKeyedGeneric(LLoadKeyedGeneric* instr) {
   DCHECK(ToRegister(instr->context()).is(cp));
   DCHECK(ToRegister(instr->object()).is(LoadDescriptor::ReceiverRegister()));
   DCHECK(ToRegister(instr->key()).is(LoadDescriptor::NameRegister()));
-  if (FLAG_vector_ics) {
+
+  if (instr->hydrogen()->HasVectorAndSlot()) {
     EmitVectorLoadICRegisters<LLoadKeyedGeneric>(instr);
   }
 
@@ -4789,8 +4737,6 @@ void LCodeGen::DoPushArguments(LPushArguments* instr) {
 
   // The preamble was done by LPreparePushArguments.
   args.PushQueued(MacroAssembler::PushPopQueue::SKIP_PREAMBLE);
-
-  after_push_argument_ = true;
 }
 
 
@@ -5184,30 +5130,6 @@ void LCodeGen::DoStoreContextSlot(LStoreContextSlot* instr) {
                               check_needed);
   }
   __ Bind(&skip_assignment);
-}
-
-
-void LCodeGen::DoStoreGlobalCell(LStoreGlobalCell* instr) {
-  Register value = ToRegister(instr->value());
-  Register cell = ToRegister(instr->temp1());
-
-  // Load the cell.
-  __ Mov(cell, Operand(instr->hydrogen()->cell().handle()));
-
-  // If the cell we are storing to contains the hole it could have
-  // been deleted from the property dictionary. In that case, we need
-  // to update the property details in the property dictionary to mark
-  // it as no longer deleted. We deoptimize in that case.
-  if (instr->hydrogen()->RequiresHoleCheck()) {
-    Register payload = ToRegister(instr->temp2());
-    __ Ldr(payload, FieldMemOperand(cell, Cell::kValueOffset));
-    DeoptimizeIfRoot(payload, Heap::kTheHoleValueRootIndex, instr,
-                     Deoptimizer::kHole);
-  }
-
-  // Store the value.
-  __ Str(value, FieldMemOperand(cell, Cell::kValueOffset));
-  // Cells are always rescanned, so no write barrier here.
 }
 
 

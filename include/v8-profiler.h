@@ -5,6 +5,7 @@
 #ifndef V8_V8_PROFILER_H_
 #define V8_V8_PROFILER_H_
 
+#include <vector>
 #include "v8.h"
 
 /**
@@ -16,6 +17,34 @@ class HeapGraphNode;
 struct HeapStatsUpdate;
 
 typedef uint32_t SnapshotObjectId;
+
+
+struct CpuProfileDeoptFrame {
+  int script_id;
+  size_t position;
+};
+
+}  // namespace v8
+
+#ifdef V8_OS_WIN
+template class V8_EXPORT std::vector<v8::CpuProfileDeoptFrame>;
+#endif
+
+namespace v8 {
+
+struct V8_EXPORT CpuProfileDeoptInfo {
+  /** A pointer to a static string owned by v8. */
+  const char* deopt_reason;
+  std::vector<CpuProfileDeoptFrame> stack;
+};
+
+}  // namespace v8
+
+#ifdef V8_OS_WIN
+template class V8_EXPORT std::vector<v8::CpuProfileDeoptInfo>;
+#endif
+
+namespace v8 {
 
 /**
  * CpuProfileNode represents a node in a call graph.
@@ -84,6 +113,9 @@ class V8_EXPORT CpuProfileNode {
 
   /** Retrieves a child node by index. */
   const CpuProfileNode* GetChild(int index) const;
+
+  /** Retrieves deopt infos for the node. */
+  const std::vector<CpuProfileDeoptInfo>& GetDeoptInfos() const;
 
   static const int kNoLineNumberInfo = Message::kNoLineNumberInfo;
   static const int kNoColumnNumberInfo = Message::kNoColumnInfo;
@@ -447,15 +479,8 @@ class V8_EXPORT HeapProfiler {
   };
 
   /**
-   * Takes a heap snapshot and returns it. Title parameter is deprecated and
-   * should be an empty string.
-   * TODO: deprecate this method.
+   * Takes a heap snapshot and returns it.
    */
-  const HeapSnapshot* TakeHeapSnapshot(
-      Handle<String> title,
-      ActivityControl* control = NULL,
-      ObjectNameResolver* global_object_name_resolver = NULL);
-
   const HeapSnapshot* TakeHeapSnapshot(
       ActivityControl* control = NULL,
       ObjectNameResolver* global_object_name_resolver = NULL);
@@ -478,17 +503,19 @@ class V8_EXPORT HeapProfiler {
    * reports updates for all previous time intervals via the OutputStream
    * object. Updates on each time interval are provided as a stream of the
    * HeapStatsUpdate structure instances.
-   * The return value of the function is the last seen heap object Id.
+   * If |timestamp_us| is supplied, timestamp of the new entry will be written
+   * into it. The return value of the function is the last seen heap object Id.
    *
    * StartTrackingHeapObjects must be called before the first call to this
    * method.
    */
-  SnapshotObjectId GetHeapStats(OutputStream* stream);
+  SnapshotObjectId GetHeapStats(OutputStream* stream,
+                                int64_t* timestamp_us = NULL);
 
   /**
    * Stops tracking of heap objects population statistics, cleans up all
    * collected data. StartHeapObjectsTracking must be called again prior to
-   * calling PushHeapObjectsStats next time.
+   * calling GetHeapStats next time.
    */
   void StopTrackingHeapObjects();
 

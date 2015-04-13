@@ -444,23 +444,11 @@ class Scanner {
   // tokens, which is what it is used for.
   void SeekForward(int pos);
 
-  bool HarmonyScoping() const {
-    return harmony_scoping_;
-  }
-  void SetHarmonyScoping(bool scoping) {
-    harmony_scoping_ = scoping;
-  }
   bool HarmonyModules() const {
     return harmony_modules_;
   }
   void SetHarmonyModules(bool modules) {
     harmony_modules_ = modules;
-  }
-  bool HarmonyNumericLiterals() const {
-    return harmony_numeric_literals_;
-  }
-  void SetHarmonyNumericLiterals(bool numeric_literals) {
-    harmony_numeric_literals_ = numeric_literals;
   }
   bool HarmonyClasses() const {
     return harmony_classes_;
@@ -468,8 +456,6 @@ class Scanner {
   void SetHarmonyClasses(bool classes) {
     harmony_classes_ = classes;
   }
-  bool HarmonyTemplates() const { return harmony_templates_; }
-  void SetHarmonyTemplates(bool templates) { harmony_templates_ = templates; }
   bool HarmonyUnicode() const { return harmony_unicode_; }
   void SetHarmonyUnicode(bool unicode) { harmony_unicode_ = unicode; }
 
@@ -745,16 +731,10 @@ class Scanner {
   // Whether there is a multi-line comment that contains a
   // line-terminator after the current token, and before the next.
   bool has_multiline_comment_before_next_;
-  // Whether we scan 'let' as a keyword for harmony block-scoped let bindings.
-  bool harmony_scoping_;
   // Whether we scan 'module', 'import', 'export' as keywords.
   bool harmony_modules_;
-  // Whether we scan 0o777 and 0b111 as numbers.
-  bool harmony_numeric_literals_;
   // Whether we scan 'class', 'extends', 'static' and 'super' as keywords.
   bool harmony_classes_;
-  // Whether we scan TEMPLATE_SPAN and TEMPLATE_TAIL
-  bool harmony_templates_;
   // Whether we allow \u{xxxxx}.
   bool harmony_unicode_;
 };

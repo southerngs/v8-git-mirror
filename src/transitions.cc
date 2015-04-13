@@ -37,7 +37,7 @@ void TransitionArray::Insert(Handle<Map> map, Handle<Name> name,
     Name* key = GetSimpleTransitionKey(old_target);
     PropertyDetails old_details = GetSimpleTargetDetails(old_target);
     PropertyDetails new_details = is_special_transition
-                                      ? PropertyDetails(NONE, DATA, 0)
+                                      ? PropertyDetails::Empty()
                                       : GetTargetDetails(*name, *target);
     if (flag == SIMPLE_PROPERTY_TRANSITION && key->Equals(*name) &&
         old_details.kind() == new_details.kind() &&
@@ -67,7 +67,7 @@ void TransitionArray::Insert(Handle<Map> map, Handle<Name> name,
   int insertion_index = kNotFound;
   DCHECK_EQ(is_special_transition, IsSpecialTransition(*name));
   PropertyDetails details = is_special_transition
-                                ? PropertyDetails(NONE, DATA, 0)
+                                ? PropertyDetails::Empty()
                                 : GetTargetDetails(*name, *target);
 
   {
@@ -316,6 +316,8 @@ void TransitionArray::SetNumberOfPrototypeTransitions(
 int TransitionArray::NumberOfTransitions(Object* raw_transitions) {
   if (CanStoreSimpleTransition(raw_transitions)) return 0;
   if (IsSimpleTransition(raw_transitions)) return 1;
+  // Prototype maps don't have transitions.
+  if (raw_transitions->IsPrototypeInfo()) return 0;
   DCHECK(IsFullTransitionArray(raw_transitions));
   return TransitionArray::cast(raw_transitions)->number_of_transitions();
 }

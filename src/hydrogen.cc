@@ -3346,7 +3346,7 @@ HOptimizedGraphBuilder::HOptimizedGraphBuilder(CompilationInfo* info)
   // to know it's the initial state.
   function_state_ = &initial_function_state_;
   InitializeAstVisitor(info->isolate(), info->zone());
-  if (FLAG_hydrogen_track_positions) {
+  if (top_info()->is_tracking_positions()) {
     SetSourcePosition(info->shared_info()->start_position());
   }
 }
@@ -3439,6 +3439,7 @@ HGraph::HGraph(CompilationInfo* info)
       info_(info),
       zone_(info->zone()),
       is_recursive_(false),
+      this_has_uses_(false),
       use_optimistic_licm_(false),
       depends_on_empty_array_proto_elements_(false),
       type_change_checksum_(0),
@@ -3451,7 +3452,7 @@ HGraph::HGraph(CompilationInfo* info)
     start_environment_ = new (zone_)
         HEnvironment(zone_, descriptor.GetEnvironmentParameterCount());
   } else {
-    if (FLAG_hydrogen_track_positions) {
+    if (info->is_tracking_positions()) {
       info->TraceInlinedFunction(info->shared_info(), SourcePosition::Unknown(),
                                  InlinedFunctionInfo::kNoParentId);
     }
@@ -3483,12 +3484,9 @@ void HGraph::FinalizeUniqueness() {
 
 
 int HGraph::SourcePositionToScriptPosition(SourcePosition pos) {
-  if (!FLAG_hydrogen_track_positions || pos.IsUnknown()) {
-    return pos.raw();
-  }
-
-  return info()->inlined_function_infos()->at(pos.inlining_id())
-      .start_position + pos.position();
+  return (FLAG_hydrogen_track_positions && !pos.IsUnknown())
+             ? info()->start_position_for(pos.inlining_id()) + pos.position()
+             : pos.raw();
 }
 
 
@@ -3912,7 +3910,7 @@ FunctionState::FunctionState(HOptimizedGraphBuilder* owner,
   // Push on the state stack.
   owner->set_function_state(this);
 
-  if (FLAG_hydrogen_track_positions) {
+  if (compilation_info_->is_tracking_positions()) {
     outer_source_position_ = owner->source_position();
     owner->EnterInlinedSource(
       info->shared_info()->start_position(),
@@ -3926,7 +3924,7 @@ FunctionState::~FunctionState() {
   delete test_context_;
   owner_->set_function_state(outer_);
 
-  if (FLAG_hydrogen_track_positions) {
+  if (compilation_info_->is_tracking_positions()) {
     owner_->set_source_position(outer_source_position_);
     owner_->EnterInlinedSource(
       outer_->compilation_info()->shared_info()->start_position(),
@@ -4221,6 +4219,12 @@ void HOptimizedGraphBuilder::VisitExpressions(ZoneList<Expression*>* exprs,
 bool HOptimizedGraphBuilder::BuildGraph() {
   if (IsSubclassConstructor(current_info()->function()->kind())) {
     Bailout(kSuperReference);
+    return false;
+  }
+
+  int slots = current_info()->num_heap_slots() - Context::MIN_CONTEXT_SLOTS;
+  if (current_info()->scope()->is_script_scope() && slots > 0) {
+    Bailout(kScriptContext);
     return false;
   }
 
@@ -5051,10 +5055,6 @@ void HOptimizedGraphBuilder::VisitForInStatement(ForInStatement* stmt) {
     return Bailout(kForInStatementOptimizationIsDisabled);
   }
 
-  if (stmt->for_in_type() != ForInStatement::FAST_FOR_IN) {
-    return Bailout(kForInStatementIsNotFastCase);
-  }
-
   if (!stmt->each()->IsVariableProxy() ||
       !stmt->each()->AsVariableProxy()->var()->IsStackLocal()) {
     return Bailout(kForInStatementWithNonLocalEachVariable);
@@ -5065,13 +5065,42 @@ void HOptimizedGraphBuilder::VisitForInStatement(ForInStatement* stmt) {
   CHECK_ALIVE(VisitForValue(stmt->enumerable()));
   HValue* enumerable = Top();  // Leave enumerable at the top.
 
-  HInstruction* map = Add<HForInPrepareMap>(enumerable);
-  Add<HSimulate>(stmt->PrepareId());
+  HInstruction* map;
+  HInstruction* array;
+  HInstruction* enum_length;
+  bool fast = stmt->for_in_type() == ForInStatement::FAST_FOR_IN;
+  if (fast) {
+    map = Add<HForInPrepareMap>(enumerable);
+    Add<HSimulate>(stmt->PrepareId());
 
-  HInstruction* array = Add<HForInCacheArray>(
-      enumerable, map, DescriptorArray::kEnumCacheBridgeCacheIndex);
+    array = Add<HForInCacheArray>(enumerable, map,
+                                  DescriptorArray::kEnumCacheBridgeCacheIndex);
+    enum_length = Add<HMapEnumLength>(map);
 
-  HInstruction* enum_length = Add<HMapEnumLength>(map);
+    HInstruction* index_cache = Add<HForInCacheArray>(
+        enumerable, map, DescriptorArray::kEnumCacheBridgeIndicesCacheIndex);
+    HForInCacheArray::cast(array)
+        ->set_index_cache(HForInCacheArray::cast(index_cache));
+  } else {
+    Add<HSimulate>(stmt->PrepareId());
+    {
+      NoObservableSideEffectsScope no_effects(this);
+      BuildJSObjectCheck(enumerable, 0);
+    }
+    Add<HSimulate>(stmt->ToObjectId());
+
+    map = graph()->GetConstant1();
+    Runtime::FunctionId function_id = Runtime::kGetPropertyNamesFast;
+    Add<HPushArguments>(enumerable);
+    array = Add<HCallRuntime>(isolate()->factory()->empty_string(),
+                              Runtime::FunctionForId(function_id), 1);
+    Push(array);
+    Add<HSimulate>(stmt->EnumId());
+    Drop(1);
+    Handle<Map> array_map = isolate()->factory()->fixed_array_map();
+    HValue* check = Add<HCheckMaps>(array, array_map);
+    enum_length = AddLoadFixedArrayLength(array, check);
+  }
 
   HInstruction* start_index = Add<HConstant>(0);
 
@@ -5080,13 +5109,12 @@ void HOptimizedGraphBuilder::VisitForInStatement(ForInStatement* stmt) {
   Push(enum_length);
   Push(start_index);
 
-  HInstruction* index_cache = Add<HForInCacheArray>(
-      enumerable, map, DescriptorArray::kEnumCacheBridgeIndicesCacheIndex);
-  HForInCacheArray::cast(array)->set_index_cache(
-      HForInCacheArray::cast(index_cache));
-
   HBasicBlock* loop_entry = BuildLoopEntry(stmt);
 
+  // Reload the values to ensure we have up-to-date values inside of the loop.
+  // This is relevant especially for OSR where the values don't come from the
+  // computation above, but from the OSR entry block.
+  enumerable = environment()->ExpressionStackAt(4);
   HValue* index = environment()->ExpressionStackAt(0);
   HValue* limit = environment()->ExpressionStackAt(1);
 
@@ -5108,18 +5136,23 @@ void HOptimizedGraphBuilder::VisitForInStatement(ForInStatement* stmt) {
 
   set_current_block(loop_body);
 
-  HValue* key = Add<HLoadKeyed>(
-      environment()->ExpressionStackAt(2),  // Enum cache.
-      environment()->ExpressionStackAt(0),  // Iteration index.
-      environment()->ExpressionStackAt(0),
-      FAST_ELEMENTS);
+  HValue* key =
+      Add<HLoadKeyed>(environment()->ExpressionStackAt(2),  // Enum cache.
+                      index, index, FAST_ELEMENTS);
 
-  // Check if the expected map still matches that of the enumerable.
-  // If not just deoptimize.
-  Add<HCheckMapValue>(environment()->ExpressionStackAt(4),
-                      environment()->ExpressionStackAt(3));
-
-  Bind(each_var, key);
+  if (fast) {
+    // Check if the expected map still matches that of the enumerable.
+    // If not just deoptimize.
+    Add<HCheckMapValue>(enumerable, environment()->ExpressionStackAt(3));
+    Bind(each_var, key);
+  } else {
+    HValue* function = AddLoadJSBuiltin(Builtins::FILTER_KEY);
+    Add<HPushArguments>(enumerable, key);
+    key = Add<HInvokeFunction>(function, 2);
+    Bind(each_var, key);
+    Add<HSimulate>(stmt->AssignmentId());
+    Add<HCheckHeapObject>(key);
+  }
 
   BreakAndContinueInfo break_info(stmt, scope(), 5);
   {
@@ -5299,7 +5332,7 @@ HValue* HOptimizedGraphBuilder::BuildContextChainWalk(Variable* var) {
 
 void HOptimizedGraphBuilder::VisitVariableProxy(VariableProxy* expr) {
   if (expr->is_this()) {
-    current_info()->parse_info()->set_this_has_uses(true);
+    graph()->MarkThisHasUses();
   }
 
   DCHECK(!HasStackOverflow());
@@ -5323,7 +5356,8 @@ void HOptimizedGraphBuilder::VisitVariableProxy(VariableProxy* expr) {
 
       Handle<GlobalObject> global(current_info()->global_object());
 
-      if (FLAG_harmony_scoping) {
+      // Lookup in script contexts.
+      {
         Handle<ScriptContextTable> script_contexts(
             global->native_context()->script_context_table());
         ScriptContextTable::LookupResult lookup;
@@ -5332,7 +5366,7 @@ void HOptimizedGraphBuilder::VisitVariableProxy(VariableProxy* expr) {
           Handle<Context> script_context = ScriptContextTable::GetContext(
               script_contexts, lookup.context_index);
           Handle<Object> current_value =
-              FixedArray::get(script_context, lookup.context_index);
+              FixedArray::get(script_context, lookup.slot_index);
 
           // If the values is not the hole, it will stay initialized,
           // so no need to generate a check.
@@ -5346,15 +5380,14 @@ void HOptimizedGraphBuilder::VisitVariableProxy(VariableProxy* expr) {
         }
       }
 
-      LookupIterator it(global, variable->name(),
-                        LookupIterator::OWN_SKIP_INTERCEPTOR);
+      LookupIterator it(global, variable->name(), LookupIterator::OWN);
       GlobalPropertyAccess type = LookupGlobalProperty(variable, &it, LOAD);
 
       if (type == kUseCell) {
         Handle<PropertyCell> cell = it.GetPropertyCell();
-        if (cell->type()->IsConstant()) {
-          PropertyCell::AddDependentCompilationInfo(cell, top_info());
-          Handle<Object> constant_object = cell->type()->AsConstant()->Value();
+        PropertyCell::AddDependentCompilationInfo(cell, top_info());
+        if (it.property_details().cell_type() == PropertyCellType::kConstant) {
+          Handle<Object> constant_object(cell->value(), isolate());
           if (constant_object->IsConsString()) {
             constant_object =
                 String::Flatten(Handle<String>::cast(constant_object));
@@ -5362,8 +5395,11 @@ void HOptimizedGraphBuilder::VisitVariableProxy(VariableProxy* expr) {
           HConstant* constant = New<HConstant>(constant_object);
           return ast_context()->ReturnInstruction(constant, expr->id());
         } else {
-          HLoadGlobalCell* instr =
-              New<HLoadGlobalCell>(cell, it.property_details());
+          HConstant* cell_constant = Add<HConstant>(cell);
+          HLoadNamedField* instr = New<HLoadNamedField>(
+              cell_constant, nullptr, HObjectAccess::ForPropertyCellValue());
+          instr->ClearDependsOnFlag(kInobjectFields);
+          instr->SetDependsOnFlag(kGlobalVars);
           return ast_context()->ReturnInstruction(instr, expr->id());
         }
       } else {
@@ -5375,11 +5411,8 @@ void HOptimizedGraphBuilder::VisitVariableProxy(VariableProxy* expr) {
                                     variable->name(),
                                     ast_context()->is_for_typeof());
         if (FLAG_vector_ics) {
-          Handle<SharedFunctionInfo> current_shared =
-              function_state()->compilation_info()->shared_info();
-          instr->SetVectorAndSlot(
-              handle(current_shared->feedback_vector(), isolate()),
-              expr->VariableFeedbackSlot());
+          instr->SetVectorAndSlot(handle(current_feedback_vector(), isolate()),
+                                  expr->VariableFeedbackSlot());
         }
         return ast_context()->ReturnInstruction(instr, expr->id());
       }
@@ -5448,9 +5481,10 @@ void HOptimizedGraphBuilder::VisitRegExpLiteral(RegExpLiteral* expr) {
 static bool CanInlinePropertyAccess(Handle<Map> map) {
   if (map->instance_type() == HEAP_NUMBER_TYPE) return true;
   if (map->instance_type() < FIRST_NONSTRING_TYPE) return true;
-  return map->IsJSObjectMap() &&
-      !map->is_dictionary_map() &&
-      !map->has_named_interceptor();
+  return map->IsJSObjectMap() && !map->is_dictionary_map() &&
+         !map->has_named_interceptor() &&
+         // TODO(verwaest): Whitelist contexts to which we have access.
+         !map->is_access_check_needed();
 }
 
 
@@ -5554,19 +5588,13 @@ void HOptimizedGraphBuilder::VisitObjectLiteral(ObjectLiteral* expr) {
     Handle<FixedArray> closure_literals(closure->literals(), isolate());
     Handle<FixedArray> constant_properties = expr->constant_properties();
     int literal_index = expr->literal_index();
-    int flags = expr->fast_elements()
-        ? ObjectLiteral::kFastElements : ObjectLiteral::kNoFlags;
-    flags |= expr->has_function()
-        ? ObjectLiteral::kHasFunction : ObjectLiteral::kNoFlags;
+    int flags = expr->ComputeFlags(true);
 
     Add<HPushArguments>(Add<HConstant>(closure_literals),
                         Add<HConstant>(literal_index),
                         Add<HConstant>(constant_properties),
                         Add<HConstant>(flags));
 
-    // TODO(mvstanton): Add a flag to turn off creation of any
-    // AllocationMementos for this call: we are in crankshaft and should have
-    // learned enough about transition behavior to stop emitting mementos.
     Runtime::FunctionId function_id = Runtime::kCreateObjectLiteral;
     literal = Add<HCallRuntime>(isolate()->factory()->empty_string(),
                                 Runtime::FunctionForId(function_id),
@@ -5725,10 +5753,7 @@ void HOptimizedGraphBuilder::VisitArrayLiteral(ArrayLiteral* expr) {
     // pass an empty fixed array to the runtime function instead.
     Handle<FixedArray> constants = isolate()->factory()->empty_fixed_array();
     int literal_index = expr->literal_index();
-    int flags = expr->depth() == 1
-        ? ArrayLiteral::kShallowElements
-        : ArrayLiteral::kNoFlags;
-    flags |= ArrayLiteral::kDisableMementos;
+    int flags = expr->ComputeFlags(true);
 
     Add<HPushArguments>(Add<HConstant>(literals),
                         Add<HConstant>(literal_index),
@@ -5991,7 +6016,7 @@ bool HOptimizedGraphBuilder::PropertyAccessInfo::LoadResult(Handle<Map> map) {
     access_ = HObjectAccess::ForField(map, index, representation(), name_);
 
     // Load field map for heap objects.
-    LoadFieldMaps(map);
+    return LoadFieldMaps(map);
   } else if (IsAccessorConstant()) {
     Handle<Object> accessors = GetAccessorsFromMap(map);
     if (!accessors->IsAccessorPair()) return false;
@@ -6017,7 +6042,7 @@ bool HOptimizedGraphBuilder::PropertyAccessInfo::LoadResult(Handle<Map> map) {
 }
 
 
-void HOptimizedGraphBuilder::PropertyAccessInfo::LoadFieldMaps(
+bool HOptimizedGraphBuilder::PropertyAccessInfo::LoadFieldMaps(
     Handle<Map> map) {
   // Clear any previously collected field maps/type.
   field_maps_.Clear();
@@ -6028,19 +6053,26 @@ void HOptimizedGraphBuilder::PropertyAccessInfo::LoadFieldMaps(
 
   // Collect the (stable) maps from the field type.
   int num_field_maps = field_type->NumClasses();
-  if (num_field_maps == 0) return;
-  DCHECK(access_.representation().IsHeapObject());
-  field_maps_.Reserve(num_field_maps, zone());
-  HeapType::Iterator<Map> it = field_type->Classes();
-  while (!it.Done()) {
-    Handle<Map> field_map = it.Current();
-    if (!field_map->is_stable()) {
-      field_maps_.Clear();
-      return;
+  if (num_field_maps > 0) {
+    DCHECK(access_.representation().IsHeapObject());
+    field_maps_.Reserve(num_field_maps, zone());
+    HeapType::Iterator<Map> it = field_type->Classes();
+    while (!it.Done()) {
+      Handle<Map> field_map = it.Current();
+      if (!field_map->is_stable()) {
+        field_maps_.Clear();
+        break;
+      }
+      field_maps_.Add(field_map, zone());
+      it.Advance();
     }
-    field_maps_.Add(field_map, zone());
-    it.Advance();
   }
+
+  if (field_maps_.is_empty()) {
+    // Store is not safe if the field map was cleared.
+    return IsLoad() || !field_type->Is(HeapType::None());
+  }
+
   field_maps_.Sort();
   DCHECK_EQ(num_field_maps, field_maps_.length());
 
@@ -6051,6 +6083,7 @@ void HOptimizedGraphBuilder::PropertyAccessInfo::LoadFieldMaps(
   // Add dependency on the map that introduced the field.
   Map::AddDependentCompilationInfo(GetFieldOwnerFromMap(map),
                                    DependentCode::kFieldTypeGroup, top_info());
+  return true;
 }
 
 
@@ -6077,7 +6110,8 @@ bool HOptimizedGraphBuilder::PropertyAccessInfo::LookupInPrototypes() {
 
 bool HOptimizedGraphBuilder::PropertyAccessInfo::IsIntegerIndexedExotic() {
   InstanceType instance_type = map_->instance_type();
-  return instance_type == JS_TYPED_ARRAY_TYPE && IsNonArrayIndexInteger(*name_);
+  return instance_type == JS_TYPED_ARRAY_TYPE &&
+         IsSpecialIndex(isolate()->unicode_cache(), *name_);
 }
 
 
@@ -6108,8 +6142,7 @@ bool HOptimizedGraphBuilder::PropertyAccessInfo::CanAccessMonomorphic() {
     access_ = HObjectAccess::ForField(map_, index, representation, name_);
 
     // Load field map for heap objects.
-    LoadFieldMaps(transition());
-    return true;
+    return LoadFieldMaps(transition());
   }
   return false;
 }
@@ -6483,7 +6516,8 @@ void HOptimizedGraphBuilder::HandleGlobalVariableAssignment(
     BailoutId ast_id) {
   Handle<GlobalObject> global(current_info()->global_object());
 
-  if (FLAG_harmony_scoping) {
+  // Lookup in script contexts.
+  {
     Handle<ScriptContextTable> script_contexts(
         global->native_context()->script_context_table());
     ScriptContextTable::LookupResult lookup;
@@ -6493,6 +6527,16 @@ void HOptimizedGraphBuilder::HandleGlobalVariableAssignment(
       }
       Handle<Context> script_context =
           ScriptContextTable::GetContext(script_contexts, lookup.context_index);
+
+      Handle<Object> current_value =
+          FixedArray::get(script_context, lookup.slot_index);
+
+      // If the values is not the hole, it will stay initialized,
+      // so no need to generate a check.
+      if (*current_value == *isolate()->factory()->the_hole_value()) {
+        return Bailout(kReferenceToUninitializedVariable);
+      }
+
       HStoreNamedField* instr = Add<HStoreNamedField>(
           Add<HConstant>(script_context),
           HObjectAccess::ForContextSlot(lookup.slot_index), value);
@@ -6503,12 +6547,13 @@ void HOptimizedGraphBuilder::HandleGlobalVariableAssignment(
     }
   }
 
-  LookupIterator it(global, var->name(), LookupIterator::OWN_SKIP_INTERCEPTOR);
+  LookupIterator it(global, var->name(), LookupIterator::OWN);
   GlobalPropertyAccess type = LookupGlobalProperty(var, &it, STORE);
   if (type == kUseCell) {
     Handle<PropertyCell> cell = it.GetPropertyCell();
-    if (cell->type()->IsConstant()) {
-      Handle<Object> constant = cell->type()->AsConstant()->Value();
+    PropertyCell::AddDependentCompilationInfo(cell, top_info());
+    if (it.property_details().cell_type() == PropertyCellType::kConstant) {
+      Handle<Object> constant(cell->value(), isolate());
       if (value->IsConstant()) {
         HConstant* c_value = HConstant::cast(value);
         if (!constant.is_identical_to(c_value->handle(isolate()))) {
@@ -6530,8 +6575,11 @@ void HOptimizedGraphBuilder::HandleGlobalVariableAssignment(
         builder.End();
       }
     }
-    HInstruction* instr =
-        Add<HStoreGlobalCell>(value, cell, it.property_details());
+    HConstant* cell_constant = Add<HConstant>(cell);
+    HInstruction* instr = Add<HStoreNamedField>(
+        cell_constant, HObjectAccess::ForPropertyCellValue(), value);
+    instr->ClearChangesFlag(kInobjectFields);
+    instr->SetChangesFlag(kGlobalVars);
     if (instr->HasObservableSideEffects()) {
       Add<HSimulate>(ast_id, REMOVABLE_SIMULATE);
     }
@@ -6798,7 +6846,7 @@ void HOptimizedGraphBuilder::VisitThrow(Throw* expr) {
   CHECK_ALIVE(VisitForValue(expr->exception()));
 
   HValue* value = environment()->Pop();
-  if (!FLAG_hydrogen_track_positions) SetSourcePosition(expr->position());
+  if (!top_info()->is_tracking_positions()) SetSourcePosition(expr->position());
   Add<HPushArguments>(value);
   Add<HCallRuntime>(isolate()->factory()->empty_string(),
                     Runtime::FunctionForId(Runtime::kThrow), 1);
@@ -6827,13 +6875,18 @@ HInstruction* HGraphBuilder::AddLoadStringInstanceType(HValue* string) {
 
 
 HInstruction* HGraphBuilder::AddLoadStringLength(HValue* string) {
+  return AddInstruction(BuildLoadStringLength(string));
+}
+
+
+HInstruction* HGraphBuilder::BuildLoadStringLength(HValue* string) {
   if (string->IsConstant()) {
     HConstant* c_string = HConstant::cast(string);
     if (c_string->HasStringValue()) {
-      return Add<HConstant>(c_string->StringValue()->length());
+      return New<HConstant>(c_string->StringValue()->length());
     }
   }
-  return Add<HLoadNamedField>(string, nullptr,
+  return New<HLoadNamedField>(string, nullptr,
                               HObjectAccess::ForStringLength());
 }
 
@@ -6850,10 +6903,8 @@ HInstruction* HOptimizedGraphBuilder::BuildNamedGeneric(
     HLoadNamedGeneric* result =
         New<HLoadNamedGeneric>(object, name, PREMONOMORPHIC);
     if (FLAG_vector_ics) {
-      Handle<SharedFunctionInfo> current_shared =
-          function_state()->compilation_info()->shared_info();
       Handle<TypeFeedbackVector> vector =
-          handle(current_shared->feedback_vector(), isolate());
+          handle(current_feedback_vector(), isolate());
       FeedbackVectorICSlot slot = expr->AsProperty()->PropertyFeedbackSlot();
       result->SetVectorAndSlot(vector, slot);
     }
@@ -6873,16 +6924,10 @@ HInstruction* HOptimizedGraphBuilder::BuildKeyedGeneric(
     HValue* key,
     HValue* value) {
   if (access_type == LOAD) {
-    HLoadKeyedGeneric* result =
-        New<HLoadKeyedGeneric>(object, key, PREMONOMORPHIC);
-    if (FLAG_vector_ics) {
-      Handle<SharedFunctionInfo> current_shared =
-          function_state()->compilation_info()->shared_info();
-      Handle<TypeFeedbackVector> vector =
-          handle(current_shared->feedback_vector(), isolate());
-      FeedbackVectorICSlot slot = expr->AsProperty()->PropertyFeedbackSlot();
-      result->SetVectorAndSlot(vector, slot);
-    }
+    // HLoadKeyedGeneric with vector ics benefits from being encoded as
+    // MEGAMORPHIC because the vector/slot combo becomes unnecessary.
+    HLoadKeyedGeneric* result = New<HLoadKeyedGeneric>(
+        object, key, FLAG_vector_ics ? MEGAMORPHIC : PREMONOMORPHIC);
     return result;
   } else {
     return New<HStoreKeyedGeneric>(object, key, value, function_language_mode(),
@@ -6916,9 +6961,6 @@ HInstruction* HOptimizedGraphBuilder::BuildMonomorphicElementAccess(
     PropertyAccessType access_type,
     KeyedAccessStoreMode store_mode) {
   HCheckMaps* checked_object = Add<HCheckMaps>(object, map, dependency);
-  if (dependency) {
-    checked_object->ClearDependsOnFlag(kElementsKind);
-  }
 
   if (access_type == STORE && map->prototype()->IsJSObject()) {
     // monomorphic stores need a prototype chain check because shape
@@ -6947,7 +6989,7 @@ HInstruction* HOptimizedGraphBuilder::BuildMonomorphicElementAccess(
 
 static bool CanInlineElementAccess(Handle<Map> map) {
   return map->IsJSObjectMap() && !map->has_slow_elements_kind() &&
-         !map->has_indexed_interceptor();
+         !map->has_indexed_interceptor() && !map->is_access_check_needed();
 }
 
 
@@ -7807,6 +7849,10 @@ bool HOptimizedGraphBuilder::TryInline(Handle<JSFunction> target,
                                        HValue* implicit_return_value,
                                        BailoutId ast_id, BailoutId return_id,
                                        InliningKind inlining_kind) {
+  if (target->context()->native_context() !=
+      top_info()->closure()->context()->native_context()) {
+    return false;
+  }
   int nodes_added = InliningAstSize(target);
   if (nodes_added == kNotInlinable) return false;
 
@@ -7922,17 +7968,17 @@ bool HOptimizedGraphBuilder::TryInline(Handle<JSFunction> target,
   DCHECK(target_shared->has_deoptimization_support());
   AstTyper::Run(&target_info);
 
-  int function_id = 0;
-  if (FLAG_hydrogen_track_positions) {
-    function_id = top_info()->TraceInlinedFunction(
+  int inlining_id = 0;
+  if (top_info()->is_tracking_positions()) {
+    inlining_id = top_info()->TraceInlinedFunction(
         target_shared, source_position(), function_state()->inlining_id());
   }
 
   // Save the pending call context. Set up new one for the inlined function.
   // The function state is new-allocated because we need to delete it
   // in two different places.
-  FunctionState* target_state = new FunctionState(
-      this, &target_info, inlining_kind, function_id);
+  FunctionState* target_state =
+      new FunctionState(this, &target_info, inlining_kind, inlining_id);
 
   HConstant* undefined = graph()->GetConstantUndefined();
 
@@ -7975,6 +8021,9 @@ bool HOptimizedGraphBuilder::TryInline(Handle<JSFunction> target,
       Add<HEnterInlined>(return_id, target, context, arguments_count, function,
                          function_state()->inlining_kind(),
                          function->scope()->arguments(), arguments_object);
+  if (top_info()->is_tracking_positions()) {
+    enter_inlined->set_inlining_id(inlining_id);
+  }
   function_state()->set_entry(enter_inlined);
 
   VisitDeclarations(target_info.scope()->declarations());
@@ -8631,9 +8680,18 @@ bool HOptimizedGraphBuilder::TryInlineApiCall(Handle<JSFunction> function,
                                                int argc,
                                                BailoutId ast_id,
                                                ApiCallType call_type) {
+  if (function->context()->native_context() !=
+      top_info()->closure()->context()->native_context()) {
+    return false;
+  }
   CallOptimization optimization(function);
   if (!optimization.is_simple_api_call()) return false;
   Handle<Map> holder_map;
+  for (int i = 0; i < receiver_maps->length(); ++i) {
+    auto map = receiver_maps->at(i);
+    // Don't inline calls to receivers requiring accesschecks.
+    if (map->is_access_check_needed()) return false;
+  }
   if (call_type == kCallApiFunction) {
     // Cannot embed a direct reference to the global proxy map
     // as it maybe dropped on deserialization.
@@ -9094,10 +9152,10 @@ bool HOptimizedGraphBuilder::TryHandleArrayCallNew(CallNew* expr,
     return false;
   }
 
-  BuildArrayCall(expr,
-                 expr->arguments()->length(),
-                 function,
-                 expr->allocation_site());
+  Handle<AllocationSite> site = expr->allocation_site();
+  if (site.is_null()) return false;
+
+  BuildArrayCall(expr, expr->arguments()->length(), function, site);
   return true;
 }
 
@@ -9219,58 +9277,21 @@ void HOptimizedGraphBuilder::VisitCall(Call* expr) {
     // evaluation of the arguments.
     CHECK_ALIVE(VisitForValue(expr->expression()));
     HValue* function = Top();
-    if (expr->global_call()) {
-      Variable* var = proxy->var();
-      bool known_global_function = false;
-      // If there is a global property cell for the name at compile time and
-      // access check is not enabled we assume that the function will not change
-      // and generate optimized code for calling the function.
-      Handle<GlobalObject> global(current_info()->global_object());
-      LookupIterator it(global, var->name(),
-                        LookupIterator::OWN_SKIP_INTERCEPTOR);
-      GlobalPropertyAccess type = LookupGlobalProperty(var, &it, LOAD);
-      if (type == kUseCell) {
-        known_global_function = expr->ComputeGlobalTarget(global, &it);
-      }
-      if (known_global_function) {
-        Add<HCheckValue>(function, expr->target());
+    if (function->IsConstant() &&
+        HConstant::cast(function)->handle(isolate())->IsJSFunction()) {
+      Handle<Object> constant = HConstant::cast(function)->handle(isolate());
+      Handle<JSFunction> target = Handle<JSFunction>::cast(constant);
+      expr->SetKnownGlobalTarget(target);
+    }
 
-        // Placeholder for the receiver.
-        Push(graph()->GetConstantUndefined());
-        CHECK_ALIVE(VisitExpressions(expr->arguments()));
+    // Placeholder for the receiver.
+    Push(graph()->GetConstantUndefined());
+    CHECK_ALIVE(VisitExpressions(expr->arguments()));
 
-        // Patch the global object on the stack by the expected receiver.
-        HValue* receiver = ImplicitReceiverFor(function, expr->target());
-        const int receiver_index = argument_count - 1;
-        environment()->SetExpressionStackAt(receiver_index, receiver);
-
-        if (TryInlineBuiltinFunctionCall(expr)) {
-          if (FLAG_trace_inlining) {
-            PrintF("Inlining builtin ");
-            expr->target()->ShortPrint();
-            PrintF("\n");
-          }
-          return;
-        }
-        if (TryInlineApiFunctionCall(expr, receiver)) return;
-        if (TryHandleArrayCall(expr, function)) return;
-        if (TryInlineCall(expr)) return;
-
-        PushArgumentsFromEnvironment(argument_count);
-        call = BuildCallConstantFunction(expr->target(), argument_count);
-      } else {
-        Push(graph()->GetConstantUndefined());
-        CHECK_ALIVE(VisitExpressions(expr->arguments()));
-        PushArgumentsFromEnvironment(argument_count);
-        call = New<HCallFunction>(function, argument_count);
-      }
-
-    } else if (expr->IsMonomorphic()) {
+    if (expr->IsMonomorphic()) {
       Add<HCheckValue>(function, expr->target());
 
-      Push(graph()->GetConstantUndefined());
-      CHECK_ALIVE(VisitExpressions(expr->arguments()));
-
+      // Patch the global object on the stack by the expected receiver.
       HValue* receiver = ImplicitReceiverFor(function, expr->target());
       const int receiver_index = argument_count - 1;
       environment()->SetExpressionStackAt(receiver_index, receiver);
@@ -9284,15 +9305,12 @@ void HOptimizedGraphBuilder::VisitCall(Call* expr) {
         return;
       }
       if (TryInlineApiFunctionCall(expr, receiver)) return;
-
+      if (TryHandleArrayCall(expr, function)) return;
       if (TryInlineCall(expr)) return;
 
-      call = PreProcessCall(New<HInvokeFunction>(
-          function, expr->target(), argument_count));
-
+      PushArgumentsFromEnvironment(argument_count);
+      call = BuildCallConstantFunction(expr->target(), argument_count);
     } else {
-      Push(graph()->GetConstantUndefined());
-      CHECK_ALIVE(VisitExpressions(expr->arguments()));
       PushArgumentsFromEnvironment(argument_count);
       HCallFunction* call_function =
           New<HCallFunction>(function, argument_count);
@@ -9301,10 +9319,8 @@ void HOptimizedGraphBuilder::VisitCall(Call* expr) {
           expr->IsUsingCallFeedbackICSlot(isolate())) {
         // We've never seen this call before, so let's have Crankshaft learn
         // through the type vector.
-        Handle<SharedFunctionInfo> current_shared =
-            function_state()->compilation_info()->shared_info();
         Handle<TypeFeedbackVector> vector =
-            handle(current_shared->feedback_vector(), isolate());
+            handle(current_feedback_vector(), isolate());
         FeedbackVectorICSlot slot = expr->CallFeedbackICSlot();
         call_function->SetVectorAndSlot(vector, slot);
       }
@@ -9421,7 +9437,7 @@ void HOptimizedGraphBuilder::VisitCallNew(CallNew* expr) {
   DCHECK(!HasStackOverflow());
   DCHECK(current_block() != NULL);
   DCHECK(current_block()->HasPredecessor());
-  if (!FLAG_hydrogen_track_positions) SetSourcePosition(expr->position());
+  if (!top_info()->is_tracking_positions()) SetSourcePosition(expr->position());
   int argument_count = expr->arguments()->length() + 1;  // Plus constructor.
   Factory* factory = isolate()->factory();
 
@@ -9430,6 +9446,12 @@ void HOptimizedGraphBuilder::VisitCallNew(CallNew* expr) {
   CHECK_ALIVE(VisitForValue(expr->expression()));
   HValue* function = Top();
   CHECK_ALIVE(VisitExpressions(expr->arguments()));
+
+  if (function->IsConstant() &&
+      HConstant::cast(function)->handle(isolate())->IsJSFunction()) {
+    Handle<Object> constant = HConstant::cast(function)->handle(isolate());
+    expr->SetKnownGlobalTarget(Handle<JSFunction>::cast(constant));
+  }
 
   if (FLAG_inline_construct &&
       expr->IsMonomorphic() &&
@@ -10100,7 +10122,7 @@ void HOptimizedGraphBuilder::VisitCountOperation(CountOperation* expr) {
   DCHECK(!HasStackOverflow());
   DCHECK(current_block() != NULL);
   DCHECK(current_block()->HasPredecessor());
-  if (!FLAG_hydrogen_track_positions) SetSourcePosition(expr->position());
+  if (!top_info()->is_tracking_positions()) SetSourcePosition(expr->position());
   Expression* target = expr->expression();
   VariableProxy* proxy = target->AsVariableProxy();
   Property* prop = target->AsProperty();
@@ -10403,12 +10425,9 @@ HValue* HGraphBuilder::BuildBinaryOperation(
     Add<HDeoptimize>(
         Deoptimizer::kInsufficientTypeFeedbackForLHSOfBinaryOperation,
         Deoptimizer::SOFT);
-    // TODO(rossberg): we should be able to get rid of non-continuous
-    // defaults.
     left_type = Type::Any(zone());
-  } else {
-    if (!maybe_string_add) left = TruncateToNumber(left, &left_type);
     left_rep = Representation::FromType(left_type);
+    maybe_string_add = op == Token::ADD;
   }
 
   if (!right_type->IsInhabited()) {
@@ -10416,9 +10435,13 @@ HValue* HGraphBuilder::BuildBinaryOperation(
         Deoptimizer::kInsufficientTypeFeedbackForRHSOfBinaryOperation,
         Deoptimizer::SOFT);
     right_type = Type::Any(zone());
-  } else {
-    if (!maybe_string_add) right = TruncateToNumber(right, &right_type);
     right_rep = Representation::FromType(right_type);
+    maybe_string_add = op == Token::ADD;
+  }
+
+  if (!maybe_string_add) {
+    left = TruncateToNumber(left, &left_type);
+    right = TruncateToNumber(right, &right_type);
   }
 
   // Special case for string addition here.
@@ -10756,7 +10779,7 @@ void HOptimizedGraphBuilder::VisitArithmeticExpression(BinaryOperation* expr) {
       BuildBinaryOperation(expr, left, right,
           ast_context()->IsEffect() ? NO_PUSH_BEFORE_SIMULATE
                                     : PUSH_BEFORE_SIMULATE);
-  if (FLAG_hydrogen_track_positions && result->IsBinaryOperation()) {
+  if (top_info()->is_tracking_positions() && result->IsBinaryOperation()) {
     HBinaryOperation::cast(result)->SetOperandPositions(
         zone(),
         ScriptPositionToSourcePosition(expr->left()->position()),
@@ -10794,7 +10817,7 @@ void HOptimizedGraphBuilder::VisitCompareOperation(CompareOperation* expr) {
   DCHECK(current_block() != NULL);
   DCHECK(current_block()->HasPredecessor());
 
-  if (!FLAG_hydrogen_track_positions) SetSourcePosition(expr->position());
+  if (!top_info()->is_tracking_positions()) SetSourcePosition(expr->position());
 
   // Check for a few fast cases. The AST visiting behavior must be in sync
   // with the full codegen: We don't push both left and right values onto
@@ -10840,41 +10863,19 @@ void HOptimizedGraphBuilder::VisitCompareOperation(CompareOperation* expr) {
   }
 
   if (op == Token::INSTANCEOF) {
-    // Check to see if the rhs of the instanceof is a global function not
-    // residing in new space. If it is we assume that the function will stay the
-    // same.
-    Handle<JSFunction> target = Handle<JSFunction>::null();
-    VariableProxy* proxy = expr->right()->AsVariableProxy();
-    bool global_function = (proxy != NULL) && proxy->var()->IsUnallocated();
-    if (global_function && current_info()->has_global_object()) {
-      Handle<String> name = proxy->name();
-      Handle<GlobalObject> global(current_info()->global_object());
-      LookupIterator it(global, name, LookupIterator::OWN_SKIP_INTERCEPTOR);
-      Handle<Object> value = JSObject::GetDataProperty(&it);
-      if (it.IsFound() && value->IsJSFunction()) {
-        Handle<JSFunction> candidate = Handle<JSFunction>::cast(value);
-        // If the function is in new space we assume it's more likely to
-        // change and thus prefer the general IC code.
-        if (!isolate()->heap()->InNewSpace(*candidate)) {
-          target = candidate;
-        }
-      }
-    }
-
-    // If the target is not null we have found a known global function that is
-    // assumed to stay the same for this instanceof.
-    if (target.is_null()) {
-      HInstanceOf* result = New<HInstanceOf>(left, right);
-      return ast_context()->ReturnInstruction(result, expr->id());
-    } else {
-      Add<HCheckValue>(right, target);
+    // Check to see if the rhs of the instanceof is a known function.
+    if (right->IsConstant() &&
+        HConstant::cast(right)->handle(isolate())->IsJSFunction()) {
+      Handle<Object> function = HConstant::cast(right)->handle(isolate());
+      Handle<JSFunction> target = Handle<JSFunction>::cast(function);
       HInstanceOfKnownGlobal* result =
-        New<HInstanceOfKnownGlobal>(left, target);
+          New<HInstanceOfKnownGlobal>(left, target);
       return ast_context()->ReturnInstruction(result, expr->id());
     }
 
-    // Code below assumes that we don't fall through.
-    UNREACHABLE();
+    HInstanceOf* result = New<HInstanceOf>(left, right);
+    return ast_context()->ReturnInstruction(result, expr->id());
+
   } else if (op == Token::IN) {
     HValue* function = AddLoadJSBuiltin(Builtins::IN);
     Add<HPushArguments>(left, right);
@@ -10936,7 +10937,7 @@ HControlInstruction* HOptimizedGraphBuilder::BuildCompareInstruction(
         AddCheckMap(operand_to_check, map);
         HCompareObjectEqAndBranch* result =
             New<HCompareObjectEqAndBranch>(left, right);
-        if (FLAG_hydrogen_track_positions) {
+        if (top_info()->is_tracking_positions()) {
           result->set_operand_position(zone(), 0, left_position);
           result->set_operand_position(zone(), 1, right_position);
         }
@@ -11002,7 +11003,7 @@ HControlInstruction* HOptimizedGraphBuilder::BuildCompareInstruction(
       HCompareNumericAndBranch* result =
           New<HCompareNumericAndBranch>(left, right, op);
       result->set_observed_input_representation(left_rep, right_rep);
-      if (FLAG_hydrogen_track_positions) {
+      if (top_info()->is_tracking_positions()) {
         result->SetOperandPositions(zone(), left_position, right_position);
       }
       return result;
@@ -11018,7 +11019,7 @@ void HOptimizedGraphBuilder::HandleLiteralCompareNil(CompareOperation* expr,
   DCHECK(current_block() != NULL);
   DCHECK(current_block()->HasPredecessor());
   DCHECK(expr->op() == Token::EQ || expr->op() == Token::EQ_STRICT);
-  if (!FLAG_hydrogen_track_positions) SetSourcePosition(expr->position());
+  if (!top_info()->is_tracking_positions()) SetSourcePosition(expr->position());
   CHECK_ALIVE(VisitForValue(sub_expr));
   HValue* value = Pop();
   if (expr->op() == Token::EQ_STRICT) {
@@ -11037,6 +11038,9 @@ void HOptimizedGraphBuilder::HandleLiteralCompareNil(CompareOperation* expr,
     return ast_context()->ReturnContinuation(&continuation, expr->id());
   }
 }
+
+
+void HOptimizedGraphBuilder::VisitSpread(Spread* expr) { UNREACHABLE(); }
 
 
 HInstruction* HOptimizedGraphBuilder::BuildThisFunction() {
@@ -11447,7 +11451,7 @@ void HOptimizedGraphBuilder::VisitFunctionDeclaration(
 
 void HOptimizedGraphBuilder::VisitModuleDeclaration(
     ModuleDeclaration* declaration) {
-  UNREACHABLE();
+  return Bailout(kModuleDeclaration);
 }
 
 
@@ -11711,6 +11715,17 @@ void HOptimizedGraphBuilder::GenerateValueOf(CallRuntime* call) {
 }
 
 
+void HOptimizedGraphBuilder::GenerateJSValueGetValue(CallRuntime* call) {
+  DCHECK(call->arguments()->length() == 1);
+  CHECK_ALIVE(VisitForValue(call->arguments()->at(0)));
+  HValue* value = Pop();
+  HInstruction* result = Add<HLoadNamedField>(
+      value, nullptr,
+      HObjectAccess::ForObservableJSObjectOffset(JSValue::kValueOffset));
+  return ast_context()->ReturnInstruction(result, call->id());
+}
+
+
 void HOptimizedGraphBuilder::GenerateDateField(CallRuntime* call) {
   DCHECK(call->arguments()->length() == 2);
   DCHECK_NOT_NULL(call->arguments()->at(1)->AsLiteral());
@@ -11872,6 +11887,15 @@ void HOptimizedGraphBuilder::GenerateStringCompare(CallRuntime* call) {
 }
 
 
+void HOptimizedGraphBuilder::GenerateStringGetLength(CallRuntime* call) {
+  DCHECK(call->arguments()->length() == 1);
+  CHECK_ALIVE(VisitForValue(call->arguments()->at(0)));
+  HValue* string = Pop();
+  HInstruction* result = BuildLoadStringLength(string);
+  return ast_context()->ReturnInstruction(result, call->id());
+}
+
+
 // Support for direct calls from JavaScript to native RegExp code.
 void HOptimizedGraphBuilder::GenerateRegExpExec(CallRuntime* call) {
   DCHECK_EQ(4, call->arguments()->length());
@@ -11999,6 +12023,15 @@ void HOptimizedGraphBuilder::GenerateMathPow(CallRuntime* call) {
 }
 
 
+void HOptimizedGraphBuilder::GenerateMathClz32(CallRuntime* call) {
+  DCHECK(call->arguments()->length() == 1);
+  CHECK_ALIVE(VisitForValue(call->arguments()->at(0)));
+  HValue* value = Pop();
+  HInstruction* result = NewUncasted<HUnaryMathOperation>(value, kMathClz32);
+  return ast_context()->ReturnInstruction(result, call->id());
+}
+
+
 void HOptimizedGraphBuilder::GenerateMathFloor(CallRuntime* call) {
   DCHECK(call->arguments()->length() == 1);
   CHECK_ALIVE(VisitForValue(call->arguments()->at(0)));
@@ -12017,7 +12050,7 @@ void HOptimizedGraphBuilder::GenerateMathLogRT(CallRuntime* call) {
 }
 
 
-void HOptimizedGraphBuilder::GenerateMathSqrtRT(CallRuntime* call) {
+void HOptimizedGraphBuilder::GenerateMathSqrt(CallRuntime* call) {
   DCHECK(call->arguments()->length() == 1);
   CHECK_ALIVE(VisitForValue(call->arguments()->at(0)));
   HValue* value = Pop();
@@ -12026,528 +12059,65 @@ void HOptimizedGraphBuilder::GenerateMathSqrtRT(CallRuntime* call) {
 }
 
 
-HValue* HOptimizedGraphBuilder::BuildOrderedHashTableHashToBucket(
-    HValue* hash, HValue* num_buckets) {
-  HValue* mask = AddUncasted<HSub>(num_buckets, graph()->GetConstant1());
-  mask->ChangeRepresentation(Representation::Integer32());
-  mask->ClearFlag(HValue::kCanOverflow);
-  return AddUncasted<HBitwise>(Token::BIT_AND, hash, mask);
+void HOptimizedGraphBuilder::GenerateLikely(CallRuntime* call) {
+  DCHECK(call->arguments()->length() == 1);
+  Visit(call->arguments()->at(0));
 }
 
 
-template <typename CollectionType>
-HValue* HOptimizedGraphBuilder::BuildOrderedHashTableHashToEntry(
-    HValue* table, HValue* hash, HValue* num_buckets) {
-  HValue* bucket = BuildOrderedHashTableHashToBucket(hash, num_buckets);
-  HValue* entry_index = AddUncasted<HAdd>(
-      bucket, Add<HConstant>(CollectionType::kHashTableStartIndex));
-  entry_index->ClearFlag(HValue::kCanOverflow);
-  HValue* entry = Add<HLoadKeyed>(table, entry_index, nullptr, FAST_ELEMENTS);
-  entry->set_type(HType::Smi());
-  return entry;
+void HOptimizedGraphBuilder::GenerateUnlikely(CallRuntime* call) {
+  return GenerateLikely(call);
 }
 
 
-template <typename CollectionType>
-HValue* HOptimizedGraphBuilder::BuildOrderedHashTableEntryToIndex(
-    HValue* entry, HValue* num_buckets) {
-  HValue* index =
-      AddUncasted<HMul>(entry, Add<HConstant>(CollectionType::kEntrySize));
-  index->ClearFlag(HValue::kCanOverflow);
-  index = AddUncasted<HAdd>(index, num_buckets);
-  index->ClearFlag(HValue::kCanOverflow);
-  index = AddUncasted<HAdd>(
-      index, Add<HConstant>(CollectionType::kHashTableStartIndex));
-  index->ClearFlag(HValue::kCanOverflow);
-  return index;
-}
-
-
-template <typename CollectionType>
-HValue* HOptimizedGraphBuilder::BuildOrderedHashTableFindEntry(HValue* table,
-                                                               HValue* key,
-                                                               HValue* hash) {
-  HValue* num_buckets = Add<HLoadNamedField>(
-      table, nullptr,
-      HObjectAccess::ForOrderedHashTableNumberOfBuckets<CollectionType>());
-
-  HValue* entry = BuildOrderedHashTableHashToEntry<CollectionType>(table, hash,
-                                                                   num_buckets);
-
-  Push(entry);
-
-  LoopBuilder loop(this);
-  loop.BeginBody(1);
-
-  entry = Pop();
-
-  {
-    IfBuilder if_not_found(this);
-    if_not_found.If<HCompareNumericAndBranch>(
-        entry, Add<HConstant>(CollectionType::kNotFound), Token::EQ);
-    if_not_found.Then();
-    Push(entry);
-    loop.Break();
-  }
-
-  HValue* key_index =
-      BuildOrderedHashTableEntryToIndex<CollectionType>(entry, num_buckets);
-  HValue* candidate_key =
-      Add<HLoadKeyed>(table, key_index, nullptr, FAST_ELEMENTS);
-
-  {
-    IfBuilder if_keys_equal(this);
-    if_keys_equal.If<HIsStringAndBranch>(candidate_key);
-    if_keys_equal.AndIf<HStringCompareAndBranch>(candidate_key, key,
-                                                 Token::EQ_STRICT);
-    if_keys_equal.Then();
-    Push(key_index);
-    loop.Break();
-  }
-
-  // BuildChainAt
-  HValue* chain_index = AddUncasted<HAdd>(
-      key_index, Add<HConstant>(CollectionType::kChainOffset));
-  chain_index->ClearFlag(HValue::kCanOverflow);
-  entry = Add<HLoadKeyed>(table, chain_index, nullptr, FAST_ELEMENTS);
-  entry->set_type(HType::Smi());
-  Push(entry);
-
-  loop.EndBody();
-
-  return Pop();
-}
-
-
-void HOptimizedGraphBuilder::GenerateMapGet(CallRuntime* call) {
+void HOptimizedGraphBuilder::GenerateFixedArrayGet(CallRuntime* call) {
   DCHECK(call->arguments()->length() == 2);
   CHECK_ALIVE(VisitForValue(call->arguments()->at(0)));
   CHECK_ALIVE(VisitForValue(call->arguments()->at(1)));
-  HValue* key = Pop();
-  HValue* receiver = Pop();
-
-  NoObservableSideEffectsScope no_effects(this);
-
-  HIfContinuation continuation;
-  HValue* hash =
-      BuildStringHashLoadIfIsStringAndHashComputed(key, &continuation);
-  {
-    IfBuilder string_checker(this, &continuation);
-    string_checker.Then();
-    {
-      HValue* table = Add<HLoadNamedField>(
-          receiver, nullptr, HObjectAccess::ForJSCollectionTable());
-      HValue* key_index =
-          BuildOrderedHashTableFindEntry<OrderedHashMap>(table, key, hash);
-      IfBuilder if_found(this);
-      if_found.If<HCompareNumericAndBranch>(
-          key_index, Add<HConstant>(OrderedHashMap::kNotFound), Token::NE);
-      if_found.Then();
-      {
-        HValue* value_index = AddUncasted<HAdd>(
-            key_index, Add<HConstant>(OrderedHashMap::kValueOffset));
-        value_index->ClearFlag(HValue::kCanOverflow);
-        Push(Add<HLoadKeyed>(table, value_index, nullptr, FAST_ELEMENTS));
-      }
-      if_found.Else();
-      Push(graph()->GetConstantUndefined());
-      if_found.End();
-    }
-    string_checker.Else();
-    {
-      Add<HPushArguments>(receiver, key);
-      Push(Add<HCallRuntime>(call->name(),
-                             Runtime::FunctionForId(Runtime::kMapGet), 2));
-    }
-  }
-
-  return ast_context()->ReturnValue(Pop());
+  HValue* index = Pop();
+  HValue* object = Pop();
+  HInstruction* result = New<HLoadKeyed>(
+      object, index, nullptr, FAST_HOLEY_ELEMENTS, ALLOW_RETURN_HOLE);
+  return ast_context()->ReturnInstruction(result, call->id());
 }
 
 
-HValue* HOptimizedGraphBuilder::BuildStringHashLoadIfIsStringAndHashComputed(
-    HValue* object, HIfContinuation* continuation) {
-  IfBuilder string_checker(this);
-  string_checker.If<HIsStringAndBranch>(object);
-  string_checker.And();
-  HValue* hash = Add<HLoadNamedField>(object, nullptr,
-                                      HObjectAccess::ForStringHashField());
-  HValue* hash_not_computed_mask = Add<HConstant>(String::kHashNotComputedMask);
-  HValue* hash_computed_test =
-      AddUncasted<HBitwise>(Token::BIT_AND, hash, hash_not_computed_mask);
-  string_checker.If<HCompareNumericAndBranch>(
-      hash_computed_test, graph()->GetConstant0(), Token::EQ);
-  string_checker.Then();
-  HValue* shifted_hash =
-      AddUncasted<HShr>(hash, Add<HConstant>(String::kHashShift));
-  string_checker.CaptureContinuation(continuation);
-  return shifted_hash;
-}
-
-
-template <typename CollectionType>
-void HOptimizedGraphBuilder::BuildJSCollectionHas(
-    CallRuntime* call, const Runtime::Function* c_function) {
-  DCHECK(call->arguments()->length() == 2);
-  CHECK_ALIVE(VisitForValue(call->arguments()->at(0)));
-  CHECK_ALIVE(VisitForValue(call->arguments()->at(1)));
-  HValue* key = Pop();
-  HValue* receiver = Pop();
-
-  NoObservableSideEffectsScope no_effects(this);
-
-  HIfContinuation continuation;
-  HValue* hash =
-      BuildStringHashLoadIfIsStringAndHashComputed(key, &continuation);
-  {
-    IfBuilder string_checker(this, &continuation);
-    string_checker.Then();
-    {
-      HValue* table = Add<HLoadNamedField>(
-          receiver, nullptr, HObjectAccess::ForJSCollectionTable());
-      HValue* key_index =
-          BuildOrderedHashTableFindEntry<CollectionType>(table, key, hash);
-      {
-        IfBuilder if_found(this);
-        if_found.If<HCompareNumericAndBranch>(
-            key_index, Add<HConstant>(CollectionType::kNotFound), Token::NE);
-        if_found.Then();
-        Push(graph()->GetConstantTrue());
-        if_found.Else();
-        Push(graph()->GetConstantFalse());
-      }
-    }
-    string_checker.Else();
-    {
-      Add<HPushArguments>(receiver, key);
-      Push(Add<HCallRuntime>(call->name(), c_function, 2));
-    }
-  }
-
-  return ast_context()->ReturnValue(Pop());
-}
-
-
-void HOptimizedGraphBuilder::GenerateMapHas(CallRuntime* call) {
-  BuildJSCollectionHas<OrderedHashMap>(
-      call, Runtime::FunctionForId(Runtime::kMapHas));
-}
-
-
-void HOptimizedGraphBuilder::GenerateSetHas(CallRuntime* call) {
-  BuildJSCollectionHas<OrderedHashSet>(
-      call, Runtime::FunctionForId(Runtime::kSetHas));
-}
-
-
-template <typename CollectionType>
-HValue* HOptimizedGraphBuilder::BuildOrderedHashTableAddEntry(
-    HValue* table, HValue* key, HValue* hash,
-    HIfContinuation* join_continuation) {
-  HValue* num_buckets = Add<HLoadNamedField>(
-      table, nullptr,
-      HObjectAccess::ForOrderedHashTableNumberOfBuckets<CollectionType>());
-  HValue* capacity = AddUncasted<HMul>(
-      num_buckets, Add<HConstant>(CollectionType::kLoadFactor));
-  capacity->ClearFlag(HValue::kCanOverflow);
-  HValue* num_elements = Add<HLoadNamedField>(
-      table, nullptr,
-      HObjectAccess::ForOrderedHashTableNumberOfElements<CollectionType>());
-  HValue* num_deleted = Add<HLoadNamedField>(
-      table, nullptr, HObjectAccess::ForOrderedHashTableNumberOfDeletedElements<
-                          CollectionType>());
-  HValue* used = AddUncasted<HAdd>(num_elements, num_deleted);
-  used->ClearFlag(HValue::kCanOverflow);
-  IfBuilder if_space_available(this);
-  if_space_available.If<HCompareNumericAndBranch>(capacity, used, Token::GT);
-  if_space_available.Then();
-  HValue* bucket = BuildOrderedHashTableHashToBucket(hash, num_buckets);
-  HValue* entry = used;
-  HValue* key_index =
-      BuildOrderedHashTableEntryToIndex<CollectionType>(entry, num_buckets);
-
-  HValue* bucket_index = AddUncasted<HAdd>(
-      bucket, Add<HConstant>(CollectionType::kHashTableStartIndex));
-  bucket_index->ClearFlag(HValue::kCanOverflow);
-  HValue* chain_entry =
-      Add<HLoadKeyed>(table, bucket_index, nullptr, FAST_ELEMENTS);
-  chain_entry->set_type(HType::Smi());
-
-  HValue* chain_index = AddUncasted<HAdd>(
-      key_index, Add<HConstant>(CollectionType::kChainOffset));
-  chain_index->ClearFlag(HValue::kCanOverflow);
-
-  Add<HStoreKeyed>(table, bucket_index, entry, FAST_ELEMENTS);
-  Add<HStoreKeyed>(table, chain_index, chain_entry, FAST_ELEMENTS);
-  Add<HStoreKeyed>(table, key_index, key, FAST_ELEMENTS);
-
-  HValue* new_num_elements =
-      AddUncasted<HAdd>(num_elements, graph()->GetConstant1());
-  new_num_elements->ClearFlag(HValue::kCanOverflow);
-  Add<HStoreNamedField>(
-      table,
-      HObjectAccess::ForOrderedHashTableNumberOfElements<CollectionType>(),
-      new_num_elements);
-  if_space_available.JoinContinuation(join_continuation);
-  return key_index;
-}
-
-
-void HOptimizedGraphBuilder::GenerateMapSet(CallRuntime* call) {
+void HOptimizedGraphBuilder::GenerateFixedArraySet(CallRuntime* call) {
   DCHECK(call->arguments()->length() == 3);
   CHECK_ALIVE(VisitForValue(call->arguments()->at(0)));
   CHECK_ALIVE(VisitForValue(call->arguments()->at(1)));
   CHECK_ALIVE(VisitForValue(call->arguments()->at(2)));
   HValue* value = Pop();
-  HValue* key = Pop();
-  HValue* receiver = Pop();
-
+  HValue* index = Pop();
+  HValue* object = Pop();
   NoObservableSideEffectsScope no_effects(this);
-
-  HIfContinuation return_or_call_runtime_continuation(
-      graph()->CreateBasicBlock(), graph()->CreateBasicBlock());
-  HIfContinuation got_string_hash;
-  HValue* hash =
-      BuildStringHashLoadIfIsStringAndHashComputed(key, &got_string_hash);
-  IfBuilder string_checker(this, &got_string_hash);
-  string_checker.Then();
-  {
-    HValue* table = Add<HLoadNamedField>(receiver, nullptr,
-                                         HObjectAccess::ForJSCollectionTable());
-    HValue* key_index =
-        BuildOrderedHashTableFindEntry<OrderedHashMap>(table, key, hash);
-    {
-      IfBuilder if_found(this);
-      if_found.If<HCompareNumericAndBranch>(
-          key_index, Add<HConstant>(OrderedHashMap::kNotFound), Token::NE);
-      if_found.Then();
-      {
-        HValue* value_index = AddUncasted<HAdd>(
-            key_index, Add<HConstant>(OrderedHashMap::kValueOffset));
-        value_index->ClearFlag(HValue::kCanOverflow);
-        Add<HStoreKeyed>(table, value_index, value, FAST_ELEMENTS);
-      }
-      if_found.Else();
-      {
-        HIfContinuation did_add(graph()->CreateBasicBlock(),
-                                graph()->CreateBasicBlock());
-        HValue* key_index = BuildOrderedHashTableAddEntry<OrderedHashMap>(
-            table, key, hash, &did_add);
-        IfBuilder if_did_add(this, &did_add);
-        if_did_add.Then();
-        {
-          HValue* value_index = AddUncasted<HAdd>(
-              key_index, Add<HConstant>(OrderedHashMap::kValueOffset));
-          value_index->ClearFlag(HValue::kCanOverflow);
-          Add<HStoreKeyed>(table, value_index, value, FAST_ELEMENTS);
-        }
-        if_did_add.JoinContinuation(&return_or_call_runtime_continuation);
-      }
-    }
-  }
-  string_checker.JoinContinuation(&return_or_call_runtime_continuation);
-
-  {
-    IfBuilder return_or_call_runtime(this,
-                                     &return_or_call_runtime_continuation);
-    return_or_call_runtime.Then();
-    Push(receiver);
-    return_or_call_runtime.Else();
-    Add<HPushArguments>(receiver, key, value);
-    Push(Add<HCallRuntime>(call->name(),
-                           Runtime::FunctionForId(Runtime::kMapSet), 3));
-  }
-
-  return ast_context()->ReturnValue(Pop());
+  Add<HStoreKeyed>(object, index, value, FAST_HOLEY_ELEMENTS);
+  return ast_context()->ReturnValue(graph()->GetConstantUndefined());
 }
 
 
-void HOptimizedGraphBuilder::GenerateSetAdd(CallRuntime* call) {
-  DCHECK(call->arguments()->length() == 2);
-  CHECK_ALIVE(VisitForValue(call->arguments()->at(0)));
-  CHECK_ALIVE(VisitForValue(call->arguments()->at(1)));
-  HValue* key = Pop();
-  HValue* receiver = Pop();
-
-  NoObservableSideEffectsScope no_effects(this);
-
-  HIfContinuation return_or_call_runtime_continuation(
-      graph()->CreateBasicBlock(), graph()->CreateBasicBlock());
-  HIfContinuation got_string_hash;
-  HValue* hash =
-      BuildStringHashLoadIfIsStringAndHashComputed(key, &got_string_hash);
-  IfBuilder string_checker(this, &got_string_hash);
-  string_checker.Then();
-  {
-    HValue* table = Add<HLoadNamedField>(receiver, nullptr,
-                                         HObjectAccess::ForJSCollectionTable());
-    HValue* key_index =
-        BuildOrderedHashTableFindEntry<OrderedHashSet>(table, key, hash);
-    {
-      IfBuilder if_not_found(this);
-      if_not_found.If<HCompareNumericAndBranch>(
-          key_index, Add<HConstant>(OrderedHashSet::kNotFound), Token::EQ);
-      if_not_found.Then();
-      BuildOrderedHashTableAddEntry<OrderedHashSet>(
-          table, key, hash, &return_or_call_runtime_continuation);
-    }
-  }
-  string_checker.JoinContinuation(&return_or_call_runtime_continuation);
-
-  {
-    IfBuilder return_or_call_runtime(this,
-                                     &return_or_call_runtime_continuation);
-    return_or_call_runtime.Then();
-    Push(receiver);
-    return_or_call_runtime.Else();
-    Add<HPushArguments>(receiver, key);
-    Push(Add<HCallRuntime>(call->name(),
-                           Runtime::FunctionForId(Runtime::kSetAdd), 2));
-  }
-
-  return ast_context()->ReturnValue(Pop());
+void HOptimizedGraphBuilder::GenerateTheHole(CallRuntime* call) {
+  DCHECK(call->arguments()->length() == 0);
+  return ast_context()->ReturnValue(graph()->GetConstantHole());
 }
 
 
-template <typename CollectionType>
-void HOptimizedGraphBuilder::BuildJSCollectionDelete(
-    CallRuntime* call, const Runtime::Function* c_function) {
-  DCHECK(call->arguments()->length() == 2);
-  CHECK_ALIVE(VisitForValue(call->arguments()->at(0)));
-  CHECK_ALIVE(VisitForValue(call->arguments()->at(1)));
-  HValue* key = Pop();
-  HValue* receiver = Pop();
-
-  NoObservableSideEffectsScope no_effects(this);
-
-  HIfContinuation return_or_call_runtime_continuation(
-      graph()->CreateBasicBlock(), graph()->CreateBasicBlock());
-  HIfContinuation got_string_hash;
-  HValue* hash =
-      BuildStringHashLoadIfIsStringAndHashComputed(key, &got_string_hash);
-  IfBuilder string_checker(this, &got_string_hash);
-  string_checker.Then();
-  {
-    HValue* table = Add<HLoadNamedField>(receiver, nullptr,
-                                         HObjectAccess::ForJSCollectionTable());
-    HValue* key_index =
-        BuildOrderedHashTableFindEntry<CollectionType>(table, key, hash);
-    {
-      IfBuilder if_found(this);
-      if_found.If<HCompareNumericAndBranch>(
-          key_index, Add<HConstant>(CollectionType::kNotFound), Token::NE);
-      if_found.Then();
-      {
-        // If we're removing an element, we might need to shrink.
-        // If we do need to shrink, we'll be bailing out to the runtime.
-        HValue* num_elements = Add<HLoadNamedField>(
-            table, nullptr, HObjectAccess::ForOrderedHashTableNumberOfElements<
-                                CollectionType>());
-        num_elements = AddUncasted<HSub>(num_elements, graph()->GetConstant1());
-        num_elements->ClearFlag(HValue::kCanOverflow);
-
-        HValue* num_buckets = Add<HLoadNamedField>(
-            table, nullptr, HObjectAccess::ForOrderedHashTableNumberOfBuckets<
-                                CollectionType>());
-        // threshold is capacity >> 2; we simplify this to num_buckets >> 1
-        // since kLoadFactor is 2.
-        STATIC_ASSERT(CollectionType::kLoadFactor == 2);
-        HValue* threshold =
-            AddUncasted<HShr>(num_buckets, graph()->GetConstant1());
-
-        IfBuilder if_need_not_shrink(this);
-        if_need_not_shrink.If<HCompareNumericAndBranch>(num_elements, threshold,
-                                                        Token::GTE);
-        if_need_not_shrink.Then();
-        {
-          Add<HStoreKeyed>(table, key_index, graph()->GetConstantHole(),
-                           FAST_ELEMENTS);
-
-          // For maps, also need to clear the value.
-          if (CollectionType::kChainOffset > 1) {
-            HValue* value_index =
-                AddUncasted<HAdd>(key_index, graph()->GetConstant1());
-            value_index->ClearFlag(HValue::kCanOverflow);
-            Add<HStoreKeyed>(table, value_index, graph()->GetConstantHole(),
-                             FAST_ELEMENTS);
-          }
-          STATIC_ASSERT(CollectionType::kChainOffset <= 2);
-
-          HValue* num_deleted = Add<HLoadNamedField>(
-              table, nullptr,
-              HObjectAccess::ForOrderedHashTableNumberOfDeletedElements<
-                  CollectionType>());
-          num_deleted = AddUncasted<HAdd>(num_deleted, graph()->GetConstant1());
-          num_deleted->ClearFlag(HValue::kCanOverflow);
-          Add<HStoreNamedField>(
-              table, HObjectAccess::ForOrderedHashTableNumberOfElements<
-                         CollectionType>(),
-              num_elements);
-          Add<HStoreNamedField>(
-              table, HObjectAccess::ForOrderedHashTableNumberOfDeletedElements<
-                         CollectionType>(),
-              num_deleted);
-          Push(graph()->GetConstantTrue());
-        }
-        if_need_not_shrink.JoinContinuation(
-            &return_or_call_runtime_continuation);
-      }
-      if_found.Else();
-      {
-        // Not found, so we're done.
-        Push(graph()->GetConstantFalse());
-      }
-    }
-  }
-  string_checker.JoinContinuation(&return_or_call_runtime_continuation);
-
-  {
-    IfBuilder return_or_call_runtime(this,
-                                     &return_or_call_runtime_continuation);
-    return_or_call_runtime.Then();
-    return_or_call_runtime.Else();
-    Add<HPushArguments>(receiver, key);
-    Push(Add<HCallRuntime>(call->name(), c_function, 2));
-  }
-
-  return ast_context()->ReturnValue(Pop());
-}
-
-
-void HOptimizedGraphBuilder::GenerateMapDelete(CallRuntime* call) {
-  BuildJSCollectionDelete<OrderedHashMap>(
-      call, Runtime::FunctionForId(Runtime::kMapDelete));
-}
-
-
-void HOptimizedGraphBuilder::GenerateSetDelete(CallRuntime* call) {
-  BuildJSCollectionDelete<OrderedHashSet>(
-      call, Runtime::FunctionForId(Runtime::kSetDelete));
-}
-
-
-void HOptimizedGraphBuilder::GenerateSetGetSize(CallRuntime* call) {
+void HOptimizedGraphBuilder::GenerateJSCollectionGetTable(CallRuntime* call) {
   DCHECK(call->arguments()->length() == 1);
   CHECK_ALIVE(VisitForValue(call->arguments()->at(0)));
   HValue* receiver = Pop();
-  HValue* table = Add<HLoadNamedField>(receiver, nullptr,
-                                       HObjectAccess::ForJSCollectionTable());
   HInstruction* result = New<HLoadNamedField>(
-      table, nullptr,
-      HObjectAccess::ForOrderedHashTableNumberOfElements<OrderedHashSet>());
+      receiver, nullptr, HObjectAccess::ForJSCollectionTable());
   return ast_context()->ReturnInstruction(result, call->id());
 }
 
 
-void HOptimizedGraphBuilder::GenerateMapGetSize(CallRuntime* call) {
+void HOptimizedGraphBuilder::GenerateStringGetRawHashField(CallRuntime* call) {
   DCHECK(call->arguments()->length() == 1);
   CHECK_ALIVE(VisitForValue(call->arguments()->at(0)));
-  HValue* receiver = Pop();
-  HValue* table = Add<HLoadNamedField>(receiver, nullptr,
-                                       HObjectAccess::ForJSCollectionTable());
+  HValue* object = Pop();
   HInstruction* result = New<HLoadNamedField>(
-      table, nullptr,
-      HObjectAccess::ForOrderedHashTableNumberOfElements<OrderedHashMap>());
+      object, nullptr, HObjectAccess::ForStringHashField());
   return ast_context()->ReturnInstruction(result, call->id());
 }
 
@@ -13179,9 +12749,8 @@ void HTracer::Trace(const char* name, HGraph* graph, LChunk* chunk) {
         PrintIndent();
         std::ostringstream os;
         os << "0 " << uses << " " << NameOf(instruction) << " " << *instruction;
-        if (FLAG_hydrogen_track_positions &&
-            instruction->has_position() &&
-            instruction->position().raw() != 0) {
+        if (graph->info()->is_tracking_positions() &&
+            instruction->has_position() && instruction->position().raw() != 0) {
           const SourcePosition pos = instruction->position();
           os << " pos:";
           if (pos.inlining_id() != 0) os << pos.inlining_id() << "_";

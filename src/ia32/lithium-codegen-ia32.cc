@@ -141,7 +141,7 @@ bool LCodeGen::GeneratePrologue() {
     // Sloppy mode functions and builtins need to replace the receiver with the
     // global proxy when called as functions (without an explicit receiver
     // object).
-    if (info_->this_has_uses() && is_sloppy(info_->language_mode()) &&
+    if (graph()->this_has_uses() && is_sloppy(info_->language_mode()) &&
         !info_->is_native()) {
       Label ok;
       // +1 for return address.
@@ -257,6 +257,7 @@ bool LCodeGen::GeneratePrologue() {
     Comment(";;; Allocate local context");
     bool need_write_barrier = true;
     // Argument to NewContext is the function, which is still in edi.
+    DCHECK(!info()->scope()->is_script_scope());
     if (heap_slots <= FastNewContextStub::kMaximumSlots) {
       FastNewContextStub stub(isolate(), heap_slots);
       __ CallStub(&stub);
@@ -377,10 +378,11 @@ void LCodeGen::GenerateBodyInstructionPost(LInstruction* instr) { }
 
 
 bool LCodeGen::GenerateJumpTable() {
+  if (!jump_table_.length()) return !is_aborted();
+
   Label needs_frame;
-  if (jump_table_.length() > 0) {
-    Comment(";;; -------------------- Jump table --------------------");
-  }
+  Comment(";;; -------------------- Jump table --------------------");
+
   for (int i = 0; i < jump_table_.length(); i++) {
     Deoptimizer::JumpTableEntry* table_entry = &jump_table_[i];
     __ bind(&table_entry->label);
@@ -389,34 +391,55 @@ bool LCodeGen::GenerateJumpTable() {
     if (table_entry->needs_frame) {
       DCHECK(!info()->saves_caller_doubles());
       __ push(Immediate(ExternalReference::ForDeoptEntry(entry)));
-      if (needs_frame.is_bound()) {
-        __ jmp(&needs_frame);
-      } else {
-        __ bind(&needs_frame);
-        __ push(MemOperand(ebp, StandardFrameConstants::kContextOffset));
-        // This variant of deopt can only be used with stubs. Since we don't
-        // have a function pointer to install in the stack frame that we're
-        // building, install a special marker there instead.
-        DCHECK(info()->IsStub());
-        __ push(Immediate(Smi::FromInt(StackFrame::STUB)));
-        // Push a PC inside the function so that the deopt code can find where
-        // the deopt comes from. It doesn't have to be the precise return
-        // address of a "calling" LAZY deopt, it only has to be somewhere
-        // inside the code body.
-        Label push_approx_pc;
-        __ call(&push_approx_pc);
-        __ bind(&push_approx_pc);
-        // Push the continuation which was stashed were the ebp should
-        // be. Replace it with the saved ebp.
-        __ push(MemOperand(esp, 3 * kPointerSize));
-        __ mov(MemOperand(esp, 4 * kPointerSize), ebp);
-        __ lea(ebp, MemOperand(esp, 4 * kPointerSize));
-        __ ret(0);  // Call the continuation without clobbering registers.
-      }
+      __ call(&needs_frame);
     } else {
       if (info()->saves_caller_doubles()) RestoreCallerDoubles();
       __ call(entry, RelocInfo::RUNTIME_ENTRY);
     }
+    info()->LogDeoptCallPosition(masm()->pc_offset(),
+                                 table_entry->deopt_info.inlining_id);
+  }
+  if (needs_frame.is_linked()) {
+    __ bind(&needs_frame);
+    /* stack layout
+       4: entry address
+       3: return address  <-- esp
+       2: garbage
+       1: garbage
+       0: garbage
+    */
+    __ sub(esp, Immediate(kPointerSize));    // Reserve space for stub marker.
+    __ push(MemOperand(esp, kPointerSize));  // Copy return address.
+    __ push(MemOperand(esp, 3 * kPointerSize));  // Copy entry address.
+
+    /* stack layout
+       4: entry address
+       3: return address
+       2: garbage
+       1: return address
+       0: entry address  <-- esp
+    */
+    __ mov(MemOperand(esp, 4 * kPointerSize), ebp);  // Save ebp.
+    // Copy context.
+    __ mov(ebp, MemOperand(ebp, StandardFrameConstants::kContextOffset));
+    __ mov(MemOperand(esp, 3 * kPointerSize), ebp);
+    // Fill ebp with the right stack frame address.
+    __ lea(ebp, MemOperand(esp, 4 * kPointerSize));
+    // This variant of deopt can only be used with stubs. Since we don't
+    // have a function pointer to install in the stack frame that we're
+    // building, install a special marker there instead.
+    DCHECK(info()->IsStub());
+    __ mov(MemOperand(esp, 2 * kPointerSize),
+           Immediate(Smi::FromInt(StackFrame::STUB)));
+
+    /* stack layout
+       4: old ebp
+       3: context pointer
+       2: stub marker
+       1: return address
+       0: entry address  <-- esp
+    */
+    __ ret(0);  // Call the continuation without clobbering registers.
   }
   return !is_aborted();
 }
@@ -862,12 +885,13 @@ void LCodeGen::DeoptimizeIf(Condition cc, LInstruction* instr,
     __ bind(&done);
   }
 
-  Deoptimizer::DeoptInfo deopt_info(instr->hydrogen_value()->position(),
-                                    instr->Mnemonic(), deopt_reason);
+  Deoptimizer::DeoptInfo deopt_info = MakeDeoptInfo(instr, deopt_reason);
+
   DCHECK(info()->IsStub() || frame_is_built_);
   if (cc == no_condition && frame_is_built_) {
     DeoptComment(deopt_info);
     __ call(entry, RelocInfo::RUNTIME_ENTRY);
+    info()->LogDeoptCallPosition(masm()->pc_offset(), deopt_info.inlining_id);
   } else {
     Deoptimizer::JumpTableEntry table_entry(entry, deopt_info, bailout_type,
                                             !frame_is_built_);
@@ -2016,10 +2040,10 @@ void LCodeGen::DoArithmeticD(LArithmeticD* instr) {
       } else {
         DCHECK(result.is(left));
         __ divsd(left, right);
-        // Don't delete this mov. It may improve performance on some CPUs,
-        // when there is a mulsd depending on the result
-        __ movaps(left, left);
       }
+      // Don't delete this mov. It may improve performance on some CPUs,
+      // when there is a (v)mulsd depending on the result
+      __ movaps(result, result);
       break;
     case Token::MOD: {
       // Pass two doubles as arguments on the stack.
@@ -2840,16 +2864,6 @@ void LCodeGen::DoReturn(LReturn* instr) {
 }
 
 
-void LCodeGen::DoLoadGlobalCell(LLoadGlobalCell* instr) {
-  Register result = ToRegister(instr->result());
-  __ mov(result, Operand::ForCell(instr->hydrogen()->cell().handle()));
-  if (instr->hydrogen()->RequiresHoleCheck()) {
-    __ cmp(result, factory()->the_hole_value());
-    DeoptimizeIf(equal, instr, Deoptimizer::kHole);
-  }
-}
-
-
 template <class T>
 void LCodeGen::EmitVectorLoadICRegisters(T* instr) {
   DCHECK(FLAG_vector_ics);
@@ -2882,25 +2896,6 @@ void LCodeGen::DoLoadGlobalGeneric(LLoadGlobalGeneric* instr) {
   Handle<Code> ic = CodeFactory::LoadICInOptimizedCode(isolate(), mode,
                                                        PREMONOMORPHIC).code();
   CallCode(ic, RelocInfo::CODE_TARGET, instr);
-}
-
-
-void LCodeGen::DoStoreGlobalCell(LStoreGlobalCell* instr) {
-  Register value = ToRegister(instr->value());
-  Handle<PropertyCell> cell_handle = instr->hydrogen()->cell().handle();
-
-  // If the cell we are storing to contains the hole it could have
-  // been deleted from the property dictionary. In that case, we need
-  // to update the property details in the property dictionary to mark
-  // it as no longer deleted. We deoptimize in that case.
-  if (instr->hydrogen()->RequiresHoleCheck()) {
-    __ cmp(Operand::ForCell(cell_handle), factory()->the_hole_value());
-    DeoptimizeIf(equal, instr, Deoptimizer::kHole);
-  }
-
-  // Store the value.
-  __ mov(Operand::ForCell(cell_handle), value);
-  // Cells are always rescanned, so no write barrier here.
 }
 
 
@@ -3240,7 +3235,7 @@ void LCodeGen::DoLoadKeyedGeneric(LLoadKeyedGeneric* instr) {
   DCHECK(ToRegister(instr->object()).is(LoadDescriptor::ReceiverRegister()));
   DCHECK(ToRegister(instr->key()).is(LoadDescriptor::NameRegister()));
 
-  if (FLAG_vector_ics) {
+  if (instr->hydrogen()->HasVectorAndSlot()) {
     EmitVectorLoadICRegisters<LLoadKeyedGeneric>(instr);
   }
 
@@ -3920,14 +3915,8 @@ void LCodeGen::DoMathLog(LMathLog* instr) {
 void LCodeGen::DoMathClz32(LMathClz32* instr) {
   Register input = ToRegister(instr->value());
   Register result = ToRegister(instr->result());
-  Label not_zero_input;
-  __ bsr(result, input);
 
-  __ j(not_zero, &not_zero_input);
-  __ Move(result, Immediate(63));  // 63^31 == 32
-
-  __ bind(&not_zero_input);
-  __ xor_(result, Immediate(31));  // for x in [0..31], 31^x == 31-x.
+  __ Lzcnt(result, input);
 }
 
 
@@ -5226,13 +5215,9 @@ void LCodeGen::DoAllocate(LAllocate* instr) {
   if (instr->hydrogen()->MustAllocateDoubleAligned()) {
     flags = static_cast<AllocationFlags>(flags | DOUBLE_ALIGNMENT);
   }
-  if (instr->hydrogen()->IsOldPointerSpaceAllocation()) {
-    DCHECK(!instr->hydrogen()->IsOldDataSpaceAllocation());
+  if (instr->hydrogen()->IsOldSpaceAllocation()) {
     DCHECK(!instr->hydrogen()->IsNewSpaceAllocation());
-    flags = static_cast<AllocationFlags>(flags | PRETENURE_OLD_POINTER_SPACE);
-  } else if (instr->hydrogen()->IsOldDataSpaceAllocation()) {
-    DCHECK(!instr->hydrogen()->IsNewSpaceAllocation());
-    flags = static_cast<AllocationFlags>(flags | PRETENURE_OLD_DATA_SPACE);
+    flags = static_cast<AllocationFlags>(flags | PRETENURE);
   }
 
   if (instr->size()->IsConstantOperand()) {
@@ -5295,13 +5280,9 @@ void LCodeGen::DoDeferredAllocate(LAllocate* instr) {
 
   int flags = AllocateDoubleAlignFlag::encode(
       instr->hydrogen()->MustAllocateDoubleAligned());
-  if (instr->hydrogen()->IsOldPointerSpaceAllocation()) {
-    DCHECK(!instr->hydrogen()->IsOldDataSpaceAllocation());
+  if (instr->hydrogen()->IsOldSpaceAllocation()) {
     DCHECK(!instr->hydrogen()->IsNewSpaceAllocation());
-    flags = AllocateTargetSpace::update(flags, OLD_POINTER_SPACE);
-  } else if (instr->hydrogen()->IsOldDataSpaceAllocation()) {
-    DCHECK(!instr->hydrogen()->IsNewSpaceAllocation());
-    flags = AllocateTargetSpace::update(flags, OLD_DATA_SPACE);
+    flags = AllocateTargetSpace::update(flags, OLD_SPACE);
   } else {
     flags = AllocateTargetSpace::update(flags, NEW_SPACE);
   }

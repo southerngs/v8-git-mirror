@@ -54,7 +54,7 @@ RUNTIME_FUNCTION(Runtime_SetDebugEventListener) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_Break) {
+RUNTIME_FUNCTION(Runtime_ScheduleBreak) {
   SealHandleScope shs(isolate);
   DCHECK(args.length() == 0);
   isolate->stack_guard()->RequestDebugBreak();
@@ -138,7 +138,7 @@ RUNTIME_FUNCTION(Runtime_DebugGetPropertyDetails) {
         isolate, element_or_char,
         Runtime::GetElementOrCharAt(isolate, obj, index));
     details->set(0, *element_or_char);
-    details->set(1, PropertyDetails(NONE, DATA, 0).AsSmi());
+    details->set(1, PropertyDetails::Empty().AsSmi());
     return *isolate->factory()->NewJSArrayWithElements(details);
   }
 
@@ -160,7 +160,7 @@ RUNTIME_FUNCTION(Runtime_DebugGetPropertyDetails) {
   details->set(0, *value);
   // TODO(verwaest): Get rid of this random way of handling interceptors.
   PropertyDetails d = it.state() == LookupIterator::INTERCEPTOR
-                          ? PropertyDetails(NONE, DATA, 0)
+                          ? PropertyDetails::Empty()
                           : it.property_details();
   details->set(1, d.AsSmi());
   details->set(
@@ -294,14 +294,20 @@ class FrameInspector {
   FrameInspector(JavaScriptFrame* frame, int inlined_jsframe_index,
                  Isolate* isolate)
       : frame_(frame), deoptimized_frame_(NULL), isolate_(isolate) {
-    // Calculate the deoptimized frame.
-    if (frame->is_optimized()) {
-      deoptimized_frame_ = Deoptimizer::DebuggerInspectableFrame(
-          frame, inlined_jsframe_index, isolate);
-    }
     has_adapted_arguments_ = frame_->has_adapted_arguments();
     is_bottommost_ = inlined_jsframe_index == 0;
     is_optimized_ = frame_->is_optimized();
+    // Calculate the deoptimized frame.
+    if (frame->is_optimized()) {
+      // TODO(turbofan): Revisit once we support deoptimization.
+      if (frame->LookupCode()->is_turbofanned() && !FLAG_turbo_deoptimization) {
+        is_optimized_ = false;
+        return;
+      }
+
+      deoptimized_frame_ = Deoptimizer::DebuggerInspectableFrame(
+          frame, inlined_jsframe_index, isolate);
+    }
   }
 
   ~FrameInspector() {
@@ -325,6 +331,10 @@ class FrameInspector {
                          : frame_->GetParameter(index);
   }
   Object* GetExpression(int index) {
+    // TODO(turbofan): Revisit once we support deoptimization.
+    if (frame_->LookupCode()->is_turbofanned() && !FLAG_turbo_deoptimization) {
+      return isolate_->heap()->undefined_value();
+    }
     return is_optimized_ ? deoptimized_frame_->GetExpression(index)
                          : frame_->GetExpression(index);
   }
@@ -1218,7 +1228,7 @@ class ScopeIterator {
         RetrieveScopeChain(scope, shared_info);
       } else {
         // Function code
-        ParseInfo info(&zone, shared_info);
+        ParseInfo info(&zone, function_);
         if (Parser::ParseStatic(&info) && Scope::Analyze(&info)) {
           scope = info.function()->scope();
         }
@@ -1552,9 +1562,11 @@ RUNTIME_FUNCTION(Runtime_GetStepInPositions) {
   JavaScriptFrameIterator frame_it(isolate, id);
   RUNTIME_ASSERT(!frame_it.done());
 
-  JavaScriptFrame* frame = frame_it.frame();
+  List<FrameSummary> frames(FLAG_max_inlining_levels + 1);
+  frame_it.frame()->Summarize(&frames);
+  FrameSummary summary = frames.first();
 
-  Handle<JSFunction> fun = Handle<JSFunction>(frame->function());
+  Handle<JSFunction> fun = Handle<JSFunction>(summary.function());
   Handle<SharedFunctionInfo> shared = Handle<SharedFunctionInfo>(fun->shared());
 
   if (!isolate->debug()->EnsureDebugInfo(shared, fun)) {
@@ -1565,7 +1577,7 @@ RUNTIME_FUNCTION(Runtime_GetStepInPositions) {
 
   // Find range of break points starting from the break point where execution
   // has stopped.
-  Address call_pc = frame->pc() - 1;
+  Address call_pc = summary.pc() - 1;
   List<BreakLocation> locations;
   BreakLocation::FromAddressSameStatement(debug_info, ALL_BREAK_LOCATIONS,
                                           call_pc, &locations);
@@ -1575,7 +1587,7 @@ RUNTIME_FUNCTION(Runtime_GetStepInPositions) {
   int index = 0;
   for (BreakLocation location : locations) {
     bool accept;
-    if (location.pc() > frame->pc()) {
+    if (location.pc() > summary.pc()) {
       accept = true;
     } else {
       StackFrame::Id break_frame_id = isolate->debug()->break_frame_id();
@@ -2171,7 +2183,7 @@ static Handle<JSObject> NewJSObjectWithNullProto(Isolate* isolate) {
       isolate->factory()->NewJSObject(isolate->object_function());
   Handle<Map> new_map =
       Map::Copy(Handle<Map>(result->map()), "ObjectWithNullProto");
-  new_map->SetPrototype(isolate->factory()->null_value());
+  Map::SetPrototype(new_map, isolate->factory()->null_value());
   JSObject::MigrateToMap(result, new_map);
   return result;
 }
@@ -2204,9 +2216,6 @@ RUNTIME_FUNCTION(Runtime_DebugEvaluate) {
   StackFrame::Id id = UnwrapFrameId(wrapped_id);
   JavaScriptFrameIterator it(isolate, id);
   JavaScriptFrame* frame = it.frame();
-  FrameInspector frame_inspector(frame, inlined_jsframe_index, isolate);
-  Handle<JSFunction> function(JSFunction::cast(frame_inspector.GetFunction()));
-  Handle<SharedFunctionInfo> outer_info(function->shared());
 
   // Traverse the saved contexts chain to find the active context for the
   // selected frame.
@@ -2216,16 +2225,29 @@ RUNTIME_FUNCTION(Runtime_DebugEvaluate) {
   isolate->set_context(*(save->context()));
 
   // Materialize stack locals and the arguments object.
-  Handle<JSObject> materialized = NewJSObjectWithNullProto(isolate);
+  Handle<JSObject> materialized;
+  Handle<JSFunction> function;
+  Handle<SharedFunctionInfo> outer_info;
+  Handle<Context> eval_context;
 
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-      isolate, materialized,
-      MaterializeStackLocalsWithFrameInspector(isolate, materialized, function,
-                                               &frame_inspector));
+  // We need to limit the lifetime of the FrameInspector because evaluation can
+  // call arbitrary code and only one FrameInspector can be active at a time.
+  {
+    FrameInspector frame_inspector(frame, inlined_jsframe_index, isolate);
+    materialized = NewJSObjectWithNullProto(isolate);
+    function = handle(JSFunction::cast(frame_inspector.GetFunction()));
+    outer_info = handle(function->shared());
+    eval_context = handle(Context::cast(frame_inspector.GetContext()));
 
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-      isolate, materialized,
-      MaterializeArgumentsObject(isolate, materialized, function));
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, materialized,
+        MaterializeStackLocalsWithFrameInspector(isolate, materialized,
+                                                 function, &frame_inspector));
+
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, materialized,
+        MaterializeArgumentsObject(isolate, materialized, function));
+  }
 
   // At this point, the lookup chain may look like this:
   // [inner context] -> [function stack]+[function context] -> [outer context]
@@ -2242,7 +2264,6 @@ RUNTIME_FUNCTION(Runtime_DebugEvaluate) {
   // This could cause lookup failures if debug-evaluate creates a closure that
   // uses this temporary context chain.
 
-  Handle<Context> eval_context(Context::cast(frame_inspector.GetContext()));
   DCHECK(!eval_context.is_null());
   Handle<Context> function_context = eval_context;
   Handle<Context> outer_context(function->context(), isolate);
@@ -2327,8 +2348,12 @@ RUNTIME_FUNCTION(Runtime_DebugGetLoadedScripts) {
   HandleScope scope(isolate);
   DCHECK(args.length() == 0);
 
-  // Fill the script objects.
-  Handle<FixedArray> instances = isolate->debug()->GetLoadedScripts();
+  Handle<FixedArray> instances;
+  {
+    DebugScope debug_scope(isolate->debug());
+    // Fill the script objects.
+    instances = isolate->debug()->GetLoadedScripts();
+  }
 
   // Convert the script objects to proper JS objects.
   for (int i = 0; i < instances->length(); i++) {
@@ -2570,46 +2595,21 @@ RUNTIME_FUNCTION(Runtime_DebugSetScriptSource) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_DebugDisassembleFunction) {
-  HandleScope scope(isolate);
-#ifdef DEBUG
-  DCHECK(args.length() == 1);
-  // Get the function and make sure it is compiled.
-  CONVERT_ARG_HANDLE_CHECKED(JSFunction, func, 0);
-  if (!Compiler::EnsureCompiled(func, KEEP_EXCEPTION)) {
-    return isolate->heap()->exception();
-  }
-  OFStream os(stdout);
-  func->code()->Print(os);
-  os << std::endl;
-#endif  // DEBUG
-  return isolate->heap()->undefined_value();
-}
-
-
-RUNTIME_FUNCTION(Runtime_DebugDisassembleConstructor) {
-  HandleScope scope(isolate);
-#ifdef DEBUG
-  DCHECK(args.length() == 1);
-  // Get the function and make sure it is compiled.
-  CONVERT_ARG_HANDLE_CHECKED(JSFunction, func, 0);
-  if (!Compiler::EnsureCompiled(func, KEEP_EXCEPTION)) {
-    return isolate->heap()->exception();
-  }
-  OFStream os(stdout);
-  func->shared()->construct_stub()->Print(os);
-  os << std::endl;
-#endif  // DEBUG
-  return isolate->heap()->undefined_value();
-}
-
-
 RUNTIME_FUNCTION(Runtime_FunctionGetInferredName) {
   SealHandleScope shs(isolate);
   DCHECK(args.length() == 1);
 
   CONVERT_ARG_CHECKED(JSFunction, f, 0);
   return f->shared()->inferred_name();
+}
+
+
+RUNTIME_FUNCTION(Runtime_FunctionGetDebugName) {
+  HandleScope scope(isolate);
+  DCHECK(args.length() == 1);
+
+  CONVERT_ARG_HANDLE_CHECKED(JSFunction, f, 0);
+  return *JSFunction::GetDebugName(f);
 }
 
 
@@ -2655,22 +2655,26 @@ RUNTIME_FUNCTION(Runtime_GetFunctionCodePositionFromSource) {
 // to have a stack with C++ frame in the middle.
 RUNTIME_FUNCTION(Runtime_ExecuteInDebugContext) {
   HandleScope scope(isolate);
-  DCHECK(args.length() == 2);
+  DCHECK(args.length() == 1);
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 0);
-  CONVERT_BOOLEAN_ARG_CHECKED(without_debugger, 1);
 
-  MaybeHandle<Object> maybe_result;
-  if (without_debugger) {
-    maybe_result = Execution::Call(isolate, function,
-                                   handle(function->global_proxy()), 0, NULL);
-  } else {
-    DebugScope debug_scope(isolate->debug());
-    maybe_result = Execution::Call(isolate, function,
-                                   handle(function->global_proxy()), 0, NULL);
-  }
+  DebugScope debug_scope(isolate->debug());
   Handle<Object> result;
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, result, maybe_result);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, result,
+      Execution::Call(isolate, function, handle(function->global_proxy()), 0,
+                      NULL));
   return *result;
+}
+
+
+RUNTIME_FUNCTION(Runtime_GetDebugContext) {
+  HandleScope scope(isolate);
+  DCHECK(args.length() == 0);
+  Handle<Context> context = isolate->debug()->GetDebugContext();
+  if (context.is_null()) return isolate->heap()->undefined_value();
+  context->set_security_token(isolate->native_context()->security_token());
+  return context->global_proxy();
 }
 
 
@@ -2729,7 +2733,7 @@ RUNTIME_FUNCTION(Runtime_GetScript) {
 }
 
 
-// Check whether debugger and is about to step into the callback that is passed
+// Check whether debugger is about to step into the callback that is passed
 // to a built-in function such as Array.forEach.
 RUNTIME_FUNCTION(Runtime_DebugCallbackSupportsStepping) {
   DCHECK(args.length() == 1);
@@ -2739,9 +2743,12 @@ RUNTIME_FUNCTION(Runtime_DebugCallbackSupportsStepping) {
     return isolate->heap()->false_value();
   }
   CONVERT_ARG_CHECKED(Object, callback, 0);
-  // We do not step into the callback if it's a builtin or not even a function.
-  return isolate->heap()->ToBoolean(callback->IsJSFunction() &&
-                                    !JSFunction::cast(callback)->IsBuiltin());
+  // We do not step into the callback if it's a builtin other than a bound,
+  // or not even a function.
+  return isolate->heap()->ToBoolean(
+      callback->IsJSFunction() &&
+      (!JSFunction::cast(callback)->IsBuiltin() ||
+       JSFunction::cast(callback)->shared()->bound()));
 }
 
 
@@ -2766,16 +2773,17 @@ RUNTIME_FUNCTION(Runtime_DebugPrepareStepInIfStepping) {
   // if we do not leave the builtin.  To be able to step into the function
   // again, we need to clear the step out at this point.
   debug->ClearStepOut();
-  debug->FloodWithOneShot(fun);
+  debug->FloodWithOneShotGeneric(fun);
   return isolate->heap()->undefined_value();
 }
 
 
 RUNTIME_FUNCTION(Runtime_DebugPushPromise) {
-  DCHECK(args.length() == 1);
+  DCHECK(args.length() == 2);
   HandleScope scope(isolate);
   CONVERT_ARG_HANDLE_CHECKED(JSObject, promise, 0);
-  isolate->PushPromise(promise);
+  CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 1);
+  isolate->PushPromise(promise, function);
   return isolate->heap()->undefined_value();
 }
 

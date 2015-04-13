@@ -38,7 +38,6 @@
 
 #include "src/base/cpu.h"
 #include "src/mips64/assembler-mips64-inl.h"
-#include "src/serialize.h"
 
 namespace v8 {
 namespace internal {
@@ -638,7 +637,7 @@ int Assembler::target_at(int pos, bool is_internal) {
      }
   }
   // Check we have a branch or jump instruction.
-  DCHECK(IsBranch(instr) || IsJ(instr) || IsLui(instr));
+  DCHECK(IsBranch(instr) || IsLui(instr));
   // Do NOT change this to <<2. We rely on arithmetic shifts here, assuming
   // the compiler uses arithmetic shifts for signed integers.
   if (IsBranch(instr)) {
@@ -674,17 +673,8 @@ int Assembler::target_at(int pos, bool is_internal) {
       return pos - delta;
     }
   } else {
-    int32_t imm28 = (instr & static_cast<int32_t>(kImm26Mask)) << 2;
-    if (imm28 == kEndOfJumpChain) {
-      // EndOfChain sentinel is returned directly, not relative to pc or pos.
-      return kEndOfChain;
-    } else {
-      uint64_t instr_address = reinterpret_cast<int64_t>(buffer_ + pos);
-      instr_address &= kImm28Mask;
-      int delta = static_cast<int>(instr_address - imm28);
-      DCHECK(pos > delta);
-      return pos - delta;
-    }
+    UNREACHABLE();
+    return 0;
   }
 }
 
@@ -704,7 +694,7 @@ void Assembler::target_at_put(int pos, int target_pos, bool is_internal) {
     return;
   }
 
-  DCHECK(IsBranch(instr) || IsJ(instr) || IsLui(instr));
+  DCHECK(IsBranch(instr) || IsLui(instr));
   if (IsBranch(instr)) {
     int32_t imm18 = target_pos - (pos + kBranchPCOffset);
     DCHECK((imm18 & 3) == 0);
@@ -735,15 +725,7 @@ void Assembler::target_at_put(int pos, int target_pos, bool is_internal) {
     instr_at_put(pos + 3 * Assembler::kInstrSize,
                  instr_ori2 | (imm & kImm16Mask));
   } else {
-    uint64_t imm28 = reinterpret_cast<uint64_t>(buffer_) + target_pos;
-    imm28 &= kImm28Mask;
-    DCHECK((imm28 & 3) == 0);
-
-    instr &= ~kImm26Mask;
-    uint32_t imm26 = imm28 >> 2;
-    DCHECK(is_uint26(imm26));
-
-    instr_at_put(pos, instr | (imm26 & kImm26Mask));
+    UNREACHABLE();
   }
 }
 
@@ -2118,11 +2100,10 @@ void Assembler::movf(Register rd, Register rs, uint16_t cc) {
 }
 
 
-void Assembler::sel(SecondaryField fmt, FPURegister fd,
-    FPURegister ft, FPURegister fs, uint8_t sel) {
+void Assembler::sel(SecondaryField fmt, FPURegister fd, FPURegister fs,
+                    FPURegister ft) {
   DCHECK(kArchVariant == kMips64r6);
-  DCHECK(fmt == D);
-  DCHECK(fmt == S);
+  DCHECK((fmt == D) || (fmt == S));
 
   Instr instr = COP1 | fmt << kRsShift | ft.code() << kFtShift |
       fs.code() << kFsShift | fd.code() << kFdShift | SEL;
@@ -2130,43 +2111,50 @@ void Assembler::sel(SecondaryField fmt, FPURegister fd,
 }
 
 
+void Assembler::max(SecondaryField fmt, FPURegister fd, FPURegister fs,
+                    FPURegister ft) {
+  DCHECK(kArchVariant == kMips64r6);
+  DCHECK((fmt == D) || (fmt == S));
+  GenInstrRegister(COP1, fmt, ft, fs, fd, MAX);
+}
+
+
+void Assembler::min(SecondaryField fmt, FPURegister fd, FPURegister fs,
+                    FPURegister ft) {
+  DCHECK(kArchVariant == kMips64r6);
+  DCHECK((fmt == D) || (fmt == S));
+  GenInstrRegister(COP1, fmt, ft, fs, fd, MIN);
+}
+
+
 // GPR.
-void Assembler::seleqz(Register rs, Register rt, Register rd) {
+void Assembler::seleqz(Register rd, Register rs, Register rt) {
   DCHECK(kArchVariant == kMips64r6);
   GenInstrRegister(SPECIAL, rs, rt, rd, 0, SELEQZ_S);
 }
 
 
 // FPR.
-void Assembler::seleqz(SecondaryField fmt, FPURegister fd,
-    FPURegister ft, FPURegister fs) {
-  DCHECK(kArchVariant == kMips64r6);
-  DCHECK(fmt == D);
-  DCHECK(fmt == S);
-
-  Instr instr = COP1 | fmt << kRsShift | ft.code() << kFtShift |
-      fs.code() << kFsShift | fd.code() << kFdShift | SELEQZ_C;
-  emit(instr);
+void Assembler::seleqz(SecondaryField fmt, FPURegister fd, FPURegister fs,
+                       FPURegister ft) {
+  DCHECK((fmt == D) || (fmt == S));
+  GenInstrRegister(COP1, fmt, ft, fs, fd, SELEQZ_C);
 }
 
 
 // GPR.
-void Assembler::selnez(Register rs, Register rt, Register rd) {
+void Assembler::selnez(Register rd, Register rs, Register rt) {
   DCHECK(kArchVariant == kMips64r6);
   GenInstrRegister(SPECIAL, rs, rt, rd, 0, SELNEZ_S);
 }
 
 
 // FPR.
-void Assembler::selnez(SecondaryField fmt, FPURegister fd,
-    FPURegister ft, FPURegister fs) {
+void Assembler::selnez(SecondaryField fmt, FPURegister fd, FPURegister fs,
+                       FPURegister ft) {
   DCHECK(kArchVariant == kMips64r6);
-  DCHECK(fmt == D);
-  DCHECK(fmt == S);
-
-  Instr instr = COP1 | fmt << kRsShift | ft.code() << kFtShift |
-      fs.code() << kFsShift | fd.code() << kFdShift | SELNEZ_C;
-  emit(instr);
+  DCHECK((fmt == D) || (fmt == S));
+  GenInstrRegister(COP1, fmt, ft, fs, fd, SELNEZ_C);
 }
 
 
@@ -2287,13 +2275,28 @@ void Assembler::DoubleAsTwoUInt32(double d, uint32_t* lo, uint32_t* hi) {
 
 // Arithmetic.
 
+void Assembler::add_s(FPURegister fd, FPURegister fs, FPURegister ft) {
+  GenInstrRegister(COP1, S, ft, fs, fd, ADD_D);
+}
+
+
 void Assembler::add_d(FPURegister fd, FPURegister fs, FPURegister ft) {
   GenInstrRegister(COP1, D, ft, fs, fd, ADD_D);
 }
 
 
+void Assembler::sub_s(FPURegister fd, FPURegister fs, FPURegister ft) {
+  GenInstrRegister(COP1, S, ft, fs, fd, SUB_D);
+}
+
+
 void Assembler::sub_d(FPURegister fd, FPURegister fs, FPURegister ft) {
   GenInstrRegister(COP1, D, ft, fs, fd, SUB_D);
+}
+
+
+void Assembler::mul_s(FPURegister fd, FPURegister fs, FPURegister ft) {
+  GenInstrRegister(COP1, S, ft, fs, fd, MUL_D);
 }
 
 
@@ -2308,8 +2311,18 @@ void Assembler::madd_d(FPURegister fd, FPURegister fr, FPURegister fs,
 }
 
 
+void Assembler::div_s(FPURegister fd, FPURegister fs, FPURegister ft) {
+  GenInstrRegister(COP1, S, ft, fs, fd, DIV_D);
+}
+
+
 void Assembler::div_d(FPURegister fd, FPURegister fs, FPURegister ft) {
   GenInstrRegister(COP1, D, ft, fs, fd, DIV_D);
+}
+
+
+void Assembler::abs_s(FPURegister fd, FPURegister fs) {
+  GenInstrRegister(COP1, S, f0, fs, fd, ABS_D);
 }
 
 
@@ -2323,8 +2336,18 @@ void Assembler::mov_d(FPURegister fd, FPURegister fs) {
 }
 
 
+void Assembler::neg_s(FPURegister fd, FPURegister fs) {
+  GenInstrRegister(COP1, S, f0, fs, fd, NEG_D);
+}
+
+
 void Assembler::neg_d(FPURegister fd, FPURegister fs) {
   GenInstrRegister(COP1, D, f0, fs, fd, NEG_D);
+}
+
+
+void Assembler::sqrt_s(FPURegister fd, FPURegister fs) {
+  GenInstrRegister(COP1, S, f0, fs, fd, SQRT_D);
 }
 
 
@@ -2439,27 +2462,11 @@ void Assembler::ceil_l_d(FPURegister fd, FPURegister fs) {
 }
 
 
-void Assembler::min(SecondaryField fmt, FPURegister fd, FPURegister ft,
-    FPURegister fs) {
-  DCHECK(kArchVariant == kMips64r6);
-  DCHECK((fmt == D) || (fmt == S));
-  GenInstrRegister(COP1, fmt, ft, fs, fd, MIN);
-}
-
-
 void Assembler::mina(SecondaryField fmt, FPURegister fd, FPURegister ft,
     FPURegister fs) {
   DCHECK(kArchVariant == kMips64r6);
   DCHECK((fmt == D) || (fmt == S));
   GenInstrRegister(COP1, fmt, ft, fs, fd, MINA);
-}
-
-
-void Assembler::max(SecondaryField fmt, FPURegister fd, FPURegister ft,
-    FPURegister fs) {
-  DCHECK(kArchVariant == kMips64r6);
-  DCHECK((fmt == D) || (fmt == S));
-  GenInstrRegister(COP1, fmt, ft, fs, fd, MAX);
 }
 
 
@@ -2576,7 +2583,6 @@ int Assembler::RelocateInternalReference(RelocInfo::Mode rmode, byte* pc,
   }
   Instr instr = instr_at(pc);
   DCHECK(RelocInfo::IsInternalReferenceEncoded(rmode));
-  DCHECK(IsJ(instr) || IsLui(instr));
   if (IsLui(instr)) {
     Instr instr_lui = instr_at(pc + 0 * Assembler::kInstrSize);
     Instr instr_ori = instr_at(pc + 1 * Assembler::kInstrSize);
@@ -2608,21 +2614,8 @@ int Assembler::RelocateInternalReference(RelocInfo::Mode rmode, byte* pc,
                  instr_ori2 | (imm & kImm16Mask));
     return 4;  // Number of instructions patched.
   } else {
-    uint32_t imm28 = (instr & static_cast<int32_t>(kImm26Mask)) << 2;
-    if (static_cast<int32_t>(imm28) == kEndOfJumpChain) {
-      return 0;  // Number of instructions patched.
-    }
-
-    imm28 += pc_delta;
-    imm28 &= kImm28Mask;
-    DCHECK((imm28 & 3) == 0);
-
-    instr &= ~kImm26Mask;
-    uint32_t imm26 = imm28 >> 2;
-    DCHECK(is_uint26(imm26));
-
-    instr_at_put(pc, instr | (imm26 & kImm26Mask));
-    return 1;  // Number of instructions patched.
+    UNREACHABLE();
+    return 0;  // Number of instructions patched.
   }
 }
 
@@ -2892,40 +2885,6 @@ void Assembler::set_target_address_at(Address pc,
 
   if (icache_flush_mode != SKIP_ICACHE_FLUSH) {
     CpuFeatures::FlushICache(pc, 4 * Assembler::kInstrSize);
-  }
-}
-
-
-void Assembler::JumpLabelToJumpRegister(Address pc) {
-  // Address pc points to lui/ori instructions.
-  // Jump to label may follow at pc + 2 * kInstrSize.
-  uint32_t* p = reinterpret_cast<uint32_t*>(pc);
-#ifdef DEBUG
-  Instr instr1 = instr_at(pc);
-#endif
-  Instr instr2 = instr_at(pc + 1 * kInstrSize);
-  Instr instr3 = instr_at(pc + 6 * kInstrSize);
-  bool patched = false;
-
-  if (IsJal(instr3)) {
-    DCHECK(GetOpcodeField(instr1) == LUI);
-    DCHECK(GetOpcodeField(instr2) == ORI);
-
-    uint32_t rs_field = GetRt(instr2) << kRsShift;
-    uint32_t rd_field = ra.code() << kRdShift;  // Return-address (ra) reg.
-    *(p+6) = SPECIAL | rs_field | rd_field | JALR;
-    patched = true;
-  } else if (IsJ(instr3)) {
-    DCHECK(GetOpcodeField(instr1) == LUI);
-    DCHECK(GetOpcodeField(instr2) == ORI);
-
-    uint32_t rs_field = GetRt(instr2) << kRsShift;
-    *(p+6) = SPECIAL | rs_field | JR;
-    patched = true;
-  }
-
-  if (patched) {
-      CpuFeatures::FlushICache(pc+6, sizeof(int32_t));
   }
 }
 

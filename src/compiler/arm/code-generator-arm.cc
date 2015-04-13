@@ -151,7 +151,8 @@ class ArmOperandConverter FINAL : public InstructionOperandConverter {
     DCHECK(!op->IsDoubleRegister());
     DCHECK(op->IsStackSlot() || op->IsDoubleStackSlot());
     // The linkage computes where all spill slots are located.
-    FrameOffset offset = linkage()->GetFrameOffset(op->index(), frame(), 0);
+    FrameOffset offset = linkage()->GetFrameOffset(
+        AllocatedOperand::cast(op)->index(), frame(), 0);
     return MemOperand(offset.from_stack_pointer() ? sp : fp, offset.offset());
   }
 };
@@ -489,6 +490,10 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
                i.InputInt32(2));
       DCHECK_EQ(LeaveCC, i.OutputSBit());
       break;
+    case kArmClz:
+      __ clz(i.OutputRegister(), i.InputRegister(0));
+      DCHECK_EQ(LeaveCC, i.OutputSBit());
+      break;
     case kArmCmp:
       __ cmp(i.InputRegister(0), i.InputOperand2(1));
       DCHECK_EQ(SetCC, i.OutputSBit());
@@ -504,6 +509,57 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
     case kArmTeq:
       __ teq(i.InputRegister(0), i.InputOperand2(1));
       DCHECK_EQ(SetCC, i.OutputSBit());
+      break;
+    case kArmVcmpF32:
+      if (instr->InputAt(1)->IsDoubleRegister()) {
+        __ VFPCompareAndSetFlags(i.InputFloat32Register(0),
+                                 i.InputFloat32Register(1));
+      } else {
+        DCHECK(instr->InputAt(1)->IsImmediate());
+        // 0.0 is the only immediate supported by vcmp instructions.
+        DCHECK(i.InputDouble(1) == 0.0);
+        __ VFPCompareAndSetFlags(i.InputFloat32Register(0), i.InputDouble(1));
+      }
+      DCHECK_EQ(SetCC, i.OutputSBit());
+      break;
+    case kArmVaddF32:
+      __ vadd(i.OutputFloat32Register(), i.InputFloat32Register(0),
+              i.InputFloat32Register(1));
+      DCHECK_EQ(LeaveCC, i.OutputSBit());
+      break;
+    case kArmVsubF32:
+      __ vsub(i.OutputFloat32Register(), i.InputFloat32Register(0),
+              i.InputFloat32Register(1));
+      DCHECK_EQ(LeaveCC, i.OutputSBit());
+      break;
+    case kArmVmulF32:
+      __ vmul(i.OutputFloat32Register(), i.InputFloat32Register(0),
+              i.InputFloat32Register(1));
+      DCHECK_EQ(LeaveCC, i.OutputSBit());
+      break;
+    case kArmVmlaF32:
+      __ vmla(i.OutputFloat32Register(), i.InputFloat32Register(1),
+              i.InputFloat32Register(2));
+      DCHECK_EQ(LeaveCC, i.OutputSBit());
+      break;
+    case kArmVmlsF32:
+      __ vmls(i.OutputFloat32Register(), i.InputFloat32Register(1),
+              i.InputFloat32Register(2));
+      DCHECK_EQ(LeaveCC, i.OutputSBit());
+      break;
+    case kArmVdivF32:
+      __ vdiv(i.OutputFloat32Register(), i.InputFloat32Register(0),
+              i.InputFloat32Register(1));
+      DCHECK_EQ(LeaveCC, i.OutputSBit());
+      break;
+    case kArmVsqrtF32:
+      __ vsqrt(i.OutputFloat32Register(), i.InputFloat32Register(0));
+      break;
+    case kArmVabsF32:
+      __ vabs(i.OutputFloat32Register(), i.InputFloat32Register(0));
+      break;
+    case kArmVnegF32:
+      __ vneg(i.OutputFloat32Register(), i.InputFloat32Register(0));
       break;
     case kArmVcmpF64:
       if (instr->InputAt(1)->IsDoubleRegister()) {
@@ -564,6 +620,12 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
     case kArmVsqrtF64:
       __ vsqrt(i.OutputFloat64Register(), i.InputFloat64Register(0));
       break;
+    case kArmVabsF64:
+      __ vabs(i.OutputFloat64Register(), i.InputFloat64Register(0));
+      break;
+    case kArmVnegF64:
+      __ vneg(i.OutputFloat64Register(), i.InputFloat64Register(0));
+      break;
     case kArmVrintmF64:
       __ vrintm(i.OutputFloat64Register(), i.InputFloat64Register(0));
       break;
@@ -575,9 +637,6 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       break;
     case kArmVrintaF64:
       __ vrinta(i.OutputFloat64Register(), i.InputFloat64Register(0));
-      break;
-    case kArmVnegF64:
-      __ vneg(i.OutputFloat64Register(), i.InputFloat64Register(0));
       break;
     case kArmVcvtF32F64: {
       __ vcvt_f32_f64(i.OutputFloat32Register(), i.InputFloat64Register(0));
@@ -753,7 +812,7 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       ASSEMBLE_CHECKED_STORE_FLOAT(64);
       break;
   }
-}
+}  // NOLINT(readability/fn_size)
 
 
 // Assembles branches after an instruction.
@@ -802,12 +861,14 @@ void CodeGenerator::AssembleArchTableSwitch(Instruction* instr) {
   ArmOperandConverter i(this, instr);
   Register input = i.InputRegister(0);
   size_t const case_count = instr->InputCount() - 2;
+  // Ensure to emit the constant pool first if necessary.
+  __ CheckConstPool(true, true);
   __ cmp(input, Operand(case_count));
   __ BlockConstPoolFor(case_count + 2);
-  __ ldr(pc, MemOperand(pc, input, LSL, 2), lo);
+  __ add(pc, pc, Operand(input, LSL, 2), LeaveCC, lo);
   __ b(GetLabel(i.InputRpo(1)));
   for (size_t index = 0; index < case_count; ++index) {
-    __ dd(GetLabel(i.InputRpo(index + 2)));
+    __ b(GetLabel(i.InputRpo(index + 2)));
   }
 }
 
@@ -867,6 +928,8 @@ void CodeGenerator::AssemblePrologue() {
     // remaining stack slots.
     if (FLAG_code_comments) __ RecordComment("-- OSR entrypoint --");
     osr_pc_offset_ = __ pc_offset();
+    // TODO(titzer): cannot address target function == local #-1
+    __ ldr(r1, MemOperand(fp, JavaScriptFrameConstants::kFunctionOffset));
     DCHECK(stack_slots >= frame()->GetOsrStackSlotCount());
     stack_slots -= frame()->GetOsrStackSlotCount();
   }
@@ -953,9 +1016,24 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
         case Constant::kExternalReference:
           __ mov(dst, Operand(src.ToExternalReference()));
           break;
-        case Constant::kHeapObject:
-          __ Move(dst, src.ToHeapObject());
+        case Constant::kHeapObject: {
+          Handle<HeapObject> src_object = src.ToHeapObject();
+          if (info()->IsOptimizing() &&
+              src_object.is_identical_to(info()->context())) {
+            // Loading the context from the frame is way cheaper than
+            // materializing the actual context heap object address.
+            __ ldr(dst, MemOperand(fp, StandardFrameConstants::kContextOffset));
+          } else if (info()->IsOptimizing() &&
+                     src_object.is_identical_to(info()->closure())) {
+            // Loading the JSFunction from the frame is way cheaper than
+            // materializing the actual JSFunction heap object address.
+            __ ldr(dst,
+                   MemOperand(fp, JavaScriptFrameConstants::kFunctionOffset));
+          } else {
+            __ Move(dst, src_object);
+          }
           break;
+        }
         case Constant::kRpoNumber:
           UNREACHABLE();  // TODO(dcarney): loading RPO constants on arm.
           break;

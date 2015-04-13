@@ -38,42 +38,12 @@
     {
       'target_name': 'v8',
       'dependencies_traverse': 1,
+      'dependencies': ['v8_maybe_snapshot'],
       'conditions': [
         ['want_separate_host_toolset==1', {
           'toolsets': ['host', 'target'],
         }, {
           'toolsets': ['target'],
-        }],
-
-        ['v8_use_snapshot=="true" and v8_use_external_startup_data==0', {
-          # The dependency on v8_base should come from a transitive
-          # dependency however the Android toolchain requires libv8_base.a
-          # to appear before libv8_snapshot.a so it's listed explicitly.
-          'dependencies': ['v8_base', 'v8_snapshot'],
-        }],
-        ['v8_use_snapshot!="true" and v8_use_external_startup_data==0', {
-          # The dependency on v8_base should come from a transitive
-          # dependency however the Android toolchain requires libv8_base.a
-          # to appear before libv8_snapshot.a so it's listed explicitly.
-          'dependencies': ['v8_base', 'v8_nosnapshot'],
-        }],
-        ['v8_use_external_startup_data==1 and want_separate_host_toolset==1', {
-          'dependencies': ['v8_base', 'v8_external_snapshot'],
-          'target_conditions': [
-            ['_toolset=="host"', {
-              'inputs': [
-                '<(PRODUCT_DIR)/snapshot_blob_host.bin',
-              ],
-            }, {
-              'inputs': [
-                '<(PRODUCT_DIR)/snapshot_blob.bin',
-              ],
-            }],
-          ],
-        }],
-        ['v8_use_external_startup_data==1 and want_separate_host_toolset==0', {
-          'dependencies': ['v8_base', 'v8_external_snapshot'],
-          'inputs': [ '<(PRODUCT_DIR)/snapshot_blob.bin', ],
         }],
         ['component=="shared_library"', {
           'type': '<(component)',
@@ -125,6 +95,50 @@
           '../../include',
         ],
       },
+    },
+    {
+      # This rule delegates to either v8_snapshot, v8_nosnapshot, or
+      # v8_external_snapshot, depending on the current variables.
+      # The intention is to make the 'calling' rules a bit simpler.
+      'target_name': 'v8_maybe_snapshot',
+      'type': 'none',
+      'conditions': [
+        ['v8_use_snapshot!="true"', {
+          # The dependency on v8_base should come from a transitive
+          # dependency however the Android toolchain requires libv8_base.a
+          # to appear before libv8_snapshot.a so it's listed explicitly.
+          'dependencies': ['v8_base', 'v8_nosnapshot'],
+        }],
+        ['v8_use_snapshot=="true" and v8_use_external_startup_data==0', {
+          # The dependency on v8_base should come from a transitive
+          # dependency however the Android toolchain requires libv8_base.a
+          # to appear before libv8_snapshot.a so it's listed explicitly.
+          'dependencies': ['v8_base', 'v8_snapshot'],
+        }],
+        ['v8_use_snapshot=="true" and v8_use_external_startup_data==1 and want_separate_host_toolset==0', {
+          'dependencies': ['v8_base', 'v8_external_snapshot'],
+          'inputs': [ '<(PRODUCT_DIR)/snapshot_blob.bin', ],
+        }],
+        ['v8_use_snapshot=="true" and v8_use_external_startup_data==1 and want_separate_host_toolset==1', {
+          'dependencies': ['v8_base', 'v8_external_snapshot'],
+          'target_conditions': [
+            ['_toolset=="host"', {
+              'inputs': [
+                '<(PRODUCT_DIR)/snapshot_blob_host.bin',
+              ],
+            }, {
+              'inputs': [
+                '<(PRODUCT_DIR)/snapshot_blob.bin',
+              ],
+            }],
+          ],
+        }],
+        ['want_separate_host_toolset==1', {
+          'toolsets': ['host', 'target'],
+        }, {
+          'toolsets': ['target'],
+        }],
+      ]
     },
     {
       'target_name': 'v8_snapshot',
@@ -209,7 +223,7 @@
       'sources': [
         '<(SHARED_INTERMEDIATE_DIR)/libraries.cc',
         '<(SHARED_INTERMEDIATE_DIR)/experimental-libraries.cc',
-        '../../src/snapshot-empty.cc',
+        '../../src/snapshot/snapshot-empty.cc',
       ],
       'conditions': [
         ['want_separate_host_toolset==1', {
@@ -267,8 +281,8 @@
             '../..',
           ],
           'sources': [
-            '../../src/natives-external.cc',
-            '../../src/snapshot-external.cc',
+            '../../src/snapshot/natives-external.cc',
+            '../../src/snapshot/snapshot-external.cc',
           ],
           'actions': [
             {
@@ -471,6 +485,8 @@
         '../../src/compiler/js-intrinsic-lowering.h',
         '../../src/compiler/js-operator.cc',
         '../../src/compiler/js-operator.h',
+        '../../src/compiler/js-type-feedback.cc',
+        '../../src/compiler/js-type-feedback.h',
         '../../src/compiler/js-typed-lowering.cc',
         '../../src/compiler/js-typed-lowering.h',
         '../../src/compiler/jump-threading.cc',
@@ -478,6 +494,8 @@
         '../../src/compiler/linkage-impl.h',
         '../../src/compiler/linkage.cc',
         '../../src/compiler/linkage.h',
+        '../../src/compiler/liveness-analyzer.cc',
+        '../../src/compiler/liveness-analyzer.h',
         '../../src/compiler/load-elimination.cc',
         '../../src/compiler/load-elimination.h',
         '../../src/compiler/loop-analysis.cc',
@@ -538,6 +556,8 @@
         '../../src/compiler/simplified-operator.h',
         '../../src/compiler/source-position.cc',
         '../../src/compiler/source-position.h',
+        '../../src/compiler/state-values-utils.cc',
+        '../../src/compiler/state-values-utils.h',
         '../../src/compiler/typer.cc',
         '../../src/compiler/typer.h',
         '../../src/compiler/value-numbering-reducer.cc',
@@ -757,7 +777,6 @@
         '../../src/modules.cc',
         '../../src/modules.h',
         '../../src/msan.h',
-        '../../src/natives.h',
         '../../src/objects-debug.cc',
         '../../src/objects-inl.h',
         '../../src/objects-printer.cc',
@@ -840,14 +859,15 @@
         '../../src/scopeinfo.h',
         '../../src/scopes.cc',
         '../../src/scopes.h',
-        '../../src/serialize.cc',
-        '../../src/serialize.h',
         '../../src/small-pointer-list.h',
         '../../src/smart-pointers.h',
-        '../../src/snapshot.h',
-        '../../src/snapshot-common.cc',
-        '../../src/snapshot-source-sink.cc',
-        '../../src/snapshot-source-sink.h',
+        '../../src/snapshot/natives.h',
+        '../../src/snapshot/serialize.cc',
+        '../../src/snapshot/serialize.h',
+        '../../src/snapshot/snapshot.h',
+        '../../src/snapshot/snapshot-common.cc',
+        '../../src/snapshot/snapshot-source-sink.cc',
+        '../../src/snapshot/snapshot-source-sink.h',
         '../../src/string-builder.cc',
         '../../src/string-builder.h',
         '../../src/string-search.cc',
@@ -1368,6 +1388,7 @@
               ['nacl_target_arch=="none"', {
                 'link_settings': {
                   'libraries': [
+                    '-ldl',
                     '-lrt'
                   ],
                 },
@@ -1387,6 +1408,20 @@
             'sources': [
               '../../src/base/platform/platform-posix.cc'
             ],
+            'link_settings': {
+              'target_conditions': [
+                ['_toolset=="host"', {
+                  # Only include libdl and librt on host builds because they
+                  # are included by default on Android target builds, and we
+                  # don't want to re-include them here since this will change
+                  # library order and break (see crbug.com/469973).
+                  'libraries': [
+                    '-ldl',
+                    '-lrt'
+                  ]
+                }]
+              ]
+            },
             'conditions': [
               ['host_os=="mac"', {
                 'target_conditions': [
@@ -1401,28 +1436,6 @@
                   }],
                 ],
               }, {
-                # TODO(bmeurer): What we really want here, is this:
-                #
-                # 'link_settings': {
-                #   'target_conditions': [
-                #     ['_toolset=="host"', {
-                #       'libraries': [
-                #         '-lrt'
-                #       ]
-                #     }]
-                #   ]
-                # },
-                #
-                # but we can't do this right now, as the AOSP does not support
-                # linking against the host librt, so we need to work around this
-                # for now, using the following hack (see platform/time.cc):
-                'target_conditions': [
-                  ['_toolset=="host"', {
-                    'defines': [
-                      'V8_LIBRT_NOT_AVAILABLE=1',
-                    ],
-                  }],
-                ],
                 'sources': [
                   '../../src/base/platform/platform-linux.cc'
                 ]
@@ -1699,19 +1712,20 @@
           '../../src/debug-debugger.js',
           '../../src/mirror-debugger.js',
           '../../src/liveedit-debugger.js',
+          '../../src/templates.js',
           '../../src/macros.py',
         ],
         'experimental_library_files': [
           '../../src/macros.py',
           '../../src/proxy.js',
           '../../src/generator.js',
-          '../../src/harmony-string.js',
           '../../src/harmony-array.js',
           '../../src/harmony-array-includes.js',
           '../../src/harmony-tostring.js',
           '../../src/harmony-typedarray.js',
-          '../../src/harmony-templates.js',
-          '../../src/harmony-regexp.js'
+          '../../src/harmony-regexp.js',
+          '../../src/harmony-reflect.js',
+          '../../src/harmony-spread.js'
         ],
         'libraries_bin_file': '<(SHARED_INTERMEDIATE_DIR)/libraries.bin',
         'libraries_experimental_bin_file': '<(SHARED_INTERMEDIATE_DIR)/libraries-experimental.bin',
@@ -1807,7 +1821,7 @@
         '../..',
       ],
       'sources': [
-        '../../src/mksnapshot.cc',
+        '../../src/snapshot/mksnapshot.cc',
       ],
       'conditions': [
         ['v8_enable_i18n_support==1', {

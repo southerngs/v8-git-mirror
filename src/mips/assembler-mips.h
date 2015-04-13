@@ -43,7 +43,6 @@
 #include "src/assembler.h"
 #include "src/compiler.h"
 #include "src/mips/constants-mips.h"
-#include "src/serialize.h"
 
 namespace v8 {
 namespace internal {
@@ -532,7 +531,7 @@ class Assembler : public AssemblerBase {
   // Return the code target address of the patch debug break slot
   inline static Address break_address_from_return_address(Address pc);
 
-  static void JumpLabelToJumpRegister(Address pc);
+  static void JumpToJumpRegister(Address pc);
 
   static void QuietNaN(HeapObject* nan);
 
@@ -546,6 +545,11 @@ class Assembler : public AssemblerBase {
         code,
         target);
   }
+
+  // This sets the internal reference at the pc.
+  inline static void deserialization_set_target_internal_reference_at(
+      Address pc, Address target,
+      RelocInfo::Mode mode = RelocInfo::INTERNAL_REFERENCE);
 
   // Size of an instruction.
   static const int kInstrSize = sizeof(Instr);
@@ -848,14 +852,13 @@ class Assembler : public AssemblerBase {
   void movt(Register rd, Register rs, uint16_t cc = 0);
   void movf(Register rd, Register rs, uint16_t cc = 0);
 
-  void sel(SecondaryField fmt, FPURegister fd, FPURegister ft,
-      FPURegister fs, uint8_t sel);
-  void seleqz(Register rs, Register rt, Register rd);
-  void seleqz(SecondaryField fmt, FPURegister fd, FPURegister ft,
-      FPURegister fs);
-  void selnez(Register rs, Register rt, Register rd);
-  void selnez(SecondaryField fmt, FPURegister fd, FPURegister ft,
-      FPURegister fs);
+  void sel(SecondaryField fmt, FPURegister fd, FPURegister fs, FPURegister ft);
+  void seleqz(Register rd, Register rs, Register rt);
+  void seleqz(SecondaryField fmt, FPURegister fd, FPURegister fs,
+              FPURegister ft);
+  void selnez(Register rd, Register rs, Register rt);
+  void selnez(SecondaryField fmt, FPURegister fd, FPURegister fs,
+              FPURegister ft);
 
   // Bit twiddling.
   void clz(Register rd, Register rs);
@@ -881,14 +884,21 @@ class Assembler : public AssemblerBase {
   void cfc1(Register rt, FPUControlRegister fs);
 
   // Arithmetic.
+  void add_s(FPURegister fd, FPURegister fs, FPURegister ft);
   void add_d(FPURegister fd, FPURegister fs, FPURegister ft);
+  void sub_s(FPURegister fd, FPURegister fs, FPURegister ft);
   void sub_d(FPURegister fd, FPURegister fs, FPURegister ft);
+  void mul_s(FPURegister fd, FPURegister fs, FPURegister ft);
   void mul_d(FPURegister fd, FPURegister fs, FPURegister ft);
   void madd_d(FPURegister fd, FPURegister fr, FPURegister fs, FPURegister ft);
+  void div_s(FPURegister fd, FPURegister fs, FPURegister ft);
   void div_d(FPURegister fd, FPURegister fs, FPURegister ft);
+  void abs_s(FPURegister fd, FPURegister fs);
   void abs_d(FPURegister fd, FPURegister fs);
   void mov_d(FPURegister fd, FPURegister fs);
+  void neg_s(FPURegister fd, FPURegister fs);
   void neg_d(FPURegister fd, FPURegister fs);
+  void sqrt_s(FPURegister fd, FPURegister fs);
   void sqrt_d(FPURegister fd, FPURegister fs);
 
   // Conversion.
@@ -914,10 +924,10 @@ class Assembler : public AssemblerBase {
   void ceil_l_s(FPURegister fd, FPURegister fs);
   void ceil_l_d(FPURegister fd, FPURegister fs);
 
-  void min(SecondaryField fmt, FPURegister fd, FPURegister ft, FPURegister fs);
-  void mina(SecondaryField fmt, FPURegister fd, FPURegister ft, FPURegister fs);
-  void max(SecondaryField fmt, FPURegister fd, FPURegister ft, FPURegister fs);
-  void maxa(SecondaryField fmt, FPURegister fd, FPURegister ft, FPURegister fs);
+  void min(SecondaryField fmt, FPURegister fd, FPURegister fs, FPURegister ft);
+  void mina(SecondaryField fmt, FPURegister fd, FPURegister fs, FPURegister ft);
+  void max(SecondaryField fmt, FPURegister fd, FPURegister fs, FPURegister ft);
+  void maxa(SecondaryField fmt, FPURegister fd, FPURegister fs, FPURegister ft);
 
   void cvt_s_w(FPURegister fd, FPURegister fs);
   void cvt_s_l(FPURegister fd, FPURegister fs);
@@ -1187,6 +1197,9 @@ class Assembler : public AssemblerBase {
   }
 
  private:
+  inline static void set_target_internal_reference_encoded_at(Address pc,
+                                                              Address target);
+
   // Buffer size and constant pool distance are checked together at regular
   // intervals of kBufferCheckInterval emitted bytes.
   static const int kBufferCheckInterval = 1*KB/2;

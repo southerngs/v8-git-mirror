@@ -406,6 +406,21 @@ MaybeHandle<Object> Object::GetPropertyWithDefinedGetter(
     Handle<Object> receiver,
     Handle<JSReceiver> getter) {
   Isolate* isolate = getter->GetIsolate();
+
+  // Platforms with simulators like arm/arm64 expose a funny issue. If the
+  // simulator has a separate JS stack pointer from the C++ stack pointer, it
+  // can miss C++ stack overflows in the stack guard at the start of JavaScript
+  // functions. It would be very expensive to check the C++ stack pointer at
+  // that location. The best solution seems to be to break the impasse by
+  // adding checks at possible recursion points. What's more, we don't put
+  // this stack check behind the USE_SIMULATOR define in order to keep
+  // behavior the same between hardware and simulators.
+  StackLimitCheck check(isolate);
+  if (check.JsHasOverflowed()) {
+    isolate->StackOverflow();
+    return MaybeHandle<Object>();
+  }
+
   Debug* debug = isolate->debug();
   // Handle stepping into a getter if step into is active.
   // TODO(rossberg): should this apply to getters that are function proxies?
@@ -542,41 +557,30 @@ void JSObject::SetNormalizedProperty(Handle<JSObject> object,
 
   int entry = property_dictionary->FindEntry(name);
   if (entry == NameDictionary::kNotFound) {
-    Handle<Object> store_value = value;
     if (object->IsGlobalObject()) {
-      store_value = object->GetIsolate()->factory()->NewPropertyCell(value);
+      auto cell = object->GetIsolate()->factory()->NewPropertyCell();
+      cell->set_value(*value);
+      auto cell_type = value->IsUndefined() ? PropertyCellType::kUndefined
+                                            : PropertyCellType::kConstant;
+      details = details.set_cell_type(cell_type);
+      value = cell;
     }
-
-    property_dictionary = NameDictionary::Add(
-        property_dictionary, name, store_value, details);
+    property_dictionary =
+        NameDictionary::Add(property_dictionary, name, value, details);
     object->set_properties(*property_dictionary);
+    return;
+  }
+
+  if (object->IsGlobalObject()) {
+    PropertyCell::UpdateCell(property_dictionary, entry, value, details);
     return;
   }
 
   PropertyDetails original_details = property_dictionary->DetailsAt(entry);
   int enumeration_index = original_details.dictionary_index();
-
-  if (!object->IsGlobalObject()) {
-    DCHECK(enumeration_index > 0);
-    details = PropertyDetails(details.attributes(), details.type(),
-                              enumeration_index);
-    property_dictionary->SetEntry(entry, name, value, details);
-    return;
-  }
-
-  Handle<PropertyCell> cell(
-      PropertyCell::cast(property_dictionary->ValueAt(entry)));
-  // Preserve the enumeration index unless the property was deleted.
-  if (cell->value()->IsTheHole()) {
-    enumeration_index = property_dictionary->NextEnumerationIndex();
-    property_dictionary->SetNextEnumerationIndex(enumeration_index + 1);
-  }
   DCHECK(enumeration_index > 0);
-  details = PropertyDetails(
-      details.attributes(), details.type(), enumeration_index);
-  PropertyCell::SetValueInferType(cell, value);
-  // Please note we have to update the property details.
-  property_dictionary->DetailsAtPut(entry, details);
+  details = details.set_index(enumeration_index);
+  property_dictionary->SetEntry(entry, name, value, details);
 }
 
 
@@ -628,7 +632,7 @@ Maybe<PropertyAttributes> JSObject::GetElementAttributesWithFailedAccessCheck(
         FindIndexedAllCanReadHolder(isolate, holder, where_to_start);
     if (!all_can_read_holder.ToHandle(&holder)) break;
     auto result =
-        JSObject::GetElementAttributeFromInterceptor(object, receiver, index);
+        JSObject::GetElementAttributeFromInterceptor(holder, receiver, index);
     if (isolate->has_scheduled_exception()) break;
     if (result.IsJust() && result.FromJust() != ABSENT) return result;
     where_to_start = PrototypeIterator::START_AT_PROTOTYPE;
@@ -803,17 +807,19 @@ Map* Object::GetRootMap(Isolate* isolate) {
 
 
 Object* Object::GetHash() {
-  // The object is either a number, a name, an odd-ball,
+  // The object is either a Smi, a HeapNumber, a name, an odd-ball,
   // a real JS object, or a Harmony proxy.
   if (IsSmi()) {
-    int num = Smi::cast(this)->value();
-    uint32_t hash = ComputeLongHash(double_to_uint64(static_cast<double>(num)));
+    uint32_t hash = ComputeIntegerHash(Smi::cast(this)->value(), kZeroHashSeed);
     return Smi::FromInt(hash & Smi::kMaxValue);
   }
   if (IsHeapNumber()) {
     double num = HeapNumber::cast(this)->value();
     if (std::isnan(num)) return Smi::FromInt(Smi::kMaxValue);
     if (i::IsMinusZero(num)) num = 0;
+    if (IsSmiDouble(num)) {
+      return Smi::FromInt(FastD2I(num))->GetHash();
+    }
     uint32_t hash = ComputeLongHash(double_to_uint64(num));
     return Smi::FromInt(hash & Smi::kMaxValue);
   }
@@ -1778,23 +1784,27 @@ void JSObject::AddSlowProperty(Handle<JSObject> object,
   DCHECK(!object->HasFastProperties());
   Isolate* isolate = object->GetIsolate();
   Handle<NameDictionary> dict(object->property_dictionary());
+  PropertyDetails details(attributes, DATA, 0, PropertyCellType::kInvalid);
   if (object->IsGlobalObject()) {
-    // In case name is an orphaned property reuse the cell.
     int entry = dict->FindEntry(name);
+    // If there's a cell there, just invalidate and set the property.
     if (entry != NameDictionary::kNotFound) {
-      Handle<PropertyCell> cell(PropertyCell::cast(dict->ValueAt(entry)));
-      PropertyCell::SetValueInferType(cell, value);
-      // Assign an enumeration index to the property and update
-      // SetNextEnumerationIndex.
+      PropertyCell::UpdateCell(dict, entry, value, details);
+      // TODO(dcarney): move this to UpdateCell.
+      // Need to adjust the details.
       int index = dict->NextEnumerationIndex();
-      PropertyDetails details(attributes, DATA, index);
       dict->SetNextEnumerationIndex(index + 1);
-      dict->SetEntry(entry, name, cell, details);
+      details = dict->DetailsAt(entry).set_index(index);
+      dict->DetailsAtPut(entry, details);
       return;
     }
-    value = isolate->factory()->NewPropertyCell(value);
+    auto cell = isolate->factory()->NewPropertyCell();
+    cell->set_value(*value);
+    auto cell_type = value->IsUndefined() ? PropertyCellType::kUndefined
+                                          : PropertyCellType::kConstant;
+    details = details.set_cell_type(cell_type);
+    value = cell;
   }
-  PropertyDetails details(attributes, DATA, 0);
   Handle<NameDictionary> result =
       NameDictionary::Add(dict, name, value, details);
   if (*dict != *result) object->set_properties(*result);
@@ -1892,11 +1902,12 @@ void Map::ConnectElementsTransition(Handle<Map> parent, Handle<Map> child) {
 }
 
 
-void JSObject::MigrateToMap(Handle<JSObject> object, Handle<Map> new_map) {
+void JSObject::MigrateToMap(Handle<JSObject> object, Handle<Map> new_map,
+                            int expected_additional_properties) {
   if (object->map() == *new_map) return;
+  Handle<Map> old_map(object->map());
   if (object->HasFastProperties()) {
     if (!new_map->is_dictionary_map()) {
-      Handle<Map> old_map(object->map());
       MigrateFastToFast(object, new_map);
       if (old_map->is_prototype_map()) {
         // Clear out the old descriptor array to avoid problems to sharing
@@ -1910,59 +1921,19 @@ void JSObject::MigrateToMap(Handle<JSObject> object, Handle<Map> new_map) {
         DCHECK(new_map->GetBackPointer()->IsUndefined());
       }
     } else {
-      MigrateFastToSlow(object, new_map, 0);
+      MigrateFastToSlow(object, new_map, expected_additional_properties);
     }
   } else {
-    // For slow-to-fast migrations JSObject::TransformToFastProperties()
+    // For slow-to-fast migrations JSObject::MigrateSlowToFast()
     // must be used instead.
     CHECK(new_map->is_dictionary_map());
 
     // Slow-to-slow migration is trivial.
     object->set_map(*new_map);
   }
-}
-
-
-// Returns true if during migration from |old_map| to |new_map| "tagged"
-// inobject fields are going to be replaced with unboxed double fields.
-static bool ShouldClearSlotsRecorded(Map* old_map, Map* new_map,
-                                     int new_number_of_fields) {
-  DisallowHeapAllocation no_gc;
-  int inobject = new_map->inobject_properties();
-  DCHECK(inobject <= old_map->inobject_properties());
-
-  int limit = Min(inobject, new_number_of_fields);
-  for (int i = 0; i < limit; i++) {
-    FieldIndex index = FieldIndex::ForPropertyIndex(new_map, i);
-    if (new_map->IsUnboxedDoubleField(index) &&
-        !old_map->IsUnboxedDoubleField(index)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-
-static void RemoveOldToOldSlotsRecorded(Heap* heap, JSObject* object,
-                                        FieldIndex index) {
-  DisallowHeapAllocation no_gc;
-
-  Object* old_value = object->RawFastPropertyAt(index);
-  if (old_value->IsHeapObject()) {
-    HeapObject* ho = HeapObject::cast(old_value);
-    if (heap->InNewSpace(ho)) {
-      // At this point there must be no old-to-new slots recorded for this
-      // object.
-      SLOW_DCHECK(
-          !heap->store_buffer()->CellIsInStoreBuffer(reinterpret_cast<Address>(
-              HeapObject::RawField(object, index.offset()))));
-    } else {
-      Page* p = Page::FromAddress(reinterpret_cast<Address>(ho));
-      if (p->IsEvacuationCandidate()) {
-        Object** slot = HeapObject::RawField(object, index.offset());
-        SlotsBuffer::RemoveSlot(p->slots_buffer(), slot);
-      }
-    }
+  if (old_map->is_prototype_map()) {
+    new_map->set_prototype_info(old_map->prototype_info());
+    old_map->set_prototype_info(Smi::FromInt(0));
   }
 }
 
@@ -2120,38 +2091,24 @@ void JSObject::MigrateFastToFast(Handle<JSObject> object, Handle<Map> new_map) {
   // From here on we cannot fail and we shouldn't GC anymore.
   DisallowHeapAllocation no_allocation;
 
-  Heap* heap = isolate->heap();
-
-  // If we are going to put an unboxed double to the field that used to
-  // contain HeapObject we should ensure that this slot is removed from
-  // both StoreBuffer and respective SlotsBuffer.
-  bool clear_slots_recorded =
-      FLAG_unbox_double_fields && !heap->InNewSpace(object->address()) &&
-      ShouldClearSlotsRecorded(*old_map, *new_map, number_of_fields);
-  if (clear_slots_recorded) {
-    Address obj_address = object->address();
-    Address start_address = obj_address + JSObject::kHeaderSize;
-    Address end_address = obj_address + old_map->instance_size();
-    heap->store_buffer()->RemoveSlots(start_address, end_address);
-  }
-
   // Copy (real) inobject properties. If necessary, stop at number_of_fields to
   // avoid overwriting |one_pointer_filler_map|.
   int limit = Min(inobject, number_of_fields);
   for (int i = 0; i < limit; i++) {
     FieldIndex index = FieldIndex::ForPropertyIndex(*new_map, i);
     Object* value = array->get(external + i);
+    // Can't use JSObject::FastPropertyAtPut() because proper map was not set
+    // yet.
     if (new_map->IsUnboxedDoubleField(index)) {
       DCHECK(value->IsMutableHeapNumber());
-      if (clear_slots_recorded && !old_map->IsUnboxedDoubleField(index)) {
-        RemoveOldToOldSlotsRecorded(heap, *object, index);
-      }
       object->RawFastDoublePropertyAtPut(index,
                                          HeapNumber::cast(value)->value());
     } else {
       object->RawFastPropertyAtPut(index, value);
     }
   }
+
+  Heap* heap = isolate->heap();
 
   // If there are properties in the new backing store, trim it to the correct
   // size and install the backing store into the object.
@@ -4227,6 +4184,8 @@ MaybeHandle<Object> JSObject::SetOwnPropertyIgnoreAttributes(
   for (; it.IsFound(); it.Next()) {
     switch (it.state()) {
       case LookupIterator::INTEGER_INDEXED_EXOTIC:
+        return value;
+
       case LookupIterator::INTERCEPTOR:
       case LookupIterator::JSPROXY:
       case LookupIterator::NOT_FOUND:
@@ -4580,7 +4539,7 @@ void JSObject::NormalizeProperties(Handle<JSObject> object,
   Handle<Map> map(object->map());
   Handle<Map> new_map = Map::Normalize(map, mode, reason);
 
-  MigrateFastToSlow(object, new_map, expected_additional_properties);
+  MigrateToMap(object, new_map, expected_additional_properties);
 }
 
 
@@ -4614,7 +4573,8 @@ void JSObject::MigrateFastToSlow(Handle<JSObject> object,
     switch (details.type()) {
       case DATA_CONSTANT: {
         Handle<Object> value(descs->GetConstant(i), isolate);
-        PropertyDetails d(details.attributes(), DATA, i + 1);
+        PropertyDetails d(details.attributes(), DATA, i + 1,
+                          PropertyCellType::kInvalid);
         dictionary = NameDictionary::Add(dictionary, key, value, d);
         break;
       }
@@ -4632,20 +4592,23 @@ void JSObject::MigrateFastToSlow(Handle<JSObject> object,
             value = isolate->factory()->NewHeapNumber(old->value());
           }
         }
-        PropertyDetails d(details.attributes(), DATA, i + 1);
+        PropertyDetails d(details.attributes(), DATA, i + 1,
+                          PropertyCellType::kInvalid);
         dictionary = NameDictionary::Add(dictionary, key, value, d);
         break;
       }
       case ACCESSOR: {
         FieldIndex index = FieldIndex::ForDescriptor(*map, i);
         Handle<Object> value(object->RawFastPropertyAt(index), isolate);
-        PropertyDetails d(details.attributes(), ACCESSOR_CONSTANT, i + 1);
+        PropertyDetails d(details.attributes(), ACCESSOR_CONSTANT, i + 1,
+                          PropertyCellType::kInvalid);
         dictionary = NameDictionary::Add(dictionary, key, value, d);
         break;
       }
       case ACCESSOR_CONSTANT: {
         Handle<Object> value(descs->GetCallbacksObject(i), isolate);
-        PropertyDetails d(details.attributes(), ACCESSOR_CONSTANT, i + 1);
+        PropertyDetails d(details.attributes(), ACCESSOR_CONSTANT, i + 1,
+                          PropertyCellType::kInvalid);
         dictionary = NameDictionary::Add(dictionary, key, value, d);
         break;
       }
@@ -4878,7 +4841,7 @@ static Handle<SeededNumberDictionary> CopyFastElementsToDictionary(
       value = handle(Handle<FixedArray>::cast(array)->get(i), isolate);
     }
     if (!value->IsTheHole()) {
-      PropertyDetails details(NONE, DATA, 0);
+      PropertyDetails details = PropertyDetails::Empty();
       dictionary =
           SeededNumberDictionary::AddNumberEntry(dictionary, i, value, details);
     }
@@ -5352,12 +5315,13 @@ void JSObject::DeleteNormalizedProperty(Handle<JSObject> object,
   int entry = dictionary->FindEntry(name);
   DCHECK_NE(NameDictionary::kNotFound, entry);
 
-  // If we have a global object set the cell to the hole.
+  // If we have a global object, invalidate the cell and swap in a new one.
   if (object->IsGlobalObject()) {
-    DCHECK(dictionary->DetailsAt(entry).IsConfigurable());
-    Handle<PropertyCell> cell(PropertyCell::cast(dictionary->ValueAt(entry)));
-    Handle<Object> value = isolate->factory()->the_hole_value();
-    PropertyCell::SetValueInferType(cell, value);
+    auto cell = PropertyCell::InvalidateEntry(dictionary, entry);
+    cell->set_value(isolate->heap()->the_hole_value());
+    // TODO(dcarney): InvalidateForDelete
+    dictionary->DetailsAtPut(entry, dictionary->DetailsAt(entry).set_cell_type(
+                                        PropertyCellType::kDeleted));
     return;
   }
 
@@ -5602,7 +5566,7 @@ bool JSObject::ReferencesObject(Object* obj) {
     if (context->has_extension() && !context->IsCatchContext()) {
       // With harmony scoping, a JSFunction may have a global context.
       // TODO(mvstanton): walk into the ScopeInfo.
-      if (FLAG_harmony_scoping && context->IsScriptContext()) {
+      if (context->IsScriptContext()) {
         return false;
       }
 
@@ -6430,7 +6394,8 @@ static bool UpdateGetterSetterInDictionary(
       DCHECK(details.IsConfigurable());
       if (details.attributes() != attributes) {
         dictionary->DetailsAtPut(
-            entry, PropertyDetails(attributes, ACCESSOR_CONSTANT, index));
+            entry, PropertyDetails(attributes, ACCESSOR_CONSTANT, index,
+                                   PropertyCellType::kInvalid));
       }
       AccessorPair::cast(result)->SetComponents(getter, setter);
       return true;
@@ -6532,7 +6497,8 @@ void JSObject::SetElementCallback(Handle<JSObject> object,
                                   Handle<Object> structure,
                                   PropertyAttributes attributes) {
   Heap* heap = object->GetHeap();
-  PropertyDetails details = PropertyDetails(attributes, ACCESSOR_CONSTANT, 0);
+  PropertyDetails details = PropertyDetails(attributes, ACCESSOR_CONSTANT, 0,
+                                            PropertyCellType::kInvalid);
 
   // Normalize elements to make this operation simple.
   bool had_dictionary_elements = object->HasDictionaryElements();
@@ -6577,28 +6543,10 @@ void JSObject::SetPropertyCallback(Handle<JSObject> object,
   // Normalize object to make this operation simple.
   NormalizeProperties(object, mode, 0, "SetPropertyCallback");
 
-  // For the global object allocate a new map to invalidate the global inline
-  // caches which have a global property cell reference directly in the code.
-  if (object->IsGlobalObject()) {
-    Handle<Map> new_map = Map::CopyDropDescriptors(handle(object->map()));
-    DCHECK(new_map->is_dictionary_map());
-#if TRACE_MAPS
-    if (FLAG_trace_maps) {
-      PrintF("[TraceMaps: GlobalPropertyCallback from= %p to= %p ]\n",
-             reinterpret_cast<void*>(object->map()),
-             reinterpret_cast<void*>(*new_map));
-    }
-#endif
-    JSObject::MigrateToMap(object, new_map);
-
-    // When running crankshaft, changing the map is not enough. We
-    // need to deoptimize all functions that rely on this global
-    // object.
-    Deoptimizer::DeoptimizeGlobalObject(*object);
-  }
 
   // Update the dictionary with the new ACCESSOR_CONSTANT property.
-  PropertyDetails details = PropertyDetails(attributes, ACCESSOR_CONSTANT, 0);
+  PropertyDetails details = PropertyDetails(attributes, ACCESSOR_CONSTANT, 0,
+                                            PropertyCellType::kMutable);
   SetNormalizedProperty(object, name, structure, details);
 
   ReoptimizeIfPrototype(object);
@@ -6894,9 +6842,11 @@ Object* JSObject::SlowReverseLookup(Object* value) {
 
 
 Handle<Map> Map::RawCopy(Handle<Map> map, int instance_size) {
-  Handle<Map> result = map->GetIsolate()->factory()->NewMap(
-      map->instance_type(), instance_size);
-  result->SetPrototype(handle(map->prototype(), map->GetIsolate()));
+  Isolate* isolate = map->GetIsolate();
+  Handle<Map> result =
+      isolate->factory()->NewMap(map->instance_type(), instance_size);
+  Handle<Object> prototype(map->prototype(), isolate);
+  Map::SetPrototype(result, prototype);
   result->set_constructor_or_backpointer(map->GetConstructor());
   result->set_bit_field(map->bit_field());
   result->set_bit_field2(map->bit_field2());
@@ -7091,7 +7041,7 @@ void Map::ConnectTransition(Handle<Map> parent, Handle<Map> child,
     TransitionArray::Insert(parent, name, child, flag);
     if (child->prototype()->IsJSObject()) {
       Handle<JSObject> proto(JSObject::cast(child->prototype()));
-      if (!child->ShouldRegisterAsPrototypeUser(proto)) {
+      if (!ShouldRegisterAsPrototypeUser(child, proto)) {
         JSObject::UnregisterPrototypeUser(proto, child);
       }
     }
@@ -8353,9 +8303,14 @@ Handle<WeakFixedArray> WeakFixedArray::Allocate(
 }
 
 
-Handle<ArrayList> ArrayList::Add(Handle<ArrayList> array, Handle<Object> obj) {
+Handle<ArrayList> ArrayList::Add(Handle<ArrayList> array, Handle<Object> obj,
+                                 AddMode mode) {
   int length = array->Length();
   array = EnsureSpace(array, length + 1);
+  if (mode == kReloadLengthAfterAllocation) {
+    DCHECK(array->Length() <= length);
+    length = array->Length();
+  }
   array->Set(length, *obj);
   array->SetLength(length + 1);
   return array;
@@ -8363,9 +8318,12 @@ Handle<ArrayList> ArrayList::Add(Handle<ArrayList> array, Handle<Object> obj) {
 
 
 Handle<ArrayList> ArrayList::Add(Handle<ArrayList> array, Handle<Object> obj1,
-                                 Handle<Object> obj2) {
+                                 Handle<Object> obj2, AddMode mode) {
   int length = array->Length();
   array = EnsureSpace(array, length + 2);
+  if (mode == kReloadLengthAfterAllocation) {
+    length = array->Length();
+  }
   array->Set(length, *obj1);
   array->Set(length + 1, *obj2);
   array->SetLength(length + 2);
@@ -8375,10 +8333,12 @@ Handle<ArrayList> ArrayList::Add(Handle<ArrayList> array, Handle<Object> obj1,
 
 Handle<ArrayList> ArrayList::EnsureSpace(Handle<ArrayList> array, int length) {
   int capacity = array->length();
+  bool empty = (capacity == 0);
   if (capacity < kFirstIndex + length) {
     capacity = kFirstIndex + length;
     capacity = capacity + Max(capacity / 2, 2);
     array = Handle<ArrayList>::cast(FixedArray::CopySize(array, capacity));
+    if (empty) array->SetLength(0);
   }
   return array;
 }
@@ -8531,6 +8491,36 @@ Handle<DeoptimizationOutputData> DeoptimizationOutputData::New(
         LengthOfFixedArray(number_of_deopt_points), pretenure);
   }
   return Handle<DeoptimizationOutputData>::cast(result);
+}
+
+
+int HandlerTable::LookupRange(int pc_offset, int* stack_depth_out) {
+  int innermost_handler = -1, innermost_start = -1;
+  for (int i = 0; i < length(); i += kRangeEntrySize) {
+    int start_offset = Smi::cast(get(i + kRangeStartIndex))->value();
+    int end_offset = Smi::cast(get(i + kRangeEndIndex))->value();
+    int handler_offset = Smi::cast(get(i + kRangeHandlerIndex))->value();
+    int stack_depth = Smi::cast(get(i + kRangeDepthIndex))->value();
+    if (pc_offset > start_offset && pc_offset <= end_offset) {
+      DCHECK_NE(start_offset, innermost_start);
+      if (start_offset < innermost_start) continue;
+      innermost_handler = handler_offset;
+      innermost_start = start_offset;
+      *stack_depth_out = stack_depth;
+    }
+  }
+  return innermost_handler;
+}
+
+
+// TODO(turbofan): Make sure table is sorted and use binary search.
+int HandlerTable::LookupReturn(int pc_offset) {
+  for (int i = 0; i < length(); i += kReturnEntrySize) {
+    int return_offset = Smi::cast(get(i + kReturnOffsetIndex))->value();
+    int handler_offset = Smi::cast(get(i + kReturnHandlerIndex))->value();
+    if (pc_offset == return_offset) return handler_offset;
+  }
+  return -1;
 }
 
 
@@ -9702,7 +9692,6 @@ void JSFunction::JSFunctionIterateBody(int object_size, ObjectVisitor* v) {
 
 void JSFunction::MarkForOptimization() {
   Isolate* isolate = GetIsolate();
-  DCHECK(isolate->use_crankshaft());
   DCHECK(!IsOptimized());
   DCHECK(shared()->allows_lazy_compilation() || code()->optimizable());
   set_code_no_write_barrier(
@@ -9726,9 +9715,7 @@ void JSFunction::AttemptConcurrentOptimization() {
     // recompilation race.  This goes away as soon as OSR becomes one-shot.
     return;
   }
-  DCHECK(isolate->use_crankshaft());
   DCHECK(!IsInOptimizationQueue());
-  DCHECK(is_compiled() || isolate->debug()->has_break_points());
   DCHECK(!IsOptimized());
   DCHECK(shared()->allows_lazy_compilation() || code()->optimizable());
   DCHECK(isolate->concurrent_recompilation_enabled());
@@ -9966,6 +9953,7 @@ static bool PrototypeBenefitsFromNormalization(Handle<JSObject> object) {
 }
 
 
+// static
 void JSObject::OptimizeAsPrototype(Handle<JSObject> object,
                                    PrototypeOptimizationMode mode) {
   if (object->IsGlobalObject()) return;
@@ -9975,14 +9963,12 @@ void JSObject::OptimizeAsPrototype(Handle<JSObject> object,
     JSObject::NormalizeProperties(object, KEEP_INOBJECT_PROPERTIES, 0,
                                   "NormalizeAsPrototype");
   }
-  bool has_just_copied_map = false;
+  Handle<Map> previous_map(object->map());
   if (!object->HasFastProperties()) {
     JSObject::MigrateSlowToFast(object, 0, "OptimizeAsPrototype");
-    has_just_copied_map = true;
   }
-  if (mode == FAST_PROTOTYPE && object->HasFastProperties() &&
-      !object->map()->is_prototype_map()) {
-    if (!has_just_copied_map) {
+  if (!object->map()->is_prototype_map()) {
+    if (object->map() == *previous_map) {
       Handle<Map> new_map = Map::Copy(handle(object->map()), "CopyAsPrototype");
       JSObject::MigrateToMap(object, new_map);
     }
@@ -10005,76 +9991,85 @@ void JSObject::OptimizeAsPrototype(Handle<JSObject> object,
 }
 
 
+// static
 void JSObject::ReoptimizeIfPrototype(Handle<JSObject> object) {
   if (!object->map()->is_prototype_map()) return;
   OptimizeAsPrototype(object, FAST_PROTOTYPE);
 }
 
 
+// static
 void JSObject::RegisterPrototypeUser(Handle<JSObject> prototype,
                                      Handle<HeapObject> user) {
   DCHECK(FLAG_track_prototype_users);
   Isolate* isolate = prototype->GetIsolate();
-  Handle<Name> symbol = isolate->factory()->prototype_users_symbol();
-
-  // Get prototype users array, create it if it doesn't exist yet.
-  Handle<Object> maybe_array =
-      JSObject::GetProperty(prototype, symbol).ToHandleChecked();
-
-  Handle<WeakFixedArray> new_array = WeakFixedArray::Add(maybe_array, user);
-  if (!maybe_array.is_identical_to(new_array)) {
-    JSObject::SetOwnPropertyIgnoreAttributes(prototype, symbol, new_array,
-                                             DONT_ENUM).Assert();
+  if (prototype->IsJSGlobalProxy()) {
+    PrototypeIterator iter(isolate, prototype);
+    prototype = Handle<JSObject>::cast(PrototypeIterator::GetCurrent(iter));
+  }
+  Handle<PrototypeInfo> proto_info;
+  Object* maybe_proto_info = prototype->map()->prototype_info();
+  if (maybe_proto_info->IsPrototypeInfo()) {
+    proto_info = handle(PrototypeInfo::cast(maybe_proto_info), isolate);
+  } else {
+    proto_info = isolate->factory()->NewPrototypeInfo();
+    prototype->map()->set_prototype_info(*proto_info);
+  }
+  Handle<Object> maybe_registry(proto_info->prototype_users(), isolate);
+  Handle<WeakFixedArray> new_array = WeakFixedArray::Add(maybe_registry, user);
+  if (!maybe_registry.is_identical_to(new_array)) {
+    proto_info->set_prototype_users(*new_array);
   }
 }
 
 
+// static
 void JSObject::UnregisterPrototypeUser(Handle<JSObject> prototype,
                                        Handle<HeapObject> user) {
   Isolate* isolate = prototype->GetIsolate();
-  Handle<Name> symbol = isolate->factory()->prototype_users_symbol();
-
-  Handle<Object> maybe_array =
-      JSObject::GetProperty(prototype, symbol).ToHandleChecked();
-  if (!maybe_array->IsWeakFixedArray()) return;
-  Handle<WeakFixedArray>::cast(maybe_array)->Remove(user);
+  if (prototype->IsJSGlobalProxy()) {
+    PrototypeIterator iter(isolate, prototype);
+    prototype = Handle<JSObject>::cast(PrototypeIterator::GetCurrent(iter));
+  }
+  DCHECK(prototype->map()->is_prototype_map());
+  Object* maybe_proto_info = prototype->map()->prototype_info();
+  if (!maybe_proto_info->IsPrototypeInfo()) return;
+  Handle<PrototypeInfo> proto_info(PrototypeInfo::cast(maybe_proto_info),
+                                   isolate);
+  Object* maybe_registry = proto_info->prototype_users();
+  if (!maybe_registry->IsWeakFixedArray()) return;
+  WeakFixedArray::cast(maybe_registry)->Remove(user);
 }
 
 
-void Map::SetPrototype(Handle<Object> prototype,
+// static
+void Map::SetPrototype(Handle<Map> map, Handle<Object> prototype,
                        PrototypeOptimizationMode proto_mode) {
-  if (this->prototype()->IsJSObject() && FLAG_track_prototype_users) {
-    Handle<JSObject> old_prototype(JSObject::cast(this->prototype()));
-    JSObject::UnregisterPrototypeUser(old_prototype, handle(this));
+  if (map->prototype()->IsJSObject() && FLAG_track_prototype_users) {
+    Handle<JSObject> old_prototype(JSObject::cast(map->prototype()));
+    JSObject::UnregisterPrototypeUser(old_prototype, map);
   }
   if (prototype->IsJSObject()) {
     Handle<JSObject> prototype_jsobj = Handle<JSObject>::cast(prototype);
-    if (ShouldRegisterAsPrototypeUser(prototype_jsobj)) {
-      JSObject::RegisterPrototypeUser(prototype_jsobj, handle(this));
+    if (ShouldRegisterAsPrototypeUser(map, prototype_jsobj)) {
+      JSObject::RegisterPrototypeUser(prototype_jsobj, map);
     }
     JSObject::OptimizeAsPrototype(prototype_jsobj, proto_mode);
   }
   WriteBarrierMode wb_mode =
       prototype->IsNull() ? SKIP_WRITE_BARRIER : UPDATE_WRITE_BARRIER;
-  set_prototype(*prototype, wb_mode);
+  map->set_prototype(*prototype, wb_mode);
 }
 
 
-bool Map::ShouldRegisterAsPrototypeUser(Handle<JSObject> prototype) {
+// static
+bool Map::ShouldRegisterAsPrototypeUser(Handle<Map> map,
+                                        Handle<JSObject> prototype) {
   if (!FLAG_track_prototype_users) return false;
-  if (this->is_prototype_map()) return true;
-  if (this->is_dictionary_map()) return false;
-  Object* back = GetBackPointer();
+  if (map->is_prototype_map()) return true;
+  Object* back = map->GetBackPointer();
   if (!back->IsMap()) return true;
   if (Map::cast(back)->prototype() != *prototype) return true;
-  return false;
-}
-
-
-bool Map::CanUseOptimizationsBasedOnPrototypeRegistry() {
-  if (!FLAG_track_prototype_users) return false;
-  if (this->is_prototype_map()) return true;
-  if (GetBackPointer()->IsMap()) return true;
   return false;
 }
 
@@ -10225,7 +10220,7 @@ bool JSFunction::RemovePrototype() {
 void JSFunction::SetInitialMap(Handle<JSFunction> function, Handle<Map> map,
                                Handle<Object> prototype) {
   if (map->prototype() != *prototype) {
-    map->SetPrototype(prototype, FAST_PROTOTYPE);
+    Map::SetPrototype(map, prototype, FAST_PROTOTYPE);
   }
   function->set_prototype_or_initial_map(*map);
   map->SetConstructor(*function);
@@ -10327,6 +10322,15 @@ bool JSFunction::PassesFilter(const char* raw_filter) {
 }
 
 
+Handle<String> JSFunction::GetDebugName(Handle<JSFunction> function) {
+  Isolate* isolate = function->GetIsolate();
+  Handle<Object> name =
+      JSObject::GetDataProperty(function, isolate->factory()->name_string());
+  if (name->IsString()) return Handle<String>::cast(name);
+  return handle(function->shared()->DebugName(), isolate);
+}
+
+
 void Oddball::Initialize(Isolate* isolate,
                          Handle<Oddball> oddball,
                          const char* to_string,
@@ -10380,31 +10384,27 @@ int Script::GetColumnNumber(Handle<Script> script, int code_pos) {
 }
 
 
-int Script::GetLineNumberWithArray(int position) {
+int Script::GetLineNumberWithArray(int code_pos) {
   DisallowHeapAllocation no_allocation;
-  FixedArray* line_ends = FixedArray::cast(this->line_ends());
-  int upper = line_ends->length() - 1;
-  if (upper < 0) return -1;
-  int offset = line_offset()->value();
+  DCHECK(line_ends()->IsFixedArray());
+  FixedArray* line_ends_array = FixedArray::cast(line_ends());
+  int line_ends_len = line_ends_array->length();
+  if (line_ends_len == 0) return -1;
 
-  if (position > Smi::cast(line_ends->get(upper))->value()) {
-    return upper + 1 + offset;
+  if ((Smi::cast(line_ends_array->get(0)))->value() >= code_pos) {
+    return line_offset()->value();
   }
-  if (position <= Smi::cast(line_ends->get(0))->value()) return offset;
 
-  int lower = 1;
-  // Binary search.
-  while (true) {
-    int mid = (lower + upper) / 2;
-    if (position <= Smi::cast(line_ends->get(mid - 1))->value()) {
-      upper = mid - 1;
-    } else if (position > Smi::cast(line_ends->get(mid))->value()) {
-      lower = mid + 1;
+  int left = 0;
+  int right = line_ends_len;
+  while (int half = (right - left) / 2) {
+    if ((Smi::cast(line_ends_array->get(left + half)))->value() > code_pos) {
+      right -= half;
     } else {
-      return mid + offset;
+      left += half;
     }
   }
-  return -1;
+  return right + line_offset()->value();
 }
 
 
@@ -10455,6 +10455,7 @@ Handle<Object> Script::GetNameOrSourceURL(Handle<Script> script) {
 Handle<JSObject> Script::GetWrapper(Handle<Script> script) {
   Isolate* isolate = script->GetIsolate();
   if (!script->wrapper()->IsUndefined()) {
+    DCHECK(script->wrapper()->IsWeakCell());
     Handle<WeakCell> cell(WeakCell::cast(script->wrapper()));
     if (!cell->cleared()) {
       // Return a handle for the existing script wrapper from the cache.
@@ -11140,7 +11141,7 @@ void SharedFunctionInfo::ClearTypeFeedbackInfo() {
 
 
 void SharedFunctionInfo::ClearTypeFeedbackInfoAtGCTime() {
-  feedback_vector()->ClearSlots(this);
+  feedback_vector()->ClearSlotsAtGCTime(this);
   feedback_vector()->ClearICSlotsAtGCTime(this);
 }
 
@@ -11552,6 +11553,30 @@ void DeoptimizationOutputData::DeoptimizationOutputDataPrint(
 }
 
 
+void HandlerTable::HandlerTableRangePrint(std::ostream& os) {
+  os << "   from   to       hdlr\n";
+  for (int i = 0; i < length(); i += kRangeEntrySize) {
+    int pc_start = Smi::cast(get(i + kRangeStartIndex))->value();
+    int pc_end = Smi::cast(get(i + kRangeEndIndex))->value();
+    int handler = Smi::cast(get(i + kRangeHandlerIndex))->value();
+    int depth = Smi::cast(get(i + kRangeDepthIndex))->value();
+    os << "  (" << std::setw(4) << pc_start << "," << std::setw(4) << pc_end
+       << ")  ->  " << std::setw(4) << handler << " (depth=" << depth << ")\n";
+  }
+}
+
+
+void HandlerTable::HandlerTableReturnPrint(std::ostream& os) {
+  os << "   off      hdlr\n";
+  for (int i = 0; i < length(); i += kReturnEntrySize) {
+    int pc_offset = Smi::cast(get(i + kReturnOffsetIndex))->value();
+    int handler = Smi::cast(get(i + kReturnHandlerIndex))->value();
+    os << "  " << std::setw(4) << pc_offset << "  ->  " << std::setw(4)
+       << handler << "\n";
+  }
+}
+
+
 const char* Code::ICState2String(InlineCacheState state) {
   switch (state) {
     case UNINITIALIZED: return "UNINITIALIZED";
@@ -11698,13 +11723,12 @@ void Code::Disassemble(const char* name, std::ostream& os) {  // NOLINT
 #endif
   }
 
-  if (handler_table()->length() > 0 && is_turbofanned()) {
+  if (handler_table()->length() > 0) {
     os << "Handler Table (size = " << handler_table()->Size() << ")\n";
-    for (int i = 0; i < handler_table()->length(); i += 2) {
-      int pc_offset = Smi::cast(handler_table()->get(i))->value();
-      int handler = Smi::cast(handler_table()->get(i + 1))->value();
-      os << static_cast<const void*>(instruction_start() + pc_offset) << "  "
-         << std::setw(4) << pc_offset << " " << std::setw(4) << handler << "\n";
+    if (kind() == FUNCTION) {
+      HandlerTable::cast(handler_table())->HandlerTableRangePrint(os);
+    } else if (kind() == OPTIMIZED_FUNCTION) {
+      HandlerTable::cast(handler_table())->HandlerTableReturnPrint(os);
     }
     os << "\n";
   }
@@ -12327,7 +12351,7 @@ Handle<Map> Map::TransitionToPrototype(Handle<Map> map,
   if (new_map.is_null()) {
     new_map = Copy(map, "TransitionToPrototype");
     TransitionArray::PutPrototypeTransition(map, prototype, new_map);
-    new_map->SetPrototype(prototype, mode);
+    Map::SetPrototype(new_map, prototype, mode);
   }
   return new_map;
 }
@@ -12782,7 +12806,8 @@ MaybeHandle<Object> JSObject::SetDictionaryElement(
              element->IsTheHole());
       dictionary->UpdateMaxNumberKey(index);
       if (set_mode == DEFINE_PROPERTY) {
-        details = PropertyDetails(attributes, DATA, details.dictionary_index());
+        details = PropertyDetails(attributes, DATA, details.dictionary_index(),
+                                  PropertyCellType::kInvalid);
         dictionary->DetailsAtPut(entry, details);
       }
 
@@ -12825,7 +12850,7 @@ MaybeHandle<Object> JSObject::SetDictionaryElement(
       }
     }
 
-    PropertyDetails details(attributes, DATA, 0);
+    PropertyDetails details(attributes, DATA, 0, PropertyCellType::kInvalid);
     Handle<SeededNumberDictionary> new_dictionary =
         SeededNumberDictionary::AddNumberEntry(dictionary, index, value,
                                                details);
@@ -14910,7 +14935,7 @@ Handle<Object> JSObject::PrepareSlowElementsForSort(
   }
 
   uint32_t result = pos;
-  PropertyDetails no_details(NONE, DATA, 0);
+  PropertyDetails no_details = PropertyDetails::Empty();
   while (undefs > 0) {
     if (pos > static_cast<uint32_t>(Smi::kMaxValue)) {
       // Adding an entry with the key beyond smi-range requires
@@ -15271,46 +15296,37 @@ Handle<Object> ExternalFloat64Array::SetValue(
 void GlobalObject::InvalidatePropertyCell(Handle<GlobalObject> global,
                                           Handle<Name> name) {
   DCHECK(!global->HasFastProperties());
-  Isolate* isolate = global->GetIsolate();
-  int entry = global->property_dictionary()->FindEntry(name);
-  if (entry != NameDictionary::kNotFound) {
-    Handle<PropertyCell> cell(
-        PropertyCell::cast(global->property_dictionary()->ValueAt(entry)));
-
-    Handle<Object> value(cell->value(), isolate);
-    Handle<PropertyCell> new_cell = isolate->factory()->NewPropertyCell(value);
-    global->property_dictionary()->ValueAtPut(entry, *new_cell);
-
-    Handle<Object> hole = isolate->factory()->the_hole_value();
-    if (*hole != *value) {
-      PropertyCell::SetValueInferType(cell, hole);
-    } else {
-      // If property value was the hole, set it to any other value,
-      // to ensure that LoadNonexistent ICs execute a miss.
-      Handle<Object> undefined = isolate->factory()->undefined_value();
-      PropertyCell::SetValueInferType(cell, undefined);
-    }
-  }
+  auto dictionary = handle(global->property_dictionary());
+  int entry = dictionary->FindEntry(name);
+  if (entry == NameDictionary::kNotFound) return;
+  PropertyCell::InvalidateEntry(dictionary, entry);
 }
 
 
+// TODO(dcarney): rename to EnsureEmptyPropertyCell or something.
 Handle<PropertyCell> GlobalObject::EnsurePropertyCell(
     Handle<GlobalObject> global, Handle<Name> name) {
   DCHECK(!global->HasFastProperties());
-  int entry = global->property_dictionary()->FindEntry(name);
-  if (entry == NameDictionary::kNotFound) {
-    Isolate* isolate = global->GetIsolate();
-    Handle<PropertyCell> cell = isolate->factory()->NewPropertyCellWithHole();
-    PropertyDetails details(NONE, DATA, 0);
-    Handle<NameDictionary> dictionary = NameDictionary::Add(
-        handle(global->property_dictionary()), name, cell, details);
-    global->set_properties(*dictionary);
+  auto dictionary = handle(global->property_dictionary());
+  int entry = dictionary->FindEntry(name);
+  Handle<PropertyCell> cell;
+  if (entry != NameDictionary::kNotFound) {
+    // This call should be idempotent.
+    DCHECK(dictionary->DetailsAt(entry).cell_type() ==
+               PropertyCellType::kUninitialized ||
+           dictionary->DetailsAt(entry).cell_type() ==
+               PropertyCellType::kDeleted);
+    DCHECK(dictionary->ValueAt(entry)->IsPropertyCell());
+    cell = handle(PropertyCell::cast(dictionary->ValueAt(entry)));
+    DCHECK(cell->value()->IsTheHole());
     return cell;
-  } else {
-    Object* value = global->property_dictionary()->ValueAt(entry);
-    DCHECK(value->IsPropertyCell());
-    return handle(PropertyCell::cast(value));
   }
+  Isolate* isolate = global->GetIsolate();
+  cell = isolate->factory()->NewPropertyCell();
+  PropertyDetails details(NONE, DATA, 0, PropertyCellType::kUninitialized);
+  dictionary = NameDictionary::Add(dictionary, name, cell, details);
+  global->set_properties(*dictionary);
+  return cell;
 }
 
 
@@ -15720,8 +15736,7 @@ Dictionary<Derived, Shape, Key>::GenerateNewEnumerationIndices(
     int enum_index = PropertyDetails::kInitialIndex + i;
 
     PropertyDetails details = dictionary->DetailsAt(index);
-    PropertyDetails new_details =
-        PropertyDetails(details.attributes(), details.type(), enum_index);
+    PropertyDetails new_details = details.set_index(enum_index);
     dictionary->DetailsAtPut(index, new_details);
   }
 
@@ -15774,7 +15789,7 @@ Handle<Derived> Dictionary<Derived, Shape, Key>::AtPut(
 #ifdef DEBUG
   USE(Shape::AsHandle(dictionary->GetIsolate(), key));
 #endif
-  PropertyDetails details(NONE, DATA, 0);
+  PropertyDetails details = PropertyDetails::Empty();
 
   AddEntry(dictionary, key, value, details, dictionary->Hash(key));
   return dictionary;
@@ -15814,7 +15829,7 @@ void Dictionary<Derived, Shape, Key>::AddEntry(
     // Assign an enumeration index to the property and update
     // SetNextEnumerationIndex.
     int index = dictionary->NextEnumerationIndex();
-    details = PropertyDetails(details.attributes(), details.type(), index);
+    details = details.set_index(index);
     dictionary->SetNextEnumerationIndex(index + 1);
   }
   dictionary->SetEntry(entry, k, value, details);
@@ -15860,7 +15875,7 @@ Handle<UnseededNumberDictionary> UnseededNumberDictionary::AddNumberEntry(
     uint32_t key,
     Handle<Object> value) {
   SLOW_DCHECK(dictionary->FindEntry(key) == kNotFound);
-  return Add(dictionary, key, value, PropertyDetails(NONE, DATA, 0));
+  return Add(dictionary, key, value, PropertyDetails::Empty());
 }
 
 
@@ -15891,9 +15906,7 @@ Handle<SeededNumberDictionary> SeededNumberDictionary::Set(
     return AddNumberEntry(dictionary, key, value, details);
   }
   // Preserve enumeration index.
-  details = PropertyDetails(details.attributes(),
-                            details.type(),
-                            dictionary->DetailsAt(entry).dictionary_index());
+  details = details.set_index(dictionary->DetailsAt(entry).dictionary_index());
   Handle<Object> object_key =
       SeededNumberDictionaryShape::AsHandle(dictionary->GetIsolate(), key);
   dictionary->SetEntry(entry, object_key, value, details);
@@ -15920,6 +15933,7 @@ static inline bool IsDeleted(D d, int i) {
     case DictionaryEntryType::kObjects:
       return false;
     case DictionaryEntryType::kCells:
+      DCHECK(d->ValueAt(i)->IsPropertyCell());
       return PropertyCell::cast(d->ValueAt(i))->value()->IsTheHole();
   }
   UNREACHABLE();
@@ -16261,20 +16275,6 @@ Handle<Derived> OrderedHashTable<Derived, Iterator, entrysize>::Clear(
 
 
 template<class Derived, class Iterator, int entrysize>
-Handle<Derived> OrderedHashTable<Derived, Iterator, entrysize>::Remove(
-    Handle<Derived> table, Handle<Object> key, bool* was_present) {
-  int entry = table->FindEntry(key);
-  if (entry == kNotFound) {
-    *was_present = false;
-    return table;
-  }
-  *was_present = true;
-  table->RemoveEntry(entry);
-  return Shrink(table);
-}
-
-
-template<class Derived, class Iterator, int entrysize>
 Handle<Derived> OrderedHashTable<Derived, Iterator, entrysize>::Rehash(
     Handle<Derived> table, int new_capacity) {
   DCHECK(!table->IsObsolete());
@@ -16319,61 +16319,6 @@ Handle<Derived> OrderedHashTable<Derived, Iterator, entrysize>::Rehash(
 }
 
 
-template <class Derived, class Iterator, int entrysize>
-int OrderedHashTable<Derived, Iterator, entrysize>::FindEntry(
-    Handle<Object> key, int hash) {
-  DCHECK(!IsObsolete());
-
-  DisallowHeapAllocation no_gc;
-  DCHECK(!key->IsTheHole());
-  for (int entry = HashToEntry(hash); entry != kNotFound;
-       entry = ChainAt(entry)) {
-    Object* candidate = KeyAt(entry);
-    if (candidate->SameValueZero(*key))
-      return entry;
-  }
-  return kNotFound;
-}
-
-
-template <class Derived, class Iterator, int entrysize>
-int OrderedHashTable<Derived, Iterator, entrysize>::FindEntry(
-    Handle<Object> key) {
-  DisallowHeapAllocation no_gc;
-  Object* hash = key->GetHash();
-  if (!hash->IsSmi()) return kNotFound;
-  return FindEntry(key, Smi::cast(hash)->value());
-}
-
-
-template <class Derived, class Iterator, int entrysize>
-int OrderedHashTable<Derived, Iterator, entrysize>::AddEntry(int hash) {
-  DCHECK(!IsObsolete());
-
-  int entry = UsedCapacity();
-  int bucket = HashToBucket(hash);
-  int index = EntryToIndex(entry);
-  Object* chain_entry = get(kHashTableStartIndex + bucket);
-  set(kHashTableStartIndex + bucket, Smi::FromInt(entry));
-  set(index + kChainOffset, chain_entry);
-  SetNumberOfElements(NumberOfElements() + 1);
-  return index;
-}
-
-
-template<class Derived, class Iterator, int entrysize>
-void OrderedHashTable<Derived, Iterator, entrysize>::RemoveEntry(int entry) {
-  DCHECK(!IsObsolete());
-
-  int index = EntryToIndex(entry);
-  for (int i = 0; i < entrysize; ++i) {
-    set_the_hole(index + i);
-  }
-  SetNumberOfElements(NumberOfElements() - 1);
-  SetNumberOfDeletedElements(NumberOfDeletedElements() + 1);
-}
-
-
 template Handle<OrderedHashSet>
 OrderedHashTable<OrderedHashSet, JSSetIterator, 1>::Allocate(
     Isolate* isolate, int capacity, PretenureFlag pretenure);
@@ -16389,21 +16334,6 @@ OrderedHashTable<OrderedHashSet, JSSetIterator, 1>::Shrink(
 template Handle<OrderedHashSet>
 OrderedHashTable<OrderedHashSet, JSSetIterator, 1>::Clear(
     Handle<OrderedHashSet> table);
-
-template Handle<OrderedHashSet>
-OrderedHashTable<OrderedHashSet, JSSetIterator, 1>::Remove(
-    Handle<OrderedHashSet> table, Handle<Object> key, bool* was_present);
-
-template int OrderedHashTable<OrderedHashSet, JSSetIterator, 1>::FindEntry(
-    Handle<Object> key, int hash);
-template int OrderedHashTable<OrderedHashSet, JSSetIterator, 1>::FindEntry(
-    Handle<Object> key);
-
-template int
-OrderedHashTable<OrderedHashSet, JSSetIterator, 1>::AddEntry(int hash);
-
-template void
-OrderedHashTable<OrderedHashSet, JSSetIterator, 1>::RemoveEntry(int entry);
 
 
 template Handle<OrderedHashMap>
@@ -16421,69 +16351,6 @@ OrderedHashTable<OrderedHashMap, JSMapIterator, 2>::Shrink(
 template Handle<OrderedHashMap>
 OrderedHashTable<OrderedHashMap, JSMapIterator, 2>::Clear(
     Handle<OrderedHashMap> table);
-
-template Handle<OrderedHashMap>
-OrderedHashTable<OrderedHashMap, JSMapIterator, 2>::Remove(
-    Handle<OrderedHashMap> table, Handle<Object> key, bool* was_present);
-
-template int OrderedHashTable<OrderedHashMap, JSMapIterator, 2>::FindEntry(
-    Handle<Object> key, int hash);
-template int OrderedHashTable<OrderedHashMap, JSMapIterator, 2>::FindEntry(
-    Handle<Object> key);
-
-template int
-OrderedHashTable<OrderedHashMap, JSMapIterator, 2>::AddEntry(int hash);
-
-template void
-OrderedHashTable<OrderedHashMap, JSMapIterator, 2>::RemoveEntry(int entry);
-
-
-bool OrderedHashSet::Contains(Handle<Object> key) {
-  return FindEntry(key) != kNotFound;
-}
-
-
-Handle<OrderedHashSet> OrderedHashSet::Add(Handle<OrderedHashSet> table,
-                                           Handle<Object> key) {
-  int hash = GetOrCreateHash(table->GetIsolate(), key)->value();
-  if (table->FindEntry(key, hash) != kNotFound) return table;
-
-  table = EnsureGrowable(table);
-
-  int index = table->AddEntry(hash);
-  table->set(index, *key);
-  return table;
-}
-
-
-Object* OrderedHashMap::Lookup(Handle<Object> key) {
-  DisallowHeapAllocation no_gc;
-  int entry = FindEntry(key);
-  if (entry == kNotFound) return GetHeap()->the_hole_value();
-  return ValueAt(entry);
-}
-
-
-Handle<OrderedHashMap> OrderedHashMap::Put(Handle<OrderedHashMap> table,
-                                           Handle<Object> key,
-                                           Handle<Object> value) {
-  DCHECK(!key->IsTheHole());
-
-  int hash = GetOrCreateHash(table->GetIsolate(), key)->value();
-  int entry = table->FindEntry(key, hash);
-
-  if (entry != kNotFound) {
-    table->set(table->EntryToIndex(entry) + kValueOffset, *value);
-    return table;
-  }
-
-  table = EnsureGrowable(table);
-
-  int index = table->AddEntry(hash);
-  table->set(index, *key);
-  table->set(index + kValueOffset, *value);
-  return table;
-}
 
 
 template<class Derived, class TableType>
@@ -17071,54 +16938,109 @@ Handle<JSArrayBuffer> JSTypedArray::GetBuffer() {
 }
 
 
-HeapType* PropertyCell::type() {
-  return static_cast<HeapType*>(type_raw());
-}
-
-
-void PropertyCell::set_type(HeapType* type, WriteBarrierMode ignored) {
-  DCHECK(IsPropertyCell());
-  set_type_raw(type, ignored);
-}
-
-
-Handle<HeapType> PropertyCell::UpdatedType(Handle<PropertyCell> cell,
-                                           Handle<Object> value) {
-  Isolate* isolate = cell->GetIsolate();
-  Handle<HeapType> old_type(cell->type(), isolate);
-  Handle<HeapType> new_type = HeapType::Constant(value, isolate);
-
-  if (new_type->Is(old_type)) return old_type;
-
+Handle<PropertyCell> PropertyCell::InvalidateEntry(
+    Handle<NameDictionary> dictionary, int entry) {
+  Isolate* isolate = dictionary->GetIsolate();
+  // Swap with a copy.
+  DCHECK(dictionary->ValueAt(entry)->IsPropertyCell());
+  Handle<PropertyCell> cell(PropertyCell::cast(dictionary->ValueAt(entry)));
+  auto new_cell = isolate->factory()->NewPropertyCell();
+  new_cell->set_value(cell->value());
+  dictionary->ValueAtPut(entry, *new_cell);
+  bool is_the_hole = cell->value()->IsTheHole();
+  // Cell is officially mutable henceforth.
+  auto details = dictionary->DetailsAt(entry);
+  details = details.set_cell_type(is_the_hole ? PropertyCellType::kDeleted
+                                              : PropertyCellType::kMutable);
+  dictionary->DetailsAtPut(entry, details);
+  // Old cell is ready for invalidation.
+  if (is_the_hole) {
+    cell->set_value(isolate->heap()->undefined_value());
+  } else {
+    cell->set_value(isolate->heap()->the_hole_value());
+  }
   cell->dependent_code()->DeoptimizeDependentCodeGroup(
       isolate, DependentCode::kPropertyCellChangedGroup);
-
-  if (old_type->Is(HeapType::None()) || old_type->Is(HeapType::Undefined())) {
-    return new_type;
-  }
-
-  return HeapType::Any(isolate);
+  return new_cell;
 }
 
 
-Handle<Object> PropertyCell::SetValueInferType(Handle<PropertyCell> cell,
-                                               Handle<Object> value) {
+PropertyCellType PropertyCell::UpdatedType(Handle<PropertyCell> cell,
+                                           Handle<Object> value,
+                                           PropertyDetails details) {
+  PropertyCellType type = details.cell_type();
+  DCHECK(!value->IsTheHole());
+  DCHECK_IMPLIES(cell->value()->IsTheHole(),
+                 type == PropertyCellType::kUninitialized ||
+                     type == PropertyCellType::kDeleted);
+  switch (type) {
+    // Only allow a cell to transition once into constant state.
+    case PropertyCellType::kUninitialized:
+      if (value->IsUndefined()) return PropertyCellType::kUndefined;
+      return PropertyCellType::kConstant;
+    case PropertyCellType::kUndefined:
+      return PropertyCellType::kConstant;
+    case PropertyCellType::kConstant:
+      // No transition.
+      if (*value == cell->value()) return PropertyCellType::kConstant;
+    // Fall through.
+    case PropertyCellType::kMutable:
+      return PropertyCellType::kMutable;
+  }
+  UNREACHABLE();
+  return PropertyCellType::kMutable;
+}
+
+
+Handle<Object> PropertyCell::UpdateCell(Handle<NameDictionary> dictionary,
+                                        int entry, Handle<Object> value,
+                                        PropertyDetails details) {
+  DCHECK(!value->IsTheHole());
+  DCHECK(dictionary->ValueAt(entry)->IsPropertyCell());
+  Handle<PropertyCell> cell(PropertyCell::cast(dictionary->ValueAt(entry)));
+  const PropertyDetails original_details = dictionary->DetailsAt(entry);
+  // Data accesses could be cached in ics or optimized code.
+  bool invalidate =
+      original_details.kind() == kData && details.kind() == kAccessor;
+  int index = original_details.dictionary_index();
+  auto old_type = original_details.cell_type();
+  // Preserve the enumeration index unless the property was deleted or never
+  // initialized.
+  if (cell->value()->IsTheHole()) {
+    index = dictionary->NextEnumerationIndex();
+    dictionary->SetNextEnumerationIndex(index + 1);
+    // Negative lookup cells must be invalidated.
+    invalidate = true;
+  }
+  DCHECK(index > 0);
+  details = details.set_index(index);
+
   // Heuristic: if a small-ish string is stored in a previously uninitialized
   // property cell, internalize it.
   const int kMaxLengthForInternalization = 200;
-  if ((cell->type()->Is(HeapType::None()) ||
-       cell->type()->Is(HeapType::Undefined())) &&
+  if ((old_type == PropertyCellType::kUninitialized ||
+       old_type == PropertyCellType::kUndefined) &&
       value->IsString()) {
     auto string = Handle<String>::cast(value);
-    if (string->length() <= kMaxLengthForInternalization &&
-        !string->map()->is_undetectable()) {
+    if (string->length() <= kMaxLengthForInternalization) {
       value = cell->GetIsolate()->factory()->InternalizeString(string);
     }
   }
+
+  auto new_type = UpdatedType(cell, value, original_details);
+  if (invalidate) cell = PropertyCell::InvalidateEntry(dictionary, entry);
+
+  // Install new property details and cell value.
+  details = details.set_cell_type(new_type);
+  dictionary->DetailsAtPut(entry, details);
   cell->set_value(*value);
-  if (!HeapType::Any()->Is(cell->type())) {
-    Handle<HeapType> new_type = UpdatedType(cell, value);
-    cell->set_type(*new_type);
+
+  // Deopt when transitioning from a constant type.
+  if (!invalidate && old_type == PropertyCellType::kConstant &&
+      new_type != PropertyCellType::kConstant) {
+    auto isolate = dictionary->GetIsolate();
+    cell->dependent_code()->DeoptimizeDependentCodeGroup(
+        isolate, DependentCode::kPropertyCellChangedGroup);
   }
   return value;
 }

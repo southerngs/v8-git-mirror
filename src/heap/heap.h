@@ -37,8 +37,8 @@ namespace internal {
   V(Oddball, null_value, NullValue)                                            \
   V(Oddball, true_value, TrueValue)                                            \
   V(Oddball, false_value, FalseValue)                                          \
+  V(String, empty_string, empty_string)                                        \
   V(Oddball, uninitialized_value, UninitializedValue)                          \
-  V(Oddball, exception, Exception)                                             \
   V(Map, cell_map, CellMap)                                                    \
   V(Map, global_property_cell_map, GlobalPropertyCellMap)                      \
   V(Map, shared_function_info_map, SharedFunctionInfoMap)                      \
@@ -53,17 +53,20 @@ namespace internal {
   V(Map, fixed_double_array_map, FixedDoubleArrayMap)                          \
   V(Map, constant_pool_array_map, ConstantPoolArrayMap)                        \
   V(Map, weak_cell_map, WeakCellMap)                                           \
-  V(Oddball, no_interceptor_result_sentinel, NoInterceptorResultSentinel)      \
-  V(Map, hash_table_map, HashTableMap)                                         \
-  V(Map, ordered_hash_table_map, OrderedHashTableMap)                          \
+  V(Map, one_byte_string_map, OneByteStringMap)                                \
+  V(Map, one_byte_internalized_string_map, OneByteInternalizedStringMap)       \
+  V(Map, function_context_map, FunctionContextMap)                             \
   V(FixedArray, empty_fixed_array, EmptyFixedArray)                            \
   V(ByteArray, empty_byte_array, EmptyByteArray)                               \
   V(DescriptorArray, empty_descriptor_array, EmptyDescriptorArray)             \
   V(ConstantPoolArray, empty_constant_pool_array, EmptyConstantPoolArray)      \
-  V(Oddball, arguments_marker, ArgumentsMarker)                                \
   /* The roots above this line should be boring from a GC point of view.    */ \
   /* This means they are never in new space and never on a page that is     */ \
   /* being compacted.                                                       */ \
+  V(Oddball, no_interceptor_result_sentinel, NoInterceptorResultSentinel)      \
+  V(Oddball, arguments_marker, ArgumentsMarker)                                \
+  V(Oddball, exception, Exception)                                             \
+  V(Oddball, termination_exception, TerminationException)                      \
   V(FixedArray, number_string_cache, NumberStringCache)                        \
   V(Object, instanceof_cache_function, InstanceofCacheFunction)                \
   V(Object, instanceof_cache_map, InstanceofCacheMap)                          \
@@ -71,13 +74,13 @@ namespace internal {
   V(FixedArray, single_character_string_cache, SingleCharacterStringCache)     \
   V(FixedArray, string_split_cache, StringSplitCache)                          \
   V(FixedArray, regexp_multiple_cache, RegExpMultipleCache)                    \
-  V(Oddball, termination_exception, TerminationException)                      \
   V(Smi, hash_seed, HashSeed)                                                  \
+  V(Map, hash_table_map, HashTableMap)                                         \
+  V(Map, ordered_hash_table_map, OrderedHashTableMap)                          \
   V(Map, symbol_map, SymbolMap)                                                \
   V(Map, string_map, StringMap)                                                \
-  V(Map, one_byte_string_map, OneByteStringMap)                                \
-  V(Map, cons_string_map, ConsStringMap)                                       \
   V(Map, cons_one_byte_string_map, ConsOneByteStringMap)                       \
+  V(Map, cons_string_map, ConsStringMap)                                       \
   V(Map, sliced_string_map, SlicedStringMap)                                   \
   V(Map, sliced_one_byte_string_map, SlicedOneByteStringMap)                   \
   V(Map, external_string_map, ExternalStringMap)                               \
@@ -89,7 +92,6 @@ namespace internal {
   V(Map, short_external_string_with_one_byte_data_map,                         \
     ShortExternalStringWithOneByteDataMap)                                     \
   V(Map, internalized_string_map, InternalizedStringMap)                       \
-  V(Map, one_byte_internalized_string_map, OneByteInternalizedStringMap)       \
   V(Map, external_internalized_string_map, ExternalInternalizedStringMap)      \
   V(Map, external_internalized_string_with_one_byte_data_map,                  \
     ExternalInternalizedStringWithOneByteDataMap)                              \
@@ -141,7 +143,6 @@ namespace internal {
   V(FixedTypedArrayBase, empty_fixed_uint8_clamped_array,                      \
     EmptyFixedUint8ClampedArray)                                               \
   V(Map, sloppy_arguments_elements_map, SloppyArgumentsElementsMap)            \
-  V(Map, function_context_map, FunctionContextMap)                             \
   V(Map, catch_context_map, CatchContextMap)                                   \
   V(Map, with_context_map, WithContextMap)                                     \
   V(Map, block_context_map, BlockContextMap)                                   \
@@ -214,7 +215,6 @@ namespace internal {
   V(constructor_string, "constructor")                         \
   V(dot_result_string, ".result")                              \
   V(eval_string, "eval")                                       \
-  V(empty_string, "")                                          \
   V(function_string, "function")                               \
   V(Function_string, "Function")                               \
   V(length_string, "length")                                   \
@@ -232,6 +232,7 @@ namespace internal {
   V(sticky_string, "sticky")                                   \
   V(unicode_string, "unicode")                                 \
   V(harmony_regexps_string, "harmony_regexps")                 \
+  V(harmony_tostring_string, "harmony_tostring")               \
   V(harmony_unicode_regexps_string, "harmony_unicode_regexps") \
   V(input_string, "input")                                     \
   V(index_string, "index")                                     \
@@ -289,7 +290,6 @@ namespace internal {
   V(frozen_symbol)                  \
   V(nonexistent_symbol)             \
   V(elements_transition_symbol)     \
-  V(prototype_users_symbol)         \
   V(observed_symbol)                \
   V(uninitialized_symbol)           \
   V(megamorphic_symbol)             \
@@ -370,6 +370,7 @@ namespace internal {
   V(JSMessageObjectMap)                 \
   V(ForeignMap)                         \
   V(NeanderMap)                         \
+  V(empty_string)                       \
   PRIVATE_SYMBOL_LIST(V)
 
 // Forward declarations.
@@ -641,25 +642,16 @@ class Heap {
   Address NewSpaceTop() { return new_space_.top(); }
 
   NewSpace* new_space() { return &new_space_; }
-  OldSpace* old_pointer_space() { return old_pointer_space_; }
-  OldSpace* old_data_space() { return old_data_space_; }
+  OldSpace* old_space() { return old_space_; }
   OldSpace* code_space() { return code_space_; }
   MapSpace* map_space() { return map_space_; }
-  CellSpace* cell_space() { return cell_space_; }
-  PropertyCellSpace* property_cell_space() { return property_cell_space_; }
   LargeObjectSpace* lo_space() { return lo_space_; }
   PagedSpace* paged_space(int idx) {
     switch (idx) {
-      case OLD_POINTER_SPACE:
-        return old_pointer_space();
-      case OLD_DATA_SPACE:
-        return old_data_space();
+      case OLD_SPACE:
+        return old_space();
       case MAP_SPACE:
         return map_space();
-      case CELL_SPACE:
-        return cell_space();
-      case PROPERTY_CELL_SPACE:
-        return property_cell_space();
       case CODE_SPACE:
         return code_space();
       case NEW_SPACE:
@@ -681,18 +673,11 @@ class Heap {
     return new_space_.allocation_limit_address();
   }
 
-  Address* OldPointerSpaceAllocationTopAddress() {
-    return old_pointer_space_->allocation_top_address();
+  Address* OldSpaceAllocationTopAddress() {
+    return old_space_->allocation_top_address();
   }
-  Address* OldPointerSpaceAllocationLimitAddress() {
-    return old_pointer_space_->allocation_limit_address();
-  }
-
-  Address* OldDataSpaceAllocationTopAddress() {
-    return old_data_space_->allocation_top_address();
-  }
-  Address* OldDataSpaceAllocationLimitAddress() {
-    return old_data_space_->allocation_limit_address();
+  Address* OldSpaceAllocationLimitAddress() {
+    return old_space_->allocation_limit_address();
   }
 
   // TODO(hpayer): There is still a missmatch between capacity and actual
@@ -912,7 +897,8 @@ class Heap {
 
   // Iterate pointers to from semispace of new space found in memory interval
   // from start to end.
-  void IterateAndMarkPointersToFromSpace(Address start, Address end,
+  void IterateAndMarkPointersToFromSpace(bool record_slots, Address start,
+                                         Address end,
                                          ObjectSlotCallback callback);
 
   // Returns whether the object resides in new space.
@@ -922,13 +908,9 @@ class Heap {
   inline bool InFromSpace(Object* object);
   inline bool InToSpace(Object* object);
 
-  // Returns whether the object resides in old pointer space.
-  inline bool InOldPointerSpace(Address address);
-  inline bool InOldPointerSpace(Object* object);
-
-  // Returns whether the object resides in old data space.
-  inline bool InOldDataSpace(Address address);
-  inline bool InOldDataSpace(Object* object);
+  // Returns whether the object resides in old space.
+  inline bool InOldSpace(Address address);
+  inline bool InOldSpace(Object* object);
 
   // Checks whether an address/object in the heap (including auxiliary
   // area and unused area).
@@ -939,10 +921,6 @@ class Heap {
   // Currently used by tests, serialization and heap verification only.
   bool InSpace(Address addr, AllocationSpace space);
   bool InSpace(HeapObject* value, AllocationSpace space);
-
-  // Finds out which space an object should get promoted to based on its type.
-  inline OldSpace* TargetSpace(HeapObject* object);
-  static inline AllocationSpace TargetSpaceId(InstanceType type);
 
   // Checks whether the given object is allowed to be migrated from it's
   // current space into the given destination space. Used for debugging.
@@ -985,6 +963,7 @@ class Heap {
   }
 
   static bool RootIsImmortalImmovable(int root_index);
+  void CheckHandleCount();
 
 #ifdef VERIFY_HEAP
   // Verify the heap is in its normal state before or after a GC.
@@ -994,10 +973,6 @@ class Heap {
 #ifdef DEBUG
   void Print();
   void PrintHandles();
-
-  void OldPointerSpaceCheckStoreBuffer();
-  void MapSpaceCheckStoreBuffer();
-  void LargeObjectSpaceCheckStoreBuffer();
 
   // Report heap statistics.
   void ReportHeapStatistics(const char* title);
@@ -1356,6 +1331,14 @@ class Heap {
     return seed;
   }
 
+  Smi* NextScriptId() {
+    int next_id = last_script_id()->value() + 1;
+    if (!Smi::IsValid(next_id) || next_id < 0) next_id = 1;
+    Smi* next_id_smi = Smi::FromInt(next_id);
+    set_last_script_id(next_id_smi);
+    return next_id_smi;
+  }
+
   void SetArgumentsAdaptorDeoptPCOffset(int pc_offset) {
     DCHECK(arguments_adaptor_deopt_pc_offset() == Smi::FromInt(0));
     set_arguments_adaptor_deopt_pc_offset(Smi::FromInt(pc_offset));
@@ -1584,12 +1567,9 @@ class Heap {
   int scan_on_scavenge_pages_;
 
   NewSpace new_space_;
-  OldSpace* old_pointer_space_;
-  OldSpace* old_data_space_;
+  OldSpace* old_space_;
   OldSpace* code_space_;
   MapSpace* map_space_;
-  CellSpace* cell_space_;
-  PropertyCellSpace* property_cell_space_;
   LargeObjectSpace* lo_space_;
   HeapState gc_state_;
   int gc_post_processing_depth_;
@@ -1781,14 +1761,11 @@ class Heap {
   inline void UpdateOldSpaceLimits();
 
   // Selects the proper allocation space depending on the given object
-  // size, pretenuring decision, and preferred old-space.
+  // size and pretenuring decision.
   static AllocationSpace SelectSpace(int object_size,
-                                     AllocationSpace preferred_old_space,
                                      PretenureFlag pretenure) {
-    DCHECK(preferred_old_space == OLD_POINTER_SPACE ||
-           preferred_old_space == OLD_DATA_SPACE);
     if (object_size > Page::kMaxRegularHeapObjectSize) return LO_SPACE;
-    return (pretenure == TENURED) ? preferred_old_space : NEW_SPACE;
+    return (pretenure == TENURED) ? OLD_SPACE : NEW_SPACE;
   }
 
   HeapObject* DoubleAlignForDeserialization(HeapObject* object, int size);
@@ -2191,30 +2168,24 @@ class HeapStats {
   int* start_marker;                       //  0
   int* new_space_size;                     //  1
   int* new_space_capacity;                 //  2
-  intptr_t* old_pointer_space_size;        //  3
-  intptr_t* old_pointer_space_capacity;    //  4
-  intptr_t* old_data_space_size;           //  5
-  intptr_t* old_data_space_capacity;       //  6
-  intptr_t* code_space_size;               //  7
-  intptr_t* code_space_capacity;           //  8
-  intptr_t* map_space_size;                //  9
-  intptr_t* map_space_capacity;            // 10
-  intptr_t* cell_space_size;               // 11
-  intptr_t* cell_space_capacity;           // 12
-  intptr_t* lo_space_size;                 // 13
-  int* global_handle_count;                // 14
-  int* weak_global_handle_count;           // 15
-  int* pending_global_handle_count;        // 16
-  int* near_death_global_handle_count;     // 17
-  int* free_global_handle_count;           // 18
-  intptr_t* memory_allocator_size;         // 19
-  intptr_t* memory_allocator_capacity;     // 20
-  int* objects_per_type;                   // 21
-  int* size_per_type;                      // 22
-  int* os_error;                           // 23
-  int* end_marker;                         // 24
-  intptr_t* property_cell_space_size;      // 25
-  intptr_t* property_cell_space_capacity;  // 26
+  intptr_t* old_space_size;                //  3
+  intptr_t* old_space_capacity;            //  4
+  intptr_t* code_space_size;               //  5
+  intptr_t* code_space_capacity;           //  6
+  intptr_t* map_space_size;                //  7
+  intptr_t* map_space_capacity;            //  8
+  intptr_t* lo_space_size;                 //  9
+  int* global_handle_count;                // 10
+  int* weak_global_handle_count;           // 11
+  int* pending_global_handle_count;        // 12
+  int* near_death_global_handle_count;     // 13
+  int* free_global_handle_count;           // 14
+  intptr_t* memory_allocator_size;         // 15
+  intptr_t* memory_allocator_capacity;     // 16
+  int* objects_per_type;                   // 17
+  int* size_per_type;                      // 18
+  int* os_error;                           // 19
+  int* end_marker;                         // 20
 };
 
 
@@ -2273,12 +2244,11 @@ class AllSpaces BASE_EMBEDDED {
 };
 
 
-// Space iterator for iterating over all old spaces of the heap: Old pointer
-// space, old data space and code space.  Returns each space in turn, and null
-// when it is done.
+// Space iterator for iterating over all old spaces of the heap: Old space
+// and code space.  Returns each space in turn, and null when it is done.
 class OldSpaces BASE_EMBEDDED {
  public:
-  explicit OldSpaces(Heap* heap) : heap_(heap), counter_(OLD_POINTER_SPACE) {}
+  explicit OldSpaces(Heap* heap) : heap_(heap), counter_(OLD_SPACE) {}
   OldSpace* next();
 
  private:
@@ -2288,11 +2258,11 @@ class OldSpaces BASE_EMBEDDED {
 
 
 // Space iterator for iterating over all the paged spaces of the heap: Map
-// space, old pointer space, old data space, code space and cell space.  Returns
+// space, old space, code space and cell space.  Returns
 // each space in turn, and null when it is done.
 class PagedSpaces BASE_EMBEDDED {
  public:
-  explicit PagedSpaces(Heap* heap) : heap_(heap), counter_(OLD_POINTER_SPACE) {}
+  explicit PagedSpaces(Heap* heap) : heap_(heap), counter_(OLD_SPACE) {}
   PagedSpace* next();
 
  private:

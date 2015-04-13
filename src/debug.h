@@ -261,15 +261,17 @@ class ScriptCache : private HashMap {
 class DebugInfoListNode {
  public:
   explicit DebugInfoListNode(DebugInfo* debug_info);
-  virtual ~DebugInfoListNode();
+  virtual ~DebugInfoListNode() { ClearInfo(); }
 
   DebugInfoListNode* next() { return next_; }
   void set_next(DebugInfoListNode* next) { next_ = next; }
-  Handle<DebugInfo> debug_info() { return debug_info_; }
+  Handle<DebugInfo> debug_info() { return Handle<DebugInfo>(debug_info_); }
+
+  void ClearInfo();
 
  private:
   // Global (weak) handle to the debug info object.
-  Handle<DebugInfo> debug_info_;
+  DebugInfo** debug_info_;
 
   // Next pointer for linked list.
   DebugInfoListNode* next_;
@@ -425,7 +427,7 @@ class Debug {
   // Debug event triggers.
   void OnDebugBreak(Handle<Object> break_points_hit, bool auto_continue);
 
-  void OnThrow(Handle<Object> exception, bool uncaught);
+  void OnThrow(Handle<Object> exception);
   void OnPromiseReject(Handle<JSObject> promise, Handle<Object> value);
   void OnCompileError(Handle<Script> script);
   void OnBeforeCompile(Handle<Script> script);
@@ -438,8 +440,6 @@ class Debug {
   void SetMessageHandler(v8::Debug::MessageHandler handler);
   void EnqueueCommandMessage(Vector<const uint16_t> command,
                              v8::Debug::ClientData* client_data = NULL);
-  // Enqueue a debugger command to the command queue for event listeners.
-  void EnqueueDebugCommand(v8::Debug::ClientData* client_data = NULL);
   MUST_USE_RESULT MaybeHandle<Object> Call(Handle<JSFunction> fun,
                                            Handle<Object> data);
   Handle<Context> GetDebugContext();
@@ -595,8 +595,7 @@ class Debug {
     return break_disabled_ || in_debug_event_listener_;
   }
 
-  void OnException(Handle<Object> exception, bool uncaught,
-                   Handle<Object> promise);
+  void OnException(Handle<Object> exception, Handle<Object> promise);
 
   // Constructors for debug event objects.
   MUST_USE_RESULT MaybeHandle<Object> MakeJSObject(
@@ -668,7 +667,6 @@ class Debug {
   static const int kQueueInitialSize = 4;
   base::Semaphore command_received_;  // Signaled for each command received.
   LockingCommandMessageQueue command_queue_;
-  LockingCommandMessageQueue event_command_queue_;
 
   bool is_active_;
   bool is_suppressed_;

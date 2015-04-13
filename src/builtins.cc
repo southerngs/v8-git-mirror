@@ -1000,22 +1000,23 @@ BUILTIN(ArrayConcat) {
 
 
 // -----------------------------------------------------------------------------
-// Generator and strict mode poison pills
+// Throwers for restricted function properties and strict arguments object
+// properties
 
 
-BUILTIN(StrictModePoisonPill) {
+BUILTIN(RestrictedFunctionPropertiesThrower) {
+  HandleScope scope(isolate);
+  THROW_NEW_ERROR_RETURN_FAILURE(isolate,
+                                 NewTypeError("restricted_function_properties",
+                                              HandleVector<Object>(NULL, 0)));
+}
+
+
+BUILTIN(RestrictedStrictArgumentsPropertiesThrower) {
   HandleScope scope(isolate);
   THROW_NEW_ERROR_RETURN_FAILURE(
       isolate,
       NewTypeError("strict_poison_pill", HandleVector<Object>(NULL, 0)));
-}
-
-
-BUILTIN(GeneratorPoisonPill) {
-  HandleScope scope(isolate);
-  THROW_NEW_ERROR_RETURN_FAILURE(
-      isolate,
-      NewTypeError("generator_poison_pill", HandleVector<Object>(NULL, 0)));
 }
 
 
@@ -1043,6 +1044,17 @@ MUST_USE_RESULT static MaybeHandle<Object> HandleApiCallHelper(
 
   DCHECK(!args[0]->IsNull());
   if (args[0]->IsUndefined()) args[0] = function->global_proxy();
+
+  if (!is_construct && !fun_data->accept_any_receiver()) {
+    Handle<Object> receiver(&args[0]);
+    if (receiver->IsJSObject() && receiver->IsAccessCheckNeeded()) {
+      Handle<JSObject> js_receiver = Handle<JSObject>::cast(receiver);
+      if (!isolate->MayAccess(js_receiver)) {
+        isolate->ReportFailedAccessCheck(js_receiver);
+        RETURN_EXCEPTION_IF_SCHEDULED_EXCEPTION(isolate, Object);
+      }
+    }
+  }
 
   Object* raw_holder = fun_data->GetCompatibleReceiver(isolate, args[0]);
 

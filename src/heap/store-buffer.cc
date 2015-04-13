@@ -6,7 +6,6 @@
 
 #include "src/v8.h"
 
-#include "src/base/atomicops.h"
 #include "src/counters.h"
 #include "src/heap/store-buffer-inl.h"
 
@@ -108,26 +107,6 @@ void StoreBuffer::StoreBufferOverflow(Isolate* isolate) {
 }
 
 
-void StoreBuffer::Uniq() {
-  // Remove adjacent duplicates and cells that do not point at new space.
-  Address previous = NULL;
-  Address* write = old_start_;
-  DCHECK(may_move_store_buffer_entries_);
-  for (Address* read = old_start_; read < old_top_; read++) {
-    Address current = *read;
-    if (current != previous) {
-      Object* object = reinterpret_cast<Object*>(
-          base::NoBarrier_Load(reinterpret_cast<base::AtomicWord*>(current)));
-      if (heap_->InNewSpace(object)) {
-        *write++ = current;
-      }
-    }
-    previous = current;
-  }
-  old_top_ = write;
-}
-
-
 bool StoreBuffer::SpaceAvailable(intptr_t space_needed) {
   return old_limit_ - old_top_ >= space_needed;
 }
@@ -218,6 +197,8 @@ void StoreBuffer::ExemptPopularPages(int prime_sample_step, int threshold) {
   }
   if (created_new_scan_on_scavenge_pages) {
     Filter(MemoryChunk::SCAN_ON_SCAVENGE);
+    heap_->isolate()->CountUsage(
+        v8::Isolate::UseCounterFeature::kStoreBufferOverflow);
   }
   old_buffer_is_filtered_ = true;
 }
@@ -247,69 +228,6 @@ void StoreBuffer::Filter(int flag) {
 }
 
 
-void StoreBuffer::RemoveSlots(Address start_address, Address end_address) {
-  struct IsValueInRangePredicate {
-    Address start_address_;
-    Address end_address_;
-
-    IsValueInRangePredicate(Address start_address, Address end_address)
-        : start_address_(start_address), end_address_(end_address) {}
-
-    bool operator()(Address addr) {
-      return start_address_ <= addr && addr < end_address_;
-    }
-  };
-
-  IsValueInRangePredicate predicate(start_address, end_address);
-  // Some address in old space that does not move.
-  const Address kRemovedSlot = heap_->undefined_value()->address();
-  DCHECK(Page::FromAddress(kRemovedSlot)->NeverEvacuate());
-
-  {
-    Address* top = reinterpret_cast<Address*>(heap_->store_buffer_top());
-    std::replace_if(start_, top, predicate, kRemovedSlot);
-  }
-
-  if (old_buffer_is_sorted_) {
-    // Remove slots from an old buffer preserving the order.
-    Address* lower = std::lower_bound(old_start_, old_top_, start_address);
-    if (lower != old_top_) {
-      // [lower, old_top_) range contain elements that are >= |start_address|.
-      Address* upper = std::lower_bound(lower, old_top_, end_address);
-      // Remove [lower, upper) from the buffer.
-      if (upper == old_top_) {
-        // All elements in [lower, old_top_) range are < |end_address|.
-        old_top_ = lower;
-      } else if (lower != upper) {
-        // [upper, old_top_) range contain elements that are >= |end_address|,
-        // move [upper, old_top_) range to [lower, ...) and update old_top_.
-        Address* new_top = lower;
-        for (Address* p = upper; p < old_top_; p++) {
-          *new_top++ = *p;
-        }
-        old_top_ = new_top;
-      }
-    }
-  } else {
-    std::replace_if(old_start_, old_top_, predicate, kRemovedSlot);
-  }
-}
-
-
-void StoreBuffer::SortUniq() {
-  Compact();
-  if (old_buffer_is_sorted_) return;
-  std::sort(old_start_, old_top_);
-  Uniq();
-
-  old_buffer_is_sorted_ = true;
-
-  // Filtering hash sets are inconsistent with the store buffer after this
-  // operation.
-  ClearFilteringHashSets();
-}
-
-
 bool StoreBuffer::PrepareForIteration() {
   Compact();
   PointerChunkIterator it(heap_);
@@ -332,47 +250,6 @@ bool StoreBuffer::PrepareForIteration() {
 
   return page_has_scan_on_scavenge_flag;
 }
-
-
-#ifdef DEBUG
-void StoreBuffer::Clean() {
-  ClearFilteringHashSets();
-  Uniq();  // Also removes things that no longer point to new space.
-  EnsureSpace(kStoreBufferSize / 2);
-}
-
-
-static Address* in_store_buffer_1_element_cache = NULL;
-
-
-bool StoreBuffer::CellIsInStoreBuffer(Address cell_address) {
-  DCHECK_NOT_NULL(cell_address);
-  Address* top = reinterpret_cast<Address*>(heap_->store_buffer_top());
-  if (in_store_buffer_1_element_cache != NULL &&
-      *in_store_buffer_1_element_cache == cell_address) {
-    // Check if the cache still points into the active part of the buffer.
-    if ((start_ <= in_store_buffer_1_element_cache &&
-         in_store_buffer_1_element_cache < top) ||
-        (old_start_ <= in_store_buffer_1_element_cache &&
-         in_store_buffer_1_element_cache < old_top_)) {
-      return true;
-    }
-  }
-  for (Address* current = top - 1; current >= start_; current--) {
-    if (*current == cell_address) {
-      in_store_buffer_1_element_cache = current;
-      return true;
-    }
-  }
-  for (Address* current = old_top_ - 1; current >= old_start_; current--) {
-    if (*current == cell_address) {
-      in_store_buffer_1_element_cache = current;
-      return true;
-    }
-  }
-  return false;
-}
-#endif
 
 
 void StoreBuffer::ClearFilteringHashSets() {
@@ -486,15 +363,14 @@ void StoreBuffer::ClearInvalidStoreBufferEntries() {
   Address* new_top = old_start_;
   for (Address* current = old_start_; current < old_top_; current++) {
     Address addr = *current;
-    Object** slot = reinterpret_cast<Object**>(*current);
-    // Use a NoBarrier_Load here since the slot can be in a dead object
-    // which may be touched by the concurrent sweeper thread.
-    Object* object = reinterpret_cast<Object*>(
-        base::NoBarrier_Load(reinterpret_cast<base::AtomicWord*>(slot)));
-    if (heap_->InNewSpace(object)) {
-      if (heap_->mark_compact_collector()->IsSlotInLiveObject(
-              reinterpret_cast<HeapObject**>(slot),
-              reinterpret_cast<HeapObject*>(object))) {
+    Object** slot = reinterpret_cast<Object**>(addr);
+    Object* object = *slot;
+    if (heap_->InNewSpace(object) && object->IsHeapObject()) {
+      // If the target object is not black, the source slot must be part
+      // of a non-black (dead) object.
+      HeapObject* heap_object = HeapObject::cast(object);
+      if (Marking::IsBlack(Marking::MarkBitFrom(heap_object)) &&
+          heap_->mark_compact_collector()->IsSlotInLiveObject(addr)) {
         *new_top++ = addr;
       }
     }
@@ -506,7 +382,8 @@ void StoreBuffer::ClearInvalidStoreBufferEntries() {
   LargeObjectIterator it(heap_->lo_space());
   for (HeapObject* object = it.Next(); object != NULL; object = it.Next()) {
     MemoryChunk* chunk = MemoryChunk::FromAddress(object->address());
-    if (chunk->scan_on_scavenge() && !Marking::MarkBitFrom(object).Get()) {
+    if (chunk->scan_on_scavenge() &&
+        Marking::IsWhite(Marking::MarkBitFrom(object))) {
       chunk->set_scan_on_scavenge(false);
     }
   }
@@ -517,10 +394,10 @@ void StoreBuffer::VerifyValidStoreBufferEntries() {
   for (Address* current = old_start_; current < old_top_; current++) {
     Object** slot = reinterpret_cast<Object**>(*current);
     Object* object = *slot;
+    CHECK(object->IsHeapObject());
     CHECK(heap_->InNewSpace(object));
     heap_->mark_compact_collector()->VerifyIsSlotInLiveObject(
-        reinterpret_cast<HeapObject**>(slot),
-        reinterpret_cast<HeapObject*>(object));
+        reinterpret_cast<Address>(slot), HeapObject::cast(object));
   }
 }
 
@@ -592,7 +469,7 @@ void StoreBuffer::IteratePointersToNewSpace(ObjectSlotCallback slot_callback) {
                 heap_->mark_compact_collector()->EnsureSweepingCompleted();
               }
             }
-            CHECK(page->owner() == heap_->old_pointer_space());
+            CHECK(page->owner() == heap_->old_space());
             HeapObjectIterator iterator(page, NULL);
             for (HeapObject* heap_object = iterator.Next(); heap_object != NULL;
                  heap_object = iterator.Next()) {
@@ -660,9 +537,7 @@ void StoreBuffer::Compact() {
   // functions to reduce the number of unnecessary clashes.
   hash_sets_are_empty_ = false;  // Hash sets are in use.
   for (Address* current = start_; current < top; current++) {
-    DCHECK(!heap_->cell_space()->Contains(*current));
     DCHECK(!heap_->code_space()->Contains(*current));
-    DCHECK(!heap_->old_data_space()->Contains(*current));
     uintptr_t int_addr = reinterpret_cast<uintptr_t>(*current);
     // Shift out the last bits including any tags.
     int_addr >>= kPointerSizeLog2;

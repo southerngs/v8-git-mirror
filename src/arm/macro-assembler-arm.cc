@@ -861,6 +861,21 @@ void MacroAssembler::VFPCanonicalizeNaN(const DwVfpRegister dst,
 }
 
 
+void MacroAssembler::VFPCompareAndSetFlags(const SwVfpRegister src1,
+                                           const SwVfpRegister src2,
+                                           const Condition cond) {
+  // Compare and move FPSCR flags to the normal condition flags.
+  VFPCompareAndLoadFlags(src1, src2, pc, cond);
+}
+
+void MacroAssembler::VFPCompareAndSetFlags(const SwVfpRegister src1,
+                                           const float src2,
+                                           const Condition cond) {
+  // Compare and move FPSCR flags to the normal condition flags.
+  VFPCompareAndLoadFlags(src1, src2, pc, cond);
+}
+
+
 void MacroAssembler::VFPCompareAndSetFlags(const DwVfpRegister src1,
                                            const DwVfpRegister src2,
                                            const Condition cond) {
@@ -873,6 +888,25 @@ void MacroAssembler::VFPCompareAndSetFlags(const DwVfpRegister src1,
                                            const Condition cond) {
   // Compare and move FPSCR flags to the normal condition flags.
   VFPCompareAndLoadFlags(src1, src2, pc, cond);
+}
+
+
+void MacroAssembler::VFPCompareAndLoadFlags(const SwVfpRegister src1,
+                                            const SwVfpRegister src2,
+                                            const Register fpscr_flags,
+                                            const Condition cond) {
+  // Compare and load FPSCR.
+  vcmp(src1, src2, cond);
+  vmrs(fpscr_flags, cond);
+}
+
+void MacroAssembler::VFPCompareAndLoadFlags(const SwVfpRegister src1,
+                                            const float src2,
+                                            const Register fpscr_flags,
+                                            const Condition cond) {
+  // Compare and load FPSCR.
+  vcmp(src1, src2, cond);
+  vmrs(fpscr_flags, cond);
 }
 
 
@@ -893,6 +927,7 @@ void MacroAssembler::VFPCompareAndLoadFlags(const DwVfpRegister src1,
   vcmp(src1, src2, cond);
   vmrs(fpscr_flags, cond);
 }
+
 
 void MacroAssembler::Vmov(const DwVfpRegister dst,
                           const double imm,
@@ -1396,40 +1431,22 @@ void MacroAssembler::DebugBreak() {
 }
 
 
-void MacroAssembler::PushTryHandler(StackHandler::Kind kind,
-                                    int handler_index) {
+void MacroAssembler::PushStackHandler() {
   // Adjust this code if not the case.
-  STATIC_ASSERT(StackHandlerConstants::kSize == 3 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kSize == 1 * kPointerSize);
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kStateOffset == 1 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kContextOffset == 2 * kPointerSize);
-
-  // For the JSEntry handler, we must preserve r0-r4, r5-r6 are available.
-  // We will build up the handler from the bottom by pushing on the stack.
-  // Set up the the state (r6) for pushing.
-  unsigned state =
-      StackHandler::IndexField::encode(handler_index) |
-      StackHandler::KindField::encode(kind);
-  mov(r6, Operand(state));
-
-  // Push the context and state.
-  if (kind == StackHandler::JS_ENTRY) {
-    mov(cp, Operand(Smi::FromInt(0)));  // Indicates no context.
-    stm(db_w, sp, r6.bit() | cp.bit());
-  } else {
-    stm(db_w, sp, r6.bit() | cp.bit());
-  }
 
   // Link the current handler as the next handler.
   mov(r6, Operand(ExternalReference(Isolate::kHandlerAddress, isolate())));
   ldr(r5, MemOperand(r6));
   push(r5);
+
   // Set this new handler as the current one.
   str(sp, MemOperand(r6));
 }
 
 
-void MacroAssembler::PopTryHandler() {
+void MacroAssembler::PopStackHandler() {
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0);
   pop(r1);
   mov(ip, Operand(ExternalReference(Isolate::kHandlerAddress, isolate())));
@@ -1695,12 +1712,11 @@ void MacroAssembler::Allocate(int object_size,
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
     // Align the next allocation. Storing the filler map without checking top is
     // safe in new-space because the limit of the heap is aligned there.
-    DCHECK((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     STATIC_ASSERT(kPointerAlignment * 2 == kDoubleAlignment);
     and_(scratch2, result, Operand(kDoubleAlignmentMask), SetCC);
     Label aligned;
     b(eq, &aligned);
-    if ((flags & PRETENURE_OLD_DATA_SPACE) != 0) {
+    if ((flags & PRETENURE) != 0) {
       cmp(result, Operand(ip));
       b(hs, gc_required);
     }
@@ -1809,12 +1825,11 @@ void MacroAssembler::Allocate(Register object_size,
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
     // Align the next allocation. Storing the filler map without checking top is
     // safe in new-space because the limit of the heap is aligned there.
-    DCHECK((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     DCHECK(kPointerAlignment * 2 == kDoubleAlignment);
     and_(scratch2, result, Operand(kDoubleAlignmentMask), SetCC);
     Label aligned;
     b(eq, &aligned);
-    if ((flags & PRETENURE_OLD_DATA_SPACE) != 0) {
+    if ((flags & PRETENURE) != 0) {
       cmp(result, Operand(ip));
       b(hs, gc_required);
     }

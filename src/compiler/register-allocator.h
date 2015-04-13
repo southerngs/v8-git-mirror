@@ -20,15 +20,29 @@ enum RegisterKind {
 
 
 // This class represents a single point of a InstructionOperand's lifetime. For
-// each instruction there are exactly two lifetime positions: the beginning and
-// the end of the instruction. Lifetime positions for different instructions are
-// disjoint.
+// each instruction there are four lifetime positions:
+//
+//   [[START, END], [START, END]]
+//
+// Where the first half position corresponds to
+//
+//  [GapPosition::START, GapPosition::END]
+//
+// and the second half position corresponds to
+//
+//  [Lifetime::USED_AT_START, Lifetime::USED_AT_END]
+//
 class LifetimePosition FINAL {
  public:
   // Return the lifetime position that corresponds to the beginning of
-  // the instruction with the given index.
-  static LifetimePosition FromInstructionIndex(int index) {
+  // the gap with the given index.
+  static LifetimePosition GapFromInstructionIndex(int index) {
     return LifetimePosition(index * kStep);
+  }
+  // Return the lifetime position that corresponds to the beginning of
+  // the instruction with the given index.
+  static LifetimePosition InstructionFromInstructionIndex(int index) {
+    return LifetimePosition(index * kStep + kHalfStep);
   }
 
   // Returns a numeric representation of this lifetime position.
@@ -36,41 +50,54 @@ class LifetimePosition FINAL {
 
   // Returns the index of the instruction to which this lifetime position
   // corresponds.
-  int InstructionIndex() const {
+  int ToInstructionIndex() const {
     DCHECK(IsValid());
     return value_ / kStep;
   }
 
-  // Returns true if this lifetime position corresponds to the instruction
-  // start.
-  bool IsInstructionStart() const { return (value_ & (kStep - 1)) == 0; }
+  // Returns true if this lifetime position corresponds to a START value
+  bool IsStart() const { return (value_ & (kHalfStep - 1)) == 0; }
+  // Returns true if this lifetime position corresponds to a gap START value
+  bool IsFullStart() const { return (value_ & (kStep - 1)) == 0; }
 
-  // Returns the lifetime position for the start of the instruction which
-  // corresponds to this lifetime position.
-  LifetimePosition InstructionStart() const {
+  bool IsGapPosition() { return (value_ & 0x2) == 0; }
+  bool IsInstructionPosition() { return !IsGapPosition(); }
+
+  // Returns the lifetime position for the current START.
+  LifetimePosition Start() const {
+    DCHECK(IsValid());
+    return LifetimePosition(value_ & ~(kHalfStep - 1));
+  }
+
+  // Returns the lifetime position for the current gap START.
+  LifetimePosition FullStart() const {
     DCHECK(IsValid());
     return LifetimePosition(value_ & ~(kStep - 1));
   }
 
-  // Returns the lifetime position for the end of the instruction which
-  // corresponds to this lifetime position.
-  LifetimePosition InstructionEnd() const {
+  // Returns the lifetime position for the current END.
+  LifetimePosition End() const {
     DCHECK(IsValid());
-    return LifetimePosition(InstructionStart().Value() + kStep / 2);
+    return LifetimePosition(Start().Value() + kHalfStep / 2);
   }
 
-  // Returns the lifetime position for the beginning of the next instruction.
-  LifetimePosition NextInstruction() const {
+  // Returns the lifetime position for the beginning of the next START.
+  LifetimePosition NextStart() const {
     DCHECK(IsValid());
-    return LifetimePosition(InstructionStart().Value() + kStep);
+    return LifetimePosition(Start().Value() + kHalfStep);
   }
 
-  // Returns the lifetime position for the beginning of the previous
-  // instruction.
-  LifetimePosition PrevInstruction() const {
+  // Returns the lifetime position for the beginning of the next gap START.
+  LifetimePosition NextFullStart() const {
     DCHECK(IsValid());
-    DCHECK(value_ > 1);
-    return LifetimePosition(InstructionStart().Value() - kStep);
+    return LifetimePosition(FullStart().Value() + kStep);
+  }
+
+  // Returns the lifetime position for the beginning of the previous START.
+  LifetimePosition PrevStart() const {
+    DCHECK(IsValid());
+    DCHECK(value_ >= kHalfStep);
+    return LifetimePosition(Start().Value() - kHalfStep);
   }
 
   // Constructs the lifetime position which does not correspond to any
@@ -90,10 +117,11 @@ class LifetimePosition FINAL {
   }
 
  private:
-  static const int kStep = 2;
+  static const int kHalfStep = 2;
+  static const int kStep = 2 * kHalfStep;
 
-  // Code relies on kStep being a power of two.
-  STATIC_ASSERT(IS_POWER_OF_TWO(kStep));
+  // Code relies on kStep and kHalfStep being a power of two.
+  STATIC_ASSERT(IS_POWER_OF_TWO(kHalfStep));
 
   explicit LifetimePosition(int value) : value_(value) {}
 
@@ -141,6 +169,9 @@ class UseInterval FINAL : public ZoneObject {
 };
 
 
+enum class UsePositionType : uint8_t { kAny, kRequiresRegister, kRequiresSlot };
+
+
 // Representation of a use position.
 class UsePosition FINAL : public ZoneObject {
  public:
@@ -152,52 +183,31 @@ class UsePosition FINAL : public ZoneObject {
 
   InstructionOperand* hint() const { return hint_; }
   bool HasHint() const;
-  bool RequiresRegister() const;
-  bool RegisterIsBeneficial() const;
+  bool RegisterIsBeneficial() const {
+    return RegisterBeneficialField::decode(flags_);
+  }
+  UsePositionType type() const { return TypeField::decode(flags_); }
 
   LifetimePosition pos() const { return pos_; }
   UsePosition* next() const { return next_; }
 
   void set_next(UsePosition* next) { next_ = next; }
+  void set_type(UsePositionType type, bool register_beneficial);
 
   InstructionOperand* const operand_;
   InstructionOperand* const hint_;
   LifetimePosition const pos_;
   UsePosition* next_;
-  bool requires_reg_ : 1;
-  bool register_beneficial_ : 1;
 
  private:
+  typedef BitField8<UsePositionType, 0, 2> TypeField;
+  typedef BitField8<bool, 2, 1> RegisterBeneficialField;
+  uint8_t flags_;
+
   DISALLOW_COPY_AND_ASSIGN(UsePosition);
 };
 
 class SpillRange;
-
-
-// TODO(dcarney): remove this cache.
-class InstructionOperandCache FINAL : public ZoneObject {
- public:
-  InstructionOperandCache();
-
-  InstructionOperand* RegisterOperand(int index) {
-    DCHECK(index >= 0 &&
-           index < static_cast<int>(arraysize(general_register_operands_)));
-    return &general_register_operands_[index];
-  }
-  InstructionOperand* DoubleRegisterOperand(int index) {
-    DCHECK(index >= 0 &&
-           index < static_cast<int>(arraysize(double_register_operands_)));
-    return &double_register_operands_[index];
-  }
-
- private:
-  InstructionOperand
-      general_register_operands_[RegisterConfiguration::kMaxGeneralRegisters];
-  InstructionOperand
-      double_register_operands_[RegisterConfiguration::kMaxDoubleRegisters];
-
-  DISALLOW_COPY_AND_ASSIGN(InstructionOperandCache);
-};
 
 
 // Representation of SSA values' live ranges as a collection of (continuous)
@@ -220,12 +230,10 @@ class LiveRange FINAL : public ZoneObject {
   int id() const { return id_; }
   bool IsFixed() const { return id_ < 0; }
   bool IsEmpty() const { return first_interval() == nullptr; }
-  // TODO(dcarney): remove this.
-  InstructionOperand* GetAssignedOperand(InstructionOperandCache* cache) const;
   InstructionOperand GetAssignedOperand() const;
   int assigned_register() const { return assigned_register_; }
   int spill_start_index() const { return spill_start_index_; }
-  void set_assigned_register(int reg, InstructionOperandCache* cache);
+  void set_assigned_register(int reg);
   void MakeSpilled();
   bool is_phi() const { return is_phi_; }
   void set_is_phi(bool is_phi) { is_phi_ = is_phi; }
@@ -233,6 +241,8 @@ class LiveRange FINAL : public ZoneObject {
   void set_is_non_loop_phi(bool is_non_loop_phi) {
     is_non_loop_phi_ = is_non_loop_phi;
   }
+  bool has_slot_use() const { return has_slot_use_; }
+  void set_has_slot_use(bool has_slot_use) { has_slot_use_ = has_slot_use; }
 
   // Returns use position in this live range that follows both start
   // and last processed use position.
@@ -307,9 +317,10 @@ class LiveRange FINAL : public ZoneObject {
                          InstructionOperand* operand);
   void SetSpillOperand(InstructionOperand* operand);
   void SetSpillRange(SpillRange* spill_range);
-  void CommitSpillOperand(InstructionOperand* operand);
+  void CommitSpillOperand(AllocatedOperand* operand);
   void CommitSpillsAtDefinition(InstructionSequence* sequence,
-                                InstructionOperand* operand);
+                                InstructionOperand* operand,
+                                bool might_be_duplicated);
 
   void SetSpillStartIndex(int start) {
     spill_start_index_ = Min(start, spill_start_index_);
@@ -338,16 +349,18 @@ class LiveRange FINAL : public ZoneObject {
  private:
   struct SpillAtDefinitionList;
 
-  void ConvertUsesToOperand(InstructionOperand* op);
+  void ConvertUsesToOperand(const InstructionOperand& op,
+                            InstructionOperand* spill_op);
   UseInterval* FirstSearchIntervalForPosition(LifetimePosition position) const;
   void AdvanceLastProcessedMarker(UseInterval* to_start_of,
                                   LifetimePosition but_not_past) const;
 
   // TODO(dcarney): pack this structure better.
   int id_;
-  bool spilled_;
-  bool is_phi_;
-  bool is_non_loop_phi_;
+  bool spilled_ : 1;
+  bool has_slot_use_ : 1;  // Relevant only for parent.
+  bool is_phi_ : 1;
+  bool is_non_loop_phi_ : 1;
   RegisterKind kind_;
   int assigned_register_;
   UseInterval* last_interval_;
@@ -382,7 +395,7 @@ class SpillRange FINAL : public ZoneObject {
   RegisterKind Kind() const { return live_ranges_[0]->Kind(); }
   bool IsEmpty() const { return live_ranges_.empty(); }
   bool TryMerge(SpillRange* other);
-  void SetOperand(InstructionOperand* op);
+  void SetOperand(AllocatedOperand* op);
 
  private:
   LifetimePosition End() const { return end_position_; }
@@ -439,7 +452,7 @@ class RegisterAllocator FINAL : public ZoneObject {
   void CommitAssignment();
 
   // Phase 7: compute values for pointer maps.
-  void PopulatePointerMaps();  // TODO(titzer): rename to PopulateReferenceMaps.
+  void PopulateReferenceMaps();
 
   // Phase 8: reconnect split ranges with moves.
   void ConnectRanges();
@@ -456,6 +469,9 @@ class RegisterAllocator FINAL : public ZoneObject {
 
   // Returns the register kind required by the given virtual register.
   RegisterKind RequiredRegisterKind(int virtual_register) const;
+
+  // Creates a new live range.
+  LiveRange* NewLiveRange(int index);
 
   // This zone is for InstructionOperands and moves that live beyond register
   // allocation.
@@ -479,8 +495,8 @@ class RegisterAllocator FINAL : public ZoneObject {
   bool IsOutputDoubleRegisterOf(Instruction* instr, int index);
   void ProcessInstructions(const InstructionBlock* block, BitVector* live);
   void MeetRegisterConstraints(const InstructionBlock* block);
-  void MeetConstraintsBetween(Instruction* first, Instruction* second,
-                              int gap_index);
+  void MeetConstraintsBefore(int index);
+  void MeetConstraintsAfter(int index);
   void MeetRegisterConstraintsForLastInstructionInBlock(
       const InstructionBlock* block);
   void ResolvePhis(const InstructionBlock* block);
@@ -493,7 +509,7 @@ class RegisterAllocator FINAL : public ZoneObject {
               InstructionOperand* hint);
   void Use(LifetimePosition block_start, LifetimePosition position,
            InstructionOperand* operand, InstructionOperand* hint);
-  void AddGapMove(int index, GapInstruction::InnerPosition position,
+  void AddGapMove(int index, Instruction::GapPosition position,
                   InstructionOperand* from, InstructionOperand* to);
 
   // Helper methods for updating the life range lists.
@@ -574,7 +590,7 @@ class RegisterAllocator FINAL : public ZoneObject {
   LiveRange* FixedLiveRangeFor(int index);
   LiveRange* FixedDoubleLiveRangeFor(int index);
   LiveRange* LiveRangeFor(int index);
-  GapInstruction* GetLastGap(const InstructionBlock* block);
+  Instruction* GetLastInstruction(const InstructionBlock* block);
 
   const char* RegisterName(int allocation_index);
 
@@ -583,7 +599,6 @@ class RegisterAllocator FINAL : public ZoneObject {
   Frame* frame() const { return frame_; }
   const char* debug_name() const { return debug_name_; }
   const RegisterConfiguration* config() const { return config_; }
-  InstructionOperandCache* operand_cache() const { return operand_cache_; }
   ZoneVector<LiveRange*>& live_ranges() { return live_ranges_; }
   ZoneVector<LiveRange*>& fixed_live_ranges() { return fixed_live_ranges_; }
   ZoneVector<LiveRange*>& fixed_double_live_ranges() {
@@ -612,7 +627,6 @@ class RegisterAllocator FINAL : public ZoneObject {
   const char* const debug_name_;
 
   const RegisterConfiguration* config_;
-  InstructionOperandCache* const operand_cache_;
   PhiMap phi_map_;
 
   // During liveness analysis keep a mapping from block id to live_in sets

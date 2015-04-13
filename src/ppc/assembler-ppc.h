@@ -46,7 +46,6 @@
 #include "src/assembler.h"
 #include "src/compiler.h"
 #include "src/ppc/constants-ppc.h"
-#include "src/serialize.h"
 
 #define ABI_USES_FUNCTION_DESCRIPTORS \
   (V8_HOST_ARCH_PPC && (V8_OS_AIX ||    \
@@ -628,6 +627,11 @@ class Assembler : public AssemblerBase {
   // This is for calls and branches within generated code.
   inline static void deserialization_set_special_target_at(
       Address instruction_payload, Code* code, Address target);
+
+  // This sets the internal reference at the pc.
+  inline static void deserialization_set_target_internal_reference_at(
+      Address pc, Address target,
+      RelocInfo::Mode mode = RelocInfo::INTERNAL_REFERENCE);
 
   // Size of an instruction.
   static const int kInstrSize = sizeof(Instr);

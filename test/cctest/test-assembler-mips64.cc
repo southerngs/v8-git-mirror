@@ -45,9 +45,10 @@ typedef Object* (*F1)(int x, int p1, int p2, int p3, int p4);
 typedef Object* (*F2)(int x, int y, int p2, int p3, int p4);
 typedef Object* (*F3)(void* p, int p1, int p2, int p3, int p4);
 
+// clang-format off
+
 
 #define __ assm.
-
 
 TEST(MIPS0) {
   CcTest::InitializeVM();
@@ -271,6 +272,13 @@ TEST(MIPS3) {
     double g;
     double h;
     double i;
+    float fa;
+    float fb;
+    float fc;
+    float fd;
+    float fe;
+    float ff;
+    float fg;
   } T;
   T t;
 
@@ -279,6 +287,7 @@ TEST(MIPS3) {
   MacroAssembler assm(isolate, NULL, 0);
   Label L, C;
 
+  // Double precision floating point instructions.
   __ ldc1(f4, MemOperand(a0, OFFSET_OF(T, a)) );
   __ ldc1(f6, MemOperand(a0, OFFSET_OF(T, b)) );
   __ add_d(f8, f4, f6);
@@ -311,6 +320,30 @@ TEST(MIPS3) {
     __ sdc1(f14, MemOperand(a0, OFFSET_OF(T, h)) );
   }
 
+  // Single precision floating point instructions.
+  __ lwc1(f4, MemOperand(a0, OFFSET_OF(T, fa)) );
+  __ lwc1(f6, MemOperand(a0, OFFSET_OF(T, fb)) );
+  __ add_s(f8, f4, f6);
+  __ swc1(f8, MemOperand(a0, OFFSET_OF(T, fc)) );  // fc = fa + fb.
+
+  __ neg_s(f10, f6);  // -fb
+  __ sub_s(f10, f8, f10);
+  __ swc1(f10, MemOperand(a0, OFFSET_OF(T, fd)) );  // fd = fc - (-fb).
+
+  __ swc1(f4, MemOperand(a0, OFFSET_OF(T, fb)) );   // fb = fa.
+
+  __ li(t0, 120);
+  __ mtc1(t0, f14);
+  __ cvt_s_w(f14, f14);   // f14 = 120.0.
+  __ mul_s(f10, f10, f14);
+  __ swc1(f10, MemOperand(a0, OFFSET_OF(T, fe)) );  // fe = fd * 120
+
+  __ div_s(f12, f10, f4);
+  __ swc1(f12, MemOperand(a0, OFFSET_OF(T, ff)) );  // ff = fe / fa
+
+  __ sqrt_s(f14, f12);
+  __ swc1(f14, MemOperand(a0, OFFSET_OF(T, fg)) );
+
   __ jr(ra);
   __ nop();
 
@@ -319,6 +352,7 @@ TEST(MIPS3) {
   Handle<Code> code = isolate->factory()->NewCode(
       desc, Code::ComputeFlags(Code::STUB), Handle<Code>());
   F3 f = FUNCTION_CAST<F3>(code->entry());
+  // Double test values.
   t.a = 1.5e14;
   t.b = 2.75e11;
   t.c = 0.0;
@@ -327,8 +361,16 @@ TEST(MIPS3) {
   t.f = 0.0;
   t.h = 1.5;
   t.i = 2.75;
+  // Single test values.
+  t.fa = 1.5e6;
+  t.fb = 2.75e4;
+  t.fc = 0.0;
+  t.fd = 0.0;
+  t.fe = 0.0;
+  t.ff = 0.0;
   Object* dummy = CALL_GENERATED_CODE(f, &t, 0, 0, 0, 0);
   USE(dummy);
+  // Expected double results.
   CHECK_EQ(1.5e14, t.a);
   CHECK_EQ(1.5e14, t.b);
   CHECK_EQ(1.50275e14, t.c);
@@ -339,6 +381,14 @@ TEST(MIPS3) {
   if (kArchVariant == kMips64r2) {
     CHECK_EQ(6.875, t.h);
   }
+  // Expected single results.
+  CHECK_EQ(1.5e6, t.fa);
+  CHECK_EQ(1.5e6, t.fb);
+  CHECK_EQ(1.5275e06, t.fc);
+  CHECK_EQ(1.5550e06, t.fd);
+  CHECK_EQ(1.866e08, t.fe);
+  CHECK_EQ(124.40000152587890625, t.ff);
+  CHECK_EQ(11.1534748077392578125, t.fg);
 }
 
 
@@ -1386,6 +1436,147 @@ TEST(MIPS16) {
 }
 
 
+TEST(MIPS17) {
+  if (kArchVariant == kMips64r6) {
+    CcTest::InitializeVM();
+    Isolate* isolate = CcTest::i_isolate();
+    HandleScope scope(isolate);
+    MacroAssembler assm(isolate, NULL, 0);
+
+    typedef struct test {
+      int a;
+      int b;
+      int c;
+      int d;
+      double e;
+      double f;
+      double g;
+      double h;
+    } Test;
+
+    Test test;
+    // Integer part of test.
+    __ addiu(t1, zero_reg, 1);                      // t1 = 1
+    __ seleqz(t3, t1, zero_reg);                    // t3 = 1
+    __ sw(t3, MemOperand(a0, OFFSET_OF(Test, a)));  // a = 1
+    __ seleqz(t2, t1, t1);                          // t2 = 0
+    __ sw(t2, MemOperand(a0, OFFSET_OF(Test, b)));  // b = 0
+    __ selnez(t3, t1, zero_reg);                    // t3 = 1;
+    __ sw(t3, MemOperand(a0, OFFSET_OF(Test, c)));  // c = 0
+    __ selnez(t3, t1, t1);                          // t3 = 1
+    __ sw(t3, MemOperand(a0, OFFSET_OF(Test, d)));  // d = 1
+    // Floating point part of test.
+    __ ldc1(f0, MemOperand(a0, OFFSET_OF(Test, e)) );  // src
+    __ ldc1(f2, MemOperand(a0, OFFSET_OF(Test, f)) );  // test
+    __ seleqz(D, f4, f0, f2);
+    __ selnez(D, f6, f0, f2);
+    __ sdc1(f4, MemOperand(a0, OFFSET_OF(Test, g)) );  // src
+    __ sdc1(f6, MemOperand(a0, OFFSET_OF(Test, h)) );  // src
+    __ jr(ra);
+    __ nop();
+    CodeDesc desc;
+    assm.GetCode(&desc);
+    Handle<Code> code = isolate->factory()->NewCode(
+        desc, Code::ComputeFlags(Code::STUB), Handle<Code>());
+    F3 f = FUNCTION_CAST<F3>(code->entry());
+
+    (CALL_GENERATED_CODE(f, &test, 0, 0, 0, 0));
+
+    CHECK_EQ(test.a, 1);
+    CHECK_EQ(test.b, 0);
+    CHECK_EQ(test.c, 0);
+    CHECK_EQ(test.d, 1);
+
+    const int test_size = 3;
+    const int input_size = 5;
+
+    double inputs[input_size] = {0.0, 65.2, -70.32,
+      18446744073709551621.0, -18446744073709551621.0};
+    double outputs[input_size] = {0.0, 65.2, -70.32,
+      18446744073709551621.0, -18446744073709551621.0};
+    double tests[test_size*2] = {2.8, 2.9, -2.8, -2.9,
+      18446744073709551616.0, 18446744073709555712.0};
+    for (int j=0;j < test_size;j+=2) {
+      for (int i=0;i < input_size;i++) {
+        test.e = inputs[i];
+        test.f = tests[j];
+        (CALL_GENERATED_CODE(f, &test, 0, 0, 0, 0));
+        CHECK_EQ(test.g, outputs[i]);
+        CHECK_EQ(test.h, 0);
+
+        test.f = tests[j+1];
+        (CALL_GENERATED_CODE(f, &test, 0, 0, 0, 0));
+        CHECK_EQ(test.g, 0);
+        CHECK_EQ(test.h, outputs[i]);
+      }
+    }
+  }
+}
+
+
+TEST(MIPS18) {
+  if (kArchVariant == kMips64r6) {
+    CcTest::InitializeVM();
+    Isolate* isolate = CcTest::i_isolate();
+    HandleScope scope(isolate);
+    MacroAssembler assm(isolate, NULL, 0);
+
+    typedef struct test_float {
+      double a;
+      double b;
+      double c;
+      double d;
+    } TestFloat;
+
+    TestFloat test;
+
+    __ ldc1(f4, MemOperand(a0, OFFSET_OF(TestFloat, a)));
+    __ ldc1(f8, MemOperand(a0, OFFSET_OF(TestFloat, b)));
+    __ min(D, f10, f8, f4);
+    __ max(D, f12, f8, f4);
+    __ sdc1(f10, MemOperand(a0, OFFSET_OF(TestFloat, c)));
+    __ sdc1(f12, MemOperand(a0, OFFSET_OF(TestFloat, d)));
+    __ jr(ra);
+    __ nop();
+
+    CodeDesc desc;
+    assm.GetCode(&desc);
+    Handle<Code> code = isolate->factory()->NewCode(
+        desc, Code::ComputeFlags(Code::STUB), Handle<Code>());
+    F3 f = FUNCTION_CAST<F3>(code->entry());
+    test.a = 2.0;  // a goes to fs
+    test.b = 3.0;  // b goes to ft
+    (CALL_GENERATED_CODE(f, &test, 0, 0, 0, 0));
+    CHECK_EQ(test.c, 2.0);
+    CHECK_EQ(test.d, 3.0);
+
+    test.a = 3.0;  // a goes to fs
+    test.b = 2.0;  // b goes to ft
+    (CALL_GENERATED_CODE(f, &test, 0, 0, 0, 0));
+    CHECK_EQ(test.c, 2.0);
+    CHECK_EQ(test.d, 3.0);
+
+    test.a = std::numeric_limits<double>::quiet_NaN();
+    test.b = 3.0;  // b goes to ft
+    (CALL_GENERATED_CODE(f, &test, 0, 0, 0, 0));
+    CHECK_EQ(test.c, 3.0);
+    CHECK_EQ(test.d, 3.0);
+
+    test.b = std::numeric_limits<double>::quiet_NaN();
+    test.a = 3.0;  // b goes to ft
+    (CALL_GENERATED_CODE(f, &test, 0, 0, 0, 0));
+    CHECK_EQ(test.c, 3.0);
+    CHECK_EQ(test.d, 3.0);
+
+    test.a = std::numeric_limits<double>::quiet_NaN();
+    test.b = std::numeric_limits<double>::quiet_NaN();
+    (CALL_GENERATED_CODE(f, &test, 0, 0, 0, 0));
+    DCHECK(std::isnan(test.c));
+    DCHECK(std::isnan(test.d));
+  }
+}
+
+
 TEST(jump_tables1) {
   // Test jump tables with forward jumps.
   CcTest::InitializeVM();
@@ -1585,7 +1776,7 @@ TEST(jump_tables3) {
 
   __ bind(&done);
   __ ld(ra, MemOperand(sp));
-  __ addiu(sp, sp, 8);
+  __ daddiu(sp, sp, 8);
   __ jr(ra);
   __ nop();
 
@@ -1594,7 +1785,7 @@ TEST(jump_tables3) {
   Handle<Code> code = isolate->factory()->NewCode(
       desc, Code::ComputeFlags(Code::STUB), Handle<Code>());
 #ifdef OBJECT_PRINT
-//  code->Print(std::cout);
+  code->Print(std::cout);
 #endif
   F1 f = FUNCTION_CAST<F1>(code->entry());
   for (int i = 0; i < kNumCases; ++i) {

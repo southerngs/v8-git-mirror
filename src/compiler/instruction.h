@@ -25,62 +25,36 @@ namespace compiler {
 class Schedule;
 
 // A couple of reserved opcodes are used for internal use.
-const InstructionCode kGapInstruction = -1;
-const InstructionCode kSourcePositionInstruction = -2;
-
-#define INSTRUCTION_OPERAND_LIST(V)     \
-  V(Constant, CONSTANT)                 \
-  V(Immediate, IMMEDIATE)               \
-  V(StackSlot, STACK_SLOT)              \
-  V(DoubleStackSlot, DOUBLE_STACK_SLOT) \
-  V(Register, REGISTER)                 \
-  V(DoubleRegister, DOUBLE_REGISTER)
+const InstructionCode kSourcePositionInstruction = -1;
 
 class InstructionOperand {
  public:
   static const int kInvalidVirtualRegister = -1;
 
-  enum Kind {
-    INVALID,
-    UNALLOCATED,
-    CONSTANT,
-    IMMEDIATE,
-    STACK_SLOT,
-    DOUBLE_STACK_SLOT,
-    REGISTER,
-    DOUBLE_REGISTER
-  };
+  // TODO(dcarney): recover bit. INVALID can be represented as UNALLOCATED with
+  // kInvalidVirtualRegister and some DCHECKS.
+  enum Kind { INVALID, UNALLOCATED, CONSTANT, IMMEDIATE, ALLOCATED };
 
-  InstructionOperand() { ConvertTo(INVALID, 0, kInvalidVirtualRegister); }
-
-  InstructionOperand(Kind kind, int index) {
-    DCHECK(kind != UNALLOCATED && kind != INVALID);
-    ConvertTo(kind, index, kInvalidVirtualRegister);
-  }
-
-  static InstructionOperand* New(Zone* zone, Kind kind, int index) {
-    return New(zone, InstructionOperand(kind, index));
-  }
+  InstructionOperand() : InstructionOperand(INVALID) {}
 
   Kind kind() const { return KindField::decode(value_); }
-  // TODO(dcarney): move this to subkind operand.
-  int index() const {
-    DCHECK(kind() != UNALLOCATED && kind() != INVALID);
-    return static_cast<int64_t>(value_) >> IndexField::kShift;
-  }
+
 #define INSTRUCTION_OPERAND_PREDICATE(name, type) \
   bool Is##name() const { return kind() == type; }
-  INSTRUCTION_OPERAND_LIST(INSTRUCTION_OPERAND_PREDICATE)
-  INSTRUCTION_OPERAND_PREDICATE(Unallocated, UNALLOCATED)
   INSTRUCTION_OPERAND_PREDICATE(Invalid, INVALID)
+  INSTRUCTION_OPERAND_PREDICATE(Unallocated, UNALLOCATED)
+  INSTRUCTION_OPERAND_PREDICATE(Constant, CONSTANT)
+  INSTRUCTION_OPERAND_PREDICATE(Immediate, IMMEDIATE)
+  INSTRUCTION_OPERAND_PREDICATE(Allocated, ALLOCATED)
 #undef INSTRUCTION_OPERAND_PREDICATE
+
+  inline bool IsRegister() const;
+  inline bool IsDoubleRegister() const;
+  inline bool IsStackSlot() const;
+  inline bool IsDoubleStackSlot() const;
+
   bool Equals(const InstructionOperand* other) const {
     return value_ == other->value_;
-  }
-
-  void ConvertTo(Kind kind, int index) {
-    DCHECK(kind != UNALLOCATED && kind != INVALID);
-    ConvertTo(kind, index, kInvalidVirtualRegister);
   }
 
   // Useful for map/set keys.
@@ -88,33 +62,25 @@ class InstructionOperand {
     return value_ < op.value_;
   }
 
- protected:
+  bool operator==(const InstructionOperand& op) const {
+    return value_ == op.value_;
+  }
+
   template <typename SubKindOperand>
   static SubKindOperand* New(Zone* zone, const SubKindOperand& op) {
     void* buffer = zone->New(sizeof(op));
     return new (buffer) SubKindOperand(op);
   }
 
-  InstructionOperand(Kind kind, int index, int virtual_register) {
-    ConvertTo(kind, index, virtual_register);
+  static void ReplaceWith(InstructionOperand* dest,
+                          const InstructionOperand* src) {
+    *dest = *src;
   }
 
-  void ConvertTo(Kind kind, int index, int virtual_register) {
-    if (kind == REGISTER || kind == DOUBLE_REGISTER) DCHECK(index >= 0);
-    if (kind != UNALLOCATED) {
-      DCHECK(virtual_register == kInvalidVirtualRegister);
-    }
-    value_ = KindField::encode(kind);
-    value_ |=
-        VirtualRegisterField::encode(static_cast<uint32_t>(virtual_register));
-    value_ |= static_cast<int64_t>(index) << IndexField::kShift;
-    DCHECK(((kind == UNALLOCATED || kind == INVALID) && index == 0) ||
-           this->index() == index);
-  }
+ protected:
+  explicit InstructionOperand(Kind kind) : value_(KindField::encode(kind)) {}
 
-  typedef BitField64<Kind, 0, 3> KindField;
-  typedef BitField64<uint32_t, 3, 32> VirtualRegisterField;
-  typedef BitField64<int32_t, 35, 29> IndexField;
+  class KindField : public BitField64<Kind, 0, 3> {};
 
   uint64_t value_;
 };
@@ -127,6 +93,23 @@ struct PrintableInstructionOperand {
 std::ostream& operator<<(std::ostream& os,
                          const PrintableInstructionOperand& op);
 
+#define INSTRUCTION_OPERAND_CASTS(OperandType, OperandKind)      \
+                                                                 \
+  static OperandType* cast(InstructionOperand* op) {             \
+    DCHECK_EQ(OperandKind, op->kind());                          \
+    return static_cast<OperandType*>(op);                        \
+  }                                                              \
+                                                                 \
+  static const OperandType* cast(const InstructionOperand* op) { \
+    DCHECK_EQ(OperandKind, op->kind());                          \
+    return static_cast<const OperandType*>(op);                  \
+  }                                                              \
+                                                                 \
+  static OperandType cast(const InstructionOperand& op) {        \
+    DCHECK_EQ(OperandKind, op.kind());                           \
+    return *static_cast<const OperandType*>(&op);                \
+  }
+
 class UnallocatedOperand : public InstructionOperand {
  public:
   enum BasicPolicy { FIXED_SLOT, EXTENDED_POLICY };
@@ -137,6 +120,7 @@ class UnallocatedOperand : public InstructionOperand {
     FIXED_REGISTER,
     FIXED_DOUBLE_REGISTER,
     MUST_HAVE_REGISTER,
+    MUST_HAVE_SLOT,
     SAME_AS_FIRST_INPUT
   };
 
@@ -155,14 +139,14 @@ class UnallocatedOperand : public InstructionOperand {
   };
 
   UnallocatedOperand(ExtendedPolicy policy, int virtual_register)
-      : InstructionOperand(UNALLOCATED, 0, virtual_register) {
+      : UnallocatedOperand(virtual_register) {
     value_ |= BasicPolicyField::encode(EXTENDED_POLICY);
     value_ |= ExtendedPolicyField::encode(policy);
     value_ |= LifetimeField::encode(USED_AT_END);
   }
 
   UnallocatedOperand(BasicPolicy policy, int index, int virtual_register)
-      : InstructionOperand(UNALLOCATED, 0, virtual_register) {
+      : UnallocatedOperand(virtual_register) {
     DCHECK(policy == FIXED_SLOT);
     value_ |= BasicPolicyField::encode(policy);
     value_ |= static_cast<int64_t>(index) << FixedSlotIndexField::kShift;
@@ -170,7 +154,7 @@ class UnallocatedOperand : public InstructionOperand {
   }
 
   UnallocatedOperand(ExtendedPolicy policy, int index, int virtual_register)
-      : InstructionOperand(UNALLOCATED, 0, virtual_register) {
+      : UnallocatedOperand(virtual_register) {
     DCHECK(policy == FIXED_REGISTER || policy == FIXED_DOUBLE_REGISTER);
     value_ |= BasicPolicyField::encode(EXTENDED_POLICY);
     value_ |= ExtendedPolicyField::encode(policy);
@@ -180,7 +164,7 @@ class UnallocatedOperand : public InstructionOperand {
 
   UnallocatedOperand(ExtendedPolicy policy, Lifetime lifetime,
                      int virtual_register)
-      : InstructionOperand(UNALLOCATED, 0, virtual_register) {
+      : UnallocatedOperand(virtual_register) {
     value_ |= BasicPolicyField::encode(EXTENDED_POLICY);
     value_ |= ExtendedPolicyField::encode(policy);
     value_ |= LifetimeField::encode(lifetime);
@@ -191,55 +175,6 @@ class UnallocatedOperand : public InstructionOperand {
   UnallocatedOperand* CopyUnconstrained(Zone* zone) {
     return New(zone, UnallocatedOperand(ANY, virtual_register()));
   }
-
-  static const UnallocatedOperand* cast(const InstructionOperand* op) {
-    DCHECK(op->IsUnallocated());
-    return static_cast<const UnallocatedOperand*>(op);
-  }
-
-  static UnallocatedOperand* cast(InstructionOperand* op) {
-    DCHECK(op->IsUnallocated());
-    return static_cast<UnallocatedOperand*>(op);
-  }
-
-  static UnallocatedOperand cast(const InstructionOperand& op) {
-    DCHECK(op.IsUnallocated());
-    return *static_cast<const UnallocatedOperand*>(&op);
-  }
-
-  // The encoding used for UnallocatedOperand operands depends on the policy
-  // that is
-  // stored within the operand. The FIXED_SLOT policy uses a compact encoding
-  // because it accommodates a larger pay-load.
-  //
-  // For FIXED_SLOT policy:
-  //     +------------------------------------------------+
-  //     |      slot_index   | 0 | virtual_register | 001 |
-  //     +------------------------------------------------+
-  //
-  // For all other (extended) policies:
-  //     +-----------------------------------------------------+
-  //     |  reg_index  | L | PPP |  1 | virtual_register | 001 |
-  //     +-----------------------------------------------------+
-  //     L ... Lifetime
-  //     P ... Policy
-  //
-  // The slot index is a signed value which requires us to decode it manually
-  // instead of using the BitField utility class.
-
-  // All bits fit into the index field.
-  STATIC_ASSERT(IndexField::kShift == 35);
-
-  // BitFields for all unallocated operands.
-  class BasicPolicyField : public BitField64<BasicPolicy, 35, 1> {};
-
-  // BitFields specific to BasicPolicy::FIXED_SLOT.
-  class FixedSlotIndexField : public BitField64<int, 36, 28> {};
-
-  // BitFields specific to BasicPolicy::EXTENDED_POLICY.
-  class ExtendedPolicyField : public BitField64<ExtendedPolicy, 36, 3> {};
-  class LifetimeField : public BitField64<Lifetime, 39, 1> {};
-  class FixedRegisterField : public BitField64<int, 40, 6> {};
 
   // Predicates for the operand policy.
   bool HasAnyPolicy() const {
@@ -253,6 +188,10 @@ class UnallocatedOperand : public InstructionOperand {
   bool HasRegisterPolicy() const {
     return basic_policy() == EXTENDED_POLICY &&
            extended_policy() == MUST_HAVE_REGISTER;
+  }
+  bool HasSlotPolicy() const {
+    return basic_policy() == EXTENDED_POLICY &&
+           extended_policy() == MUST_HAVE_SLOT;
   }
   bool HasSameAsInputPolicy() const {
     return basic_policy() == EXTENDED_POLICY &&
@@ -310,7 +249,193 @@ class UnallocatedOperand : public InstructionOperand {
     DCHECK(basic_policy() == EXTENDED_POLICY);
     return LifetimeField::decode(value_) == USED_AT_START;
   }
+
+  INSTRUCTION_OPERAND_CASTS(UnallocatedOperand, UNALLOCATED);
+
+  // The encoding used for UnallocatedOperand operands depends on the policy
+  // that is
+  // stored within the operand. The FIXED_SLOT policy uses a compact encoding
+  // because it accommodates a larger pay-load.
+  //
+  // For FIXED_SLOT policy:
+  //     +------------------------------------------------+
+  //     |      slot_index   | 0 | virtual_register | 001 |
+  //     +------------------------------------------------+
+  //
+  // For all other (extended) policies:
+  //     +-----------------------------------------------------+
+  //     |  reg_index  | L | PPP |  1 | virtual_register | 001 |
+  //     +-----------------------------------------------------+
+  //     L ... Lifetime
+  //     P ... Policy
+  //
+  // The slot index is a signed value which requires us to decode it manually
+  // instead of using the BitField utility class.
+
+  STATIC_ASSERT(KindField::kSize == 3);
+
+  class VirtualRegisterField : public BitField64<uint32_t, 3, 32> {};
+
+  // BitFields for all unallocated operands.
+  class BasicPolicyField : public BitField64<BasicPolicy, 35, 1> {};
+
+  // BitFields specific to BasicPolicy::FIXED_SLOT.
+  class FixedSlotIndexField : public BitField64<int, 36, 28> {};
+
+  // BitFields specific to BasicPolicy::EXTENDED_POLICY.
+  class ExtendedPolicyField : public BitField64<ExtendedPolicy, 36, 3> {};
+  class LifetimeField : public BitField64<Lifetime, 39, 1> {};
+  class FixedRegisterField : public BitField64<int, 40, 6> {};
+
+ private:
+  explicit UnallocatedOperand(int virtual_register)
+      : InstructionOperand(UNALLOCATED) {
+    value_ |=
+        VirtualRegisterField::encode(static_cast<uint32_t>(virtual_register));
+  }
 };
+
+
+class ConstantOperand : public InstructionOperand {
+ public:
+  explicit ConstantOperand(int virtual_register)
+      : InstructionOperand(CONSTANT) {
+    value_ |=
+        VirtualRegisterField::encode(static_cast<uint32_t>(virtual_register));
+  }
+
+  int32_t virtual_register() const {
+    return static_cast<int32_t>(VirtualRegisterField::decode(value_));
+  }
+
+  static ConstantOperand* New(Zone* zone, int virtual_register) {
+    return InstructionOperand::New(zone, ConstantOperand(virtual_register));
+  }
+
+  INSTRUCTION_OPERAND_CASTS(ConstantOperand, CONSTANT);
+
+  STATIC_ASSERT(KindField::kSize == 3);
+  class VirtualRegisterField : public BitField64<uint32_t, 3, 32> {};
+};
+
+
+class ImmediateOperand : public InstructionOperand {
+ public:
+  enum ImmediateType { INLINE, INDEXED };
+
+  explicit ImmediateOperand(ImmediateType type, int32_t value)
+      : InstructionOperand(IMMEDIATE) {
+    value_ |= TypeField::encode(type);
+    value_ |= static_cast<int64_t>(value) << ValueField::kShift;
+  }
+
+  ImmediateType type() const { return TypeField::decode(value_); }
+
+  int32_t inline_value() const {
+    DCHECK_EQ(INLINE, type());
+    return static_cast<int64_t>(value_) >> ValueField::kShift;
+  }
+
+  int32_t indexed_value() const {
+    DCHECK_EQ(INDEXED, type());
+    return static_cast<int64_t>(value_) >> ValueField::kShift;
+  }
+
+  static ImmediateOperand* New(Zone* zone, ImmediateType type, int32_t value) {
+    return InstructionOperand::New(zone, ImmediateOperand(type, value));
+  }
+
+  INSTRUCTION_OPERAND_CASTS(ImmediateOperand, IMMEDIATE);
+
+  STATIC_ASSERT(KindField::kSize == 3);
+  class TypeField : public BitField64<ImmediateType, 3, 1> {};
+  class ValueField : public BitField64<int32_t, 32, 32> {};
+};
+
+
+class AllocatedOperand : public InstructionOperand {
+ public:
+  enum AllocatedKind {
+    STACK_SLOT,
+    DOUBLE_STACK_SLOT,
+    REGISTER,
+    DOUBLE_REGISTER
+  };
+
+  AllocatedOperand(AllocatedKind kind, int index)
+      : InstructionOperand(ALLOCATED) {
+    DCHECK_IMPLIES(kind == REGISTER || kind == DOUBLE_REGISTER, index >= 0);
+    value_ |= AllocatedKindField::encode(kind);
+    value_ |= static_cast<int64_t>(index) << IndexField::kShift;
+  }
+
+  int index() const {
+    return static_cast<int64_t>(value_) >> IndexField::kShift;
+  }
+
+  AllocatedKind allocated_kind() const {
+    return AllocatedKindField::decode(value_);
+  }
+
+  static AllocatedOperand* New(Zone* zone, AllocatedKind kind, int index) {
+    return InstructionOperand::New(zone, AllocatedOperand(kind, index));
+  }
+
+  INSTRUCTION_OPERAND_CASTS(AllocatedOperand, ALLOCATED);
+
+  STATIC_ASSERT(KindField::kSize == 3);
+  class AllocatedKindField : public BitField64<AllocatedKind, 3, 2> {};
+  class IndexField : public BitField64<int32_t, 35, 29> {};
+};
+
+
+#undef INSTRUCTION_OPERAND_CASTS
+
+
+#define ALLOCATED_OPERAND_LIST(V)       \
+  V(StackSlot, STACK_SLOT)              \
+  V(DoubleStackSlot, DOUBLE_STACK_SLOT) \
+  V(Register, REGISTER)                 \
+  V(DoubleRegister, DOUBLE_REGISTER)
+
+
+#define ALLOCATED_OPERAND_IS(SubKind, kOperandKind)          \
+  bool InstructionOperand::Is##SubKind() const {             \
+    return IsAllocated() &&                                  \
+           AllocatedOperand::cast(this)->allocated_kind() == \
+               AllocatedOperand::kOperandKind;               \
+  }
+ALLOCATED_OPERAND_LIST(ALLOCATED_OPERAND_IS)
+#undef ALLOCATED_OPERAND_IS
+
+
+#define ALLOCATED_OPERAND_CLASS(SubKind, kOperandKind)                       \
+  class SubKind##Operand FINAL : public AllocatedOperand {                   \
+   public:                                                                   \
+    explicit SubKind##Operand(int index)                                     \
+        : AllocatedOperand(kOperandKind, index) {}                           \
+                                                                             \
+    static SubKind##Operand* New(Zone* zone, int index) {                    \
+      return InstructionOperand::New(zone, SubKind##Operand(index));         \
+    }                                                                        \
+                                                                             \
+    static SubKind##Operand* cast(InstructionOperand* op) {                  \
+      DCHECK_EQ(kOperandKind, AllocatedOperand::cast(op)->allocated_kind()); \
+      return reinterpret_cast<SubKind##Operand*>(op);                        \
+    }                                                                        \
+                                                                             \
+    static const SubKind##Operand* cast(const InstructionOperand* op) {      \
+      DCHECK_EQ(kOperandKind, AllocatedOperand::cast(op)->allocated_kind()); \
+      return reinterpret_cast<const SubKind##Operand*>(op);                  \
+    }                                                                        \
+                                                                             \
+    static SubKind##Operand cast(const InstructionOperand& op) {             \
+      DCHECK_EQ(kOperandKind, AllocatedOperand::cast(op).allocated_kind());  \
+      return *static_cast<const SubKind##Operand*>(&op);                     \
+    }                                                                        \
+  };
+ALLOCATED_OPERAND_LIST(ALLOCATED_OPERAND_CLASS)
+#undef ALLOCATED_OPERAND_CLASS
 
 
 class MoveOperands FINAL {
@@ -333,11 +458,11 @@ class MoveOperands FINAL {
     return !IsEliminated() && source()->Equals(operand);
   }
 
-  // A move is redundant if it's been eliminated, if its source and
-  // destination are the same, or if its destination is  constant.
+  // A move is redundant if it's been eliminated or if its source and
+  // destination are the same.
   bool IsRedundant() const {
-    return IsEliminated() || source_->Equals(destination_) ||
-           (destination_ != NULL && destination_->IsConstant());
+    DCHECK_IMPLIES(destination_ != nullptr, !destination_->IsConstant());
+    return IsEliminated() || source_->Equals(destination_);
   }
 
   // We clear both operands to indicate move that's been eliminated.
@@ -360,35 +485,6 @@ struct PrintableMoveOperands {
 
 
 std::ostream& operator<<(std::ostream& os, const PrintableMoveOperands& mo);
-
-
-#define INSTRUCTION_SUBKIND_OPERAND_CLASS(SubKind, kOperandKind)        \
-  class SubKind##Operand FINAL : public InstructionOperand {            \
-   public:                                                              \
-    explicit SubKind##Operand(int index)                                \
-        : InstructionOperand(kOperandKind, index) {}                    \
-                                                                        \
-    static SubKind##Operand* New(int index, Zone* zone) {               \
-      return InstructionOperand::New(zone, SubKind##Operand(index));    \
-    }                                                                   \
-                                                                        \
-    static SubKind##Operand* cast(InstructionOperand* op) {             \
-      DCHECK(op->kind() == kOperandKind);                               \
-      return reinterpret_cast<SubKind##Operand*>(op);                   \
-    }                                                                   \
-                                                                        \
-    static const SubKind##Operand* cast(const InstructionOperand* op) { \
-      DCHECK(op->kind() == kOperandKind);                               \
-      return reinterpret_cast<const SubKind##Operand*>(op);             \
-    }                                                                   \
-                                                                        \
-    static SubKind##Operand cast(const InstructionOperand& op) {        \
-      DCHECK(op.kind() == kOperandKind);                                \
-      return *static_cast<const SubKind##Operand*>(&op);                \
-    }                                                                   \
-  };
-INSTRUCTION_OPERAND_LIST(INSTRUCTION_SUBKIND_OPERAND_CLASS)
-#undef INSTRUCTION_SUBKIND_OPERAND_CLASS
 
 
 class ParallelMove FINAL : public ZoneObject {
@@ -426,19 +522,13 @@ struct PrintableParallelMove {
 std::ostream& operator<<(std::ostream& os, const PrintableParallelMove& pm);
 
 
-class PointerMap FINAL : public ZoneObject {
+class ReferenceMap FINAL : public ZoneObject {
  public:
-  explicit PointerMap(Zone* zone)
-      : pointer_operands_(8, zone),
-        untagged_operands_(0, zone),
-        instruction_position_(-1) {}
+  explicit ReferenceMap(Zone* zone)
+      : reference_operands_(8, zone), instruction_position_(-1) {}
 
-  const ZoneList<InstructionOperand*>* GetNormalizedOperands() {
-    for (int i = 0; i < untagged_operands_.length(); ++i) {
-      RemovePointer(untagged_operands_[i]);
-    }
-    untagged_operands_.Clear();
-    return &pointer_operands_;
+  const ZoneVector<InstructionOperand>& reference_operands() const {
+    return reference_operands_;
   }
   int instruction_position() const { return instruction_position_; }
 
@@ -447,21 +537,17 @@ class PointerMap FINAL : public ZoneObject {
     instruction_position_ = pos;
   }
 
-  void RecordPointer(InstructionOperand* op, Zone* zone);
-  void RemovePointer(InstructionOperand* op);
-  void RecordUntagged(InstructionOperand* op, Zone* zone);
+  void RecordReference(const InstructionOperand& op);
 
  private:
-  friend std::ostream& operator<<(std::ostream& os, const PointerMap& pm);
+  friend std::ostream& operator<<(std::ostream& os, const ReferenceMap& pm);
 
-  ZoneList<InstructionOperand*> pointer_operands_;
-  ZoneList<InstructionOperand*> untagged_operands_;
+  ZoneVector<InstructionOperand> reference_operands_;
   int instruction_position_;
 };
 
-std::ostream& operator<<(std::ostream& os, const PointerMap& pm);
+std::ostream& operator<<(std::ostream& os, const ReferenceMap& pm);
 
-// TODO(titzer): s/PointerMap/ReferenceMap/
 class Instruction {
  public:
   size_t OutputCount() const { return OutputCountField::decode(bit_field_); }
@@ -508,7 +594,7 @@ class Instruction {
     return FlagsConditionField::decode(opcode());
   }
 
-  // TODO(titzer): make control and call into flags.
+  // TODO(titzer): make call into a flags.
   static Instruction* New(Zone* zone, InstructionCode opcode) {
     return New(zone, opcode, 0, NULL, 0, NULL, 0, NULL);
   }
@@ -530,22 +616,14 @@ class Instruction {
         opcode, output_count, outputs, input_count, inputs, temp_count, temps);
   }
 
-  // TODO(titzer): another holdover from lithium days; register allocator
-  // should not need to know about control instructions.
-  Instruction* MarkAsControl() {
-    bit_field_ = IsControlField::update(bit_field_, true);
-    return this;
-  }
   Instruction* MarkAsCall() {
     bit_field_ = IsCallField::update(bit_field_, true);
     return this;
   }
-  bool IsControl() const { return IsControlField::decode(bit_field_); }
   bool IsCall() const { return IsCallField::decode(bit_field_); }
-  bool NeedsPointerMap() const { return IsCall(); }
-  bool HasPointerMap() const { return pointer_map_ != NULL; }
+  bool NeedsReferenceMap() const { return IsCall(); }
+  bool HasReferenceMap() const { return reference_map_ != NULL; }
 
-  bool IsGapMoves() const { return opcode() == kGapInstruction; }
   bool IsSourcePosition() const {
     return opcode() == kSourcePositionInstruction;
   }
@@ -553,18 +631,18 @@ class Instruction {
   bool ClobbersRegisters() const { return IsCall(); }
   bool ClobbersTemps() const { return IsCall(); }
   bool ClobbersDoubleRegisters() const { return IsCall(); }
-  PointerMap* pointer_map() const { return pointer_map_; }
+  ReferenceMap* reference_map() const { return reference_map_; }
 
-  void set_pointer_map(PointerMap* map) {
-    DCHECK(NeedsPointerMap());
-    DCHECK(!pointer_map_);
-    pointer_map_ = map;
+  void set_reference_map(ReferenceMap* map) {
+    DCHECK(NeedsReferenceMap());
+    DCHECK(!reference_map_);
+    reference_map_ = map;
   }
 
   void OverwriteWithNop() {
     opcode_ = ArchOpcodeField::encode(kArchNop);
     bit_field_ = 0;
-    pointer_map_ = NULL;
+    reference_map_ = NULL;
   }
 
   bool IsNop() const {
@@ -572,8 +650,37 @@ class Instruction {
            OutputCount() == 0 && TempCount() == 0;
   }
 
+  enum GapPosition {
+    START,
+    END,
+    FIRST_GAP_POSITION = START,
+    LAST_GAP_POSITION = END
+  };
+
+  ParallelMove* GetOrCreateParallelMove(GapPosition pos, Zone* zone) {
+    if (parallel_moves_[pos] == nullptr) {
+      parallel_moves_[pos] = new (zone) ParallelMove(zone);
+    }
+    return parallel_moves_[pos];
+  }
+
+  ParallelMove* GetParallelMove(GapPosition pos) {
+    return parallel_moves_[pos];
+  }
+
+  const ParallelMove* GetParallelMove(GapPosition pos) const {
+    return parallel_moves_[pos];
+  }
+
+  bool AreMovesRedundant() const;
+
+  ParallelMove* const* parallel_moves() const { return &parallel_moves_[0]; }
+  ParallelMove** parallel_moves() { return &parallel_moves_[0]; }
+
  protected:
   explicit Instruction(InstructionCode opcode);
+
+ private:
   Instruction(InstructionCode opcode, size_t output_count,
               InstructionOperand* outputs, size_t input_count,
               InstructionOperand* inputs, size_t temp_count,
@@ -583,11 +690,11 @@ class Instruction {
   typedef BitField<size_t, 8, 16> InputCountField;
   typedef BitField<size_t, 24, 6> TempCountField;
   typedef BitField<bool, 30, 1> IsCallField;
-  typedef BitField<bool, 31, 1> IsControlField;
 
   InstructionCode opcode_;
   uint32_t bit_field_;
-  PointerMap* pointer_map_;
+  ParallelMove* parallel_moves_[2];
+  ReferenceMap* reference_map_;
   InstructionOperand operands_[1];
 
  private:
@@ -600,65 +707,6 @@ struct PrintableInstruction {
   const Instruction* instr_;
 };
 std::ostream& operator<<(std::ostream& os, const PrintableInstruction& instr);
-
-
-// Represents moves inserted before an instruction due to register allocation.
-// TODO(titzer): squash GapInstruction back into Instruction, since essentially
-// every instruction can possibly have moves inserted before it.
-class GapInstruction : public Instruction {
- public:
-  enum InnerPosition {
-    START,
-    END,
-    FIRST_INNER_POSITION = START,
-    LAST_INNER_POSITION = END
-  };
-
-  ParallelMove* GetOrCreateParallelMove(InnerPosition pos, Zone* zone) {
-    if (parallel_moves_[pos] == NULL) {
-      parallel_moves_[pos] = new (zone) ParallelMove(zone);
-    }
-    return parallel_moves_[pos];
-  }
-
-  ParallelMove* GetParallelMove(InnerPosition pos) {
-    return parallel_moves_[pos];
-  }
-
-  const ParallelMove* GetParallelMove(InnerPosition pos) const {
-    return parallel_moves_[pos];
-  }
-
-  bool IsRedundant() const;
-
-  ParallelMove** parallel_moves() { return parallel_moves_; }
-
-  static GapInstruction* New(Zone* zone) {
-    void* buffer = zone->New(sizeof(GapInstruction));
-    return new (buffer) GapInstruction(kGapInstruction);
-  }
-
-  static GapInstruction* cast(Instruction* instr) {
-    DCHECK(instr->IsGapMoves());
-    return static_cast<GapInstruction*>(instr);
-  }
-
-  static const GapInstruction* cast(const Instruction* instr) {
-    DCHECK(instr->IsGapMoves());
-    return static_cast<const GapInstruction*>(instr);
-  }
-
- protected:
-  explicit GapInstruction(InstructionCode opcode) : Instruction(opcode) {
-    parallel_moves_[START] = NULL;
-    parallel_moves_[END] = NULL;
-  }
-
- private:
-  friend std::ostream& operator<<(std::ostream& os,
-                                  const PrintableInstruction& instr);
-  ParallelMove* parallel_moves_[LAST_INNER_POSITION + 1];
-};
 
 
 class SourcePositionInstruction FINAL : public Instruction {
@@ -933,7 +981,7 @@ typedef std::map<int, Constant, std::less<int>,
                  zone_allocator<std::pair<int, Constant> > > ConstantMap;
 
 typedef ZoneDeque<Instruction*> InstructionDeque;
-typedef ZoneDeque<PointerMap*> PointerMapDeque;
+typedef ZoneDeque<ReferenceMap*> ReferenceMapDeque;
 typedef ZoneVector<FrameStateDescriptor*> DeoptimizationVector;
 typedef ZoneVector<InstructionBlock*> InstructionBlocks;
 
@@ -985,19 +1033,13 @@ class InstructionSequence FINAL : public ZoneObject {
   void MarkAsReference(int virtual_register);
   void MarkAsDouble(int virtual_register);
 
-  void AddGapMove(int index, InstructionOperand* from, InstructionOperand* to);
-
-  GapInstruction* GetBlockStart(RpoNumber rpo) const;
+  Instruction* GetBlockStart(RpoNumber rpo) const;
 
   typedef InstructionDeque::const_iterator const_iterator;
   const_iterator begin() const { return instructions_.begin(); }
   const_iterator end() const { return instructions_.end(); }
   const InstructionDeque& instructions() const { return instructions_; }
 
-  GapInstruction* GapAt(int index) const {
-    return GapInstruction::cast(InstructionAt(index));
-  }
-  bool IsGapAt(int index) const { return InstructionAt(index)->IsGapMoves(); }
   Instruction* InstructionAt(int index) const {
     DCHECK(index >= 0);
     DCHECK(index < static_cast<int>(instructions_.size()));
@@ -1005,7 +1047,7 @@ class InstructionSequence FINAL : public ZoneObject {
   }
 
   Isolate* isolate() const { return isolate_; }
-  const PointerMapDeque* pointer_maps() const { return &pointer_maps_; }
+  const ReferenceMapDeque* reference_maps() const { return &reference_maps_; }
   Zone* zone() const { return zone_; }
 
   // Used by the instruction selector while adding instructions.
@@ -1031,15 +1073,28 @@ class InstructionSequence FINAL : public ZoneObject {
   typedef ZoneVector<Constant> Immediates;
   Immediates& immediates() { return immediates_; }
 
-  int AddImmediate(Constant constant) {
+  ImmediateOperand AddImmediate(const Constant& constant) {
+    if (constant.type() == Constant::kInt32) {
+      return ImmediateOperand(ImmediateOperand::INLINE, constant.ToInt32());
+    }
     int index = static_cast<int>(immediates_.size());
     immediates_.push_back(constant);
-    return index;
+    return ImmediateOperand(ImmediateOperand::INDEXED, index);
   }
-  Constant GetImmediate(int index) const {
-    DCHECK(index >= 0);
-    DCHECK(index < static_cast<int>(immediates_.size()));
-    return immediates_[index];
+
+  Constant GetImmediate(const ImmediateOperand* op) const {
+    switch (op->type()) {
+      case ImmediateOperand::INLINE:
+        return Constant(op->inline_value());
+      case ImmediateOperand::INDEXED: {
+        int index = op->indexed_value();
+        DCHECK(index >= 0);
+        DCHECK(index < static_cast<int>(immediates_.size()));
+        return immediates_[index];
+      }
+    }
+    UNREACHABLE();
+    return Constant(static_cast<int32_t>(0));
   }
 
   class StateId {
@@ -1056,12 +1111,7 @@ class InstructionSequence FINAL : public ZoneObject {
   FrameStateDescriptor* GetFrameStateDescriptor(StateId deoptimization_id);
   int GetFrameStateDescriptorCount();
 
-  RpoNumber InputRpo(Instruction* instr, size_t index) {
-    InstructionOperand* operand = instr->InputAt(index);
-    Constant constant = operand->IsImmediate() ? GetImmediate(operand->index())
-                                               : GetConstant(operand->index());
-    return constant.ToRpoNumber();
-  }
+  RpoNumber InputRpo(Instruction* instr, size_t index);
 
  private:
   friend std::ostream& operator<<(std::ostream& os,
@@ -1077,7 +1127,7 @@ class InstructionSequence FINAL : public ZoneObject {
   Immediates immediates_;
   InstructionDeque instructions_;
   int next_virtual_register_;
-  PointerMapDeque pointer_maps_;
+  ReferenceMapDeque reference_maps_;
   VirtualRegisterSet doubles_;
   VirtualRegisterSet references_;
   DeoptimizationVector deoptimization_entries_;

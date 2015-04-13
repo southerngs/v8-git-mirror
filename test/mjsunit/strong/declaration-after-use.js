@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --strong-mode --harmony_rest_parameters --harmony_arrow_functions --harmony_classes --harmony_computed-property_names --harmony_templates
+// Flags: --strong-mode --harmony_rest_parameters --harmony_arrow_functions --harmony_classes --harmony_computed-property_names
 
 // Note that it's essential for these tests that the reference is inside dead
 // code (because we already produce ReferenceErrors for run-time unresolved
@@ -207,6 +207,9 @@ function assertThrowsHelper(code) {
 
   let func5 = (p1, p2) => { p1; p2; };
   func5();
+
+  let func5b = p1 => p1;
+  func5b();
 
   function func6() {
     var1, var2a, var2b, var2c;

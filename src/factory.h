@@ -58,6 +58,9 @@ class Factory FINAL {
   // Create a new boxed value.
   Handle<Box> NewBox(Handle<Object> value);
 
+  // Create a new PrototypeInfo struct.
+  Handle<PrototypeInfo> NewPrototypeInfo();
+
   // Create a pre-tenured empty AccessorPair.
   Handle<AccessorPair> NewAccessorPair();
 
@@ -196,6 +199,14 @@ class Factory FINAL {
   // Create a new cons string object which consists of a pair of strings.
   MUST_USE_RESULT MaybeHandle<String> NewConsString(Handle<String> left,
                                                     Handle<String> right);
+  MUST_USE_RESULT MaybeHandle<String> NewOneByteConsString(
+      int length, Handle<String> left, Handle<String> right);
+  MUST_USE_RESULT MaybeHandle<String> NewTwoByteConsString(
+      int length, Handle<String> left, Handle<String> right);
+  MUST_USE_RESULT MaybeHandle<String> NewRawConsString(Handle<Map> map,
+                                                       int length,
+                                                       Handle<String> left,
+                                                       Handle<String> right);
 
   // Create a new string object which holds a proper substring of a string.
   Handle<String> NewProperSubString(Handle<String> str,
@@ -292,9 +303,7 @@ class Factory FINAL {
 
   Handle<Cell> NewCell(Handle<Object> value);
 
-  Handle<PropertyCell> NewPropertyCellWithHole();
-
-  Handle<PropertyCell> NewPropertyCell(Handle<Object> value);
+  Handle<PropertyCell> NewPropertyCell();
 
   Handle<WeakCell> NewWeakCell(Handle<HeapObject> value);
 
@@ -473,13 +482,14 @@ class Factory FINAL {
   void BecomeJSObject(Handle<JSProxy> object);
   void BecomeJSFunction(Handle<JSProxy> object);
 
-  Handle<JSFunction> NewFunction(Handle<String> name,
-                                 Handle<Code> code,
+  Handle<JSFunction> NewFunction(Handle<String> name, Handle<Code> code,
                                  Handle<Object> prototype,
-                                 bool read_only_prototype = false);
+                                 bool read_only_prototype = false,
+                                 bool is_strict = false);
   Handle<JSFunction> NewFunction(Handle<String> name);
   Handle<JSFunction> NewFunctionWithoutPrototype(Handle<String> name,
-                                                 Handle<Code> code);
+                                                 Handle<Code> code,
+                                                 bool is_strict = false);
 
   Handle<JSFunction> NewFunctionFromSharedFunctionInfo(
       Handle<SharedFunctionInfo> function_info,
@@ -490,7 +500,8 @@ class Factory FINAL {
                                  Handle<Object> prototype, InstanceType type,
                                  int instance_size,
                                  bool read_only_prototype = false,
-                                 bool install_constructor = false);
+                                 bool install_constructor = false,
+                                 bool is_strict = false);
   Handle<JSFunction> NewFunction(Handle<String> name,
                                  Handle<Code> code,
                                  InstanceType type,
@@ -618,8 +629,8 @@ class Factory FINAL {
                                                    MaybeHandle<Code> code);
 
   // Allocate a new type feedback vector
-  Handle<TypeFeedbackVector> NewTypeFeedbackVector(
-      const FeedbackVectorSpec& spec);
+  template <typename Spec>
+  Handle<TypeFeedbackVector> NewTypeFeedbackVector(const Spec* spec);
 
   // Allocates a new JSMessageObject object.
   Handle<JSMessageObject> NewJSMessageObject(

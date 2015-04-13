@@ -22,6 +22,7 @@ class BasicBlock;
 struct CallBuffer;  // TODO(bmeurer): Remove this.
 class FlagsContinuation;
 class Linkage;
+struct SwitchInfo;
 
 typedef ZoneVector<InstructionOperand> InstructionOperandVector;
 
@@ -134,6 +135,10 @@ class InstructionSelector FINAL {
  private:
   friend class OperandGenerator;
 
+  void EmitTableSwitch(const SwitchInfo& sw, InstructionOperand& index_operand);
+  void EmitLookupSwitch(const SwitchInfo& sw,
+                        InstructionOperand& value_operand);
+
   // Inform the instruction selection that {node} was just defined.
   void MarkAsDefined(Node* node);
 
@@ -171,11 +176,8 @@ class InstructionSelector FINAL {
                             bool call_address_immediate);
 
   FrameStateDescriptor* GetFrameStateDescriptor(Node* node);
-  void FillTypeVectorFromStateValues(ZoneVector<MachineType>* parameters,
-                                     Node* state_values);
   void AddFrameStateInputs(Node* state, InstructionOperandVector* inputs,
                            FrameStateDescriptor* descriptor);
-  MachineType GetMachineType(Node* node);
 
   // ===========================================================================
   // ============= Architecture-specific graph covering methods. ===============
@@ -197,6 +199,7 @@ class InstructionSelector FINAL {
 
   void VisitFinish(Node* node);
   void VisitParameter(Node* node);
+  void VisitIfException(Node* node);
   void VisitOsrValue(Node* node);
   void VisitPhi(Node* node);
   void VisitProjection(Node* node);
@@ -204,9 +207,7 @@ class InstructionSelector FINAL {
   void VisitCall(Node* call, BasicBlock* handler);
   void VisitGoto(BasicBlock* target);
   void VisitBranch(Node* input, BasicBlock* tbranch, BasicBlock* fbranch);
-  void VisitSwitch(Node* node, BasicBlock* default_branch,
-                   BasicBlock** case_branches, int32_t* case_values,
-                   size_t case_count, int32_t min_value, int32_t max_value);
+  void VisitSwitch(Node* node, const SwitchInfo& sw);
   void VisitDeoptimize(Node* value);
   void VisitReturn(Node* value);
   void VisitThrow(Node* value);

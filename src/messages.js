@@ -25,6 +25,7 @@ var kMessages = {
   unterminated_regexp:           ["Invalid regular expression: missing /"],
   unterminated_template:         ["Unterminated template literal"],
   unterminated_template_expr:    ["Missing } in template expression"],
+  unterminated_arg_list:         ["missing ) after argument list"],
   regexp_flags:                  ["Cannot supply flags when constructing one RegExp from another"],
   incompatible_method_receiver:  ["Method ", "%0", " called on incompatible receiver ", "%1"],
   multiple_defaults_in_switch:   ["More than one default clause in switch statement"],
@@ -51,6 +52,8 @@ var kMessages = {
   no_setter_in_callback:         ["Cannot set property ", "%0", " of ", "%1", " which has only a getter"],
   apply_non_function:            ["Function.prototype.apply was called on ", "%0", ", which is a ", "%1", " and not a function"],
   apply_wrong_args:              ["Function.prototype.apply: Arguments list has wrong type"],
+  reflect_apply_wrong_args:      ["Reflect.apply: Arguments list has wrong type"],
+  reflect_construct_wrong_args:  ["Reflect.construct: Arguments list has wrong type"],
   flags_getter_non_object:       ["RegExp.prototype.flags getter called on non-object ", "%0"],
   invalid_in_operator_use:       ["Cannot use 'in' operator to search for '", "%0", "' in ", "%1"],
   instanceof_function_expected:  ["Expecting a function in instanceof check, but got ", "%0"],
@@ -156,23 +159,29 @@ var kMessages = {
   template_octal_literal:        ["Octal literals are not allowed in template strings."],
   strict_delete:                 ["Delete of an unqualified identifier in strict mode."],
   strict_delete_property:        ["Cannot delete property '", "%0", "' of ", "%1"],
-  strict_const:                  ["Use of const in strict mode."],
   strict_function:               ["In strict mode code, functions can only be declared at top level or immediately within another function." ],
   strict_read_only_property:     ["Cannot assign to read only property '", "%0", "' of ", "%1"],
   strict_cannot_assign:          ["Cannot assign to read only '", "%0", "' in strict mode"],
+  restricted_function_properties: ["'caller' and 'arguments' are restricted function properties and cannot be accessed in this context."],
   strict_poison_pill:            ["'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"],
   strict_caller:                 ["Illegal access to a strict mode caller function."],
-  strong_ellision:               ["Please don't use arrays with holes in strong mode, use maps instead"],
-  strong_arguments:              ["Please don't use 'arguments' in strong mode, use '...args' instead"],
-  strong_equal:                  ["Please don't use '==' or '!=' in strong mode, use '===' or '!==' instead"],
-  strong_delete:                 ["Please don't use 'delete' in strong mode, use maps or sets instead"],
-  strong_var:                    ["Please don't use 'var' in strong mode, use 'let' or 'const' instead"],
-  strong_for_in:                 ["Please don't use 'for'-'in' loops in strong mode, use 'for'-'of' instead"],
-  strong_empty:                  ["Please don't use empty sub-statements in strong mode, make them explicit with '{}' instead"],
-  strong_use_before_declaration: ["Please declare variable '", "%0", "' before use in strong mode"],
+  strong_ellision:               ["In strong mode, arrays with holes are deprecated, use maps instead"],
+  strong_arguments:              ["In strong mode, 'arguments' is deprecated, use '...args' instead"],
+  strong_undefined:              ["In strong mode, binding or assigning to 'undefined' is deprecated"],
+  strong_equal:                  ["In strong mode, '==' and '!=' are deprecated, use '===' and '!==' instead"],
+  strong_delete:                 ["In strong mode, 'delete' is deprecated, use maps or sets instead"],
+  strong_var:                    ["In strong mode, 'var' is deprecated, use 'let' or 'const' instead"],
+  strong_for_in:                 ["In strong mode, 'for'-'in' loops are deprecated, use 'for'-'of' instead"],
+  strong_empty:                  ["In strong mode, empty sub-statements are deprecated, make them explicit with '{}' instead"],
+  strong_use_before_declaration: ["In strong mode, declaring variable '", "%0", "' before its use is required"],
+  strong_unbound_global:         ["In strong mode, using an undeclared global variable '", "%0", "' is not allowed"],
+  strong_super_call_missing:     ["In strong mode, invoking the super constructor in a subclass is required"],
+  strong_super_call_duplicate:   ["In strong mode, invoking the super constructor multiple times is deprecated"],
+  strong_super_call_nested:      ["In strong mode, invoking the super constructor nested inside another statement or expression is deprecated"],
+  strong_constructor_return_value: ["In strong mode, returning a value from a constructor is deprecated"],
+  strong_constructor_return_misplaced: ["In strong mode, returning from a constructor before its super constructor invocation is deprecated"],
   sloppy_lexical:                ["Block-scoped declarations (let, const, function, class) not yet supported outside strict mode"],
   malformed_arrow_function_parameter_list: ["Malformed arrow function parameter list"],
-  generator_poison_pill:         ["'caller' and 'arguments' properties may not be accessed on generator functions."],
   cant_prevent_ext_external_array_elements: ["Cannot prevent extension of an object with external array elements"],
   redef_external_array_element:  ["Cannot redefine a property of an object with external array elements"],
   const_assign:                  ["Assignment to constant variable."],
@@ -189,7 +198,12 @@ var kMessages = {
   duplicate_proto:               ["Duplicate __proto__ fields are not allowed in object literals"],
   param_after_rest:              ["Rest parameter must be last formal parameter"],
   constructor_noncallable:       ["Class constructors cannot be invoked without 'new'"],
-  array_not_subclassable:        ["Subclassing Arrays is not currently supported."]
+  array_not_subclassable:        ["Subclassing Arrays is not currently supported."],
+  for_in_loop_initializer:       ["for-in loop variable declaration may not have an initializer."],
+  for_of_loop_initializer:       ["for-of loop variable declaration may not have an initializer."],
+  for_inof_loop_multi_bindings:  ["Invalid left-hand side in ", "%0", " loop: Must have a single binding."],
+  bad_getter_arity:              ["Getter must not have any formal parameters."],
+  bad_setter_arity:              ["Setter must have exactly one formal parameter."]
 };
 
 
@@ -235,9 +249,9 @@ function NoSideEffectToString(obj) {
     }
     return str;
   }
-  if (IS_SYMBOL(obj)) return %_CallFunction(obj, SymbolToString);
+  if (IS_SYMBOL(obj)) return %_CallFunction(obj, $symbolToString);
   if (IS_OBJECT(obj)
-      && %GetDataProperty(obj, "toString") === DefaultObjectToString) {
+      && %GetDataProperty(obj, "toString") === ObjectToString) {
     var constructor = %GetDataProperty(obj, "constructor");
     if (typeof constructor == "function") {
       var constructorName = constructor.name;
@@ -289,7 +303,7 @@ function ToStringCheckErrorObject(obj) {
 
 
 function ToDetailString(obj) {
-  if (obj != null && IS_OBJECT(obj) && obj.toString === DefaultObjectToString) {
+  if (obj != null && IS_OBJECT(obj) && obj.toString === ObjectToString) {
     var constructor = obj.constructor;
     if (typeof constructor == "function") {
       var constructorName = constructor.name;
@@ -345,7 +359,6 @@ function GetSourceLine(message) {
   var start_position = %MessageGetStartPosition(message);
   var location = script.locationFromPosition(start_position, true);
   if (location == null) return "";
-  location.restrict();
   return location.sourceText();
 }
 
@@ -403,26 +416,34 @@ function MakeReferenceErrorEmbedded(type, arg) {
        else the line number.
  */
 function ScriptLineFromPosition(position) {
+  var lower = 0;
+  var upper = this.lineCount() - 1;
   var line_ends = this.line_ends;
-  var upper = line_ends.length - 1;
-  if (upper < 0) return -1;
 
   // We'll never find invalid positions so bail right away.
-  if (position > line_ends[upper]) return -1;
-  if (position <= line_ends[0]) return 0;
+  if (position > line_ends[upper]) {
+    return -1;
+  }
 
-  var lower = 1;
-  // Binary search.
-  while (true) {
-    var mid = (upper + lower) >> 1;
-    if (position <= line_ends[mid - 1]) {
-      upper = mid - 1;
-    } else if (position > line_ends[mid]){
-      lower = mid + 1;
+  // This means we don't have to safe-guard indexing line_ends[i - 1].
+  if (position <= line_ends[0]) {
+    return 0;
+  }
+
+  // Binary search to find line # from position range.
+  while (upper >= 1) {
+    var i = (lower + upper) >> 1;
+
+    if (position > line_ends[i]) {
+      lower = i + 1;
+    } else if (position <= line_ends[i - 1]) {
+      upper = i - 1;
     } else {
-      return mid;
+      return i;
     }
   }
+
+  return -1;
 }
 
 /**
@@ -581,8 +602,8 @@ function ScriptLineCount() {
 
 
 /**
- * If sourceURL comment is available and script starts at zero returns sourceURL
- * comment contents. Otherwise, script name is returned. See
+ * If sourceURL comment is available returns sourceURL comment contents.
+ * Otherwise, script name is returned. See
  * http://fbug.googlecode.com/svn/branches/firebug1.1/docs/ReleaseNotes_1.1.txt
  * and Source Map Revision 3 proposal for details on using //# sourceURL and
  * deprecated //@ sourceURL comment to identify scripts that don't have name.
@@ -591,20 +612,20 @@ function ScriptLineCount() {
  * deprecated //@ sourceURL comment otherwise.
  */
 function ScriptNameOrSourceURL() {
-  if (this.line_offset > 0 || this.column_offset > 0) {
-    return this.name;
-  }
-  if (this.source_url) {
-    return this.source_url;
-  }
+  if (this.source_url) return this.source_url;
   return this.name;
 }
 
 
-SetUpLockedPrototype(Script,
-  $Array("source", "name", "source_url", "source_mapping_url", "line_ends",
-         "line_offset", "column_offset"),
-  $Array(
+SetUpLockedPrototype(Script, [
+    "source",
+    "name",
+    "source_url",
+    "source_mapping_url",
+    "line_ends",
+    "line_offset",
+    "column_offset"
+  ], [
     "lineFromPosition", ScriptLineFromPosition,
     "locationFromPosition", ScriptLocationFromPosition,
     "locationFromLine", ScriptLocationFromLine,
@@ -612,7 +633,7 @@ SetUpLockedPrototype(Script,
     "sourceLine", ScriptSourceLine,
     "lineCount", ScriptLineCount,
     "nameOrSourceURL", ScriptNameOrSourceURL
-  )
+  ]
 );
 
 
@@ -646,57 +667,6 @@ function SourceLocation(script, position, line, column, start, end) {
   this.end = end;
 }
 
-var kLineLengthLimit = 78;
-
-/**
- * Restrict source location start and end positions to make the source slice
- * no more that a certain number of characters wide.
- * @param {number} opt_limit The with limit of the source text with a default
- *     of 78
- * @param {number} opt_before The number of characters to prefer before the
- *     position with a default value of 10 less that the limit
- */
-function SourceLocationRestrict(opt_limit, opt_before) {
-  // Find the actual limit to use.
-  var limit;
-  var before;
-  if (!IS_UNDEFINED(opt_limit)) {
-    limit = opt_limit;
-  } else {
-    limit = kLineLengthLimit;
-  }
-  if (!IS_UNDEFINED(opt_before)) {
-    before = opt_before;
-  } else {
-    // If no before is specified center for small limits and perfer more source
-    // before the the position that after for longer limits.
-    if (limit <= 20) {
-      before = $floor(limit / 2);
-    } else {
-      before = limit - 10;
-    }
-  }
-  if (before >= limit) {
-    before = limit - 1;
-  }
-
-  // If the [start, end[ interval is too big we restrict
-  // it in one or both ends. We make sure to always produce
-  // restricted intervals of maximum allowed size.
-  if (this.end - this.start > limit) {
-    var start_limit = this.position - before;
-    var end_limit = this.position + limit - before;
-    if (this.start < start_limit && end_limit < this.end) {
-      this.start = start_limit;
-      this.end = end_limit;
-    } else if (this.start < start_limit) {
-      this.start = this.end - limit;
-    } else {
-      this.end = this.start + limit;
-    }
-  }
-}
-
 
 /**
  * Get the source text for a SourceLocation
@@ -712,11 +682,8 @@ function SourceLocationSourceText() {
 
 
 SetUpLockedPrototype(SourceLocation,
-  $Array("script", "position", "line", "column", "start", "end"),
-  $Array(
-    "restrict", SourceLocationRestrict,
-    "sourceText", SourceLocationSourceText
- )
+  ["script", "position", "line", "column", "start", "end"],
+  ["sourceText", SourceLocationSourceText]
 );
 
 
@@ -759,8 +726,8 @@ function SourceSliceSourceText() {
 }
 
 SetUpLockedPrototype(SourceSlice,
-  $Array("script", "from_line", "to_line", "from_position", "to_position"),
-  $Array("sourceText", SourceSliceSourceText)
+  ["script", "from_line", "to_line", "from_position", "to_position"],
+  ["sourceText", SourceSliceSourceText]
 );
 
 
@@ -771,7 +738,6 @@ function GetPositionInLine(message) {
   var start_position = %MessageGetStartPosition(message);
   var location = script.locationFromPosition(start_position, false);
   if (location == null) return -1;
-  location.restrict();
   return start_position - location.start;
 }
 
@@ -833,16 +799,13 @@ function CallSiteGetFunction() {
 
 function CallSiteGetFunctionName() {
   // See if the function knows its own name
-  var name = GET_PRIVATE(this, CallSiteFunctionKey).name;
-  if (name) {
-    return name;
-  }
-  name = %FunctionGetInferredName(GET_PRIVATE(this, CallSiteFunctionKey));
+  var fun = GET_PRIVATE(this, CallSiteFunctionKey);
+  var name = %FunctionGetDebugName(fun);
   if (name) {
     return name;
   }
   // Maybe this is an evaluation?
-  var script = %FunctionGetScript(GET_PRIVATE(this, CallSiteFunctionKey));
+  var script = %FunctionGetScript(fun);
   if (script && script.compilation_type == COMPILATION_TYPE_EVAL) {
     return "eval";
   }
@@ -995,7 +958,7 @@ function CallSiteToString() {
   return line;
 }
 
-SetUpLockedPrototype(CallSite, $Array("receiver", "fun", "pos"), $Array(
+SetUpLockedPrototype(CallSite, ["receiver", "fun", "pos"], [
   "getThis", CallSiteGetThis,
   "getTypeName", CallSiteGetTypeName,
   "isToplevel", CallSiteIsToplevel,
@@ -1012,7 +975,7 @@ SetUpLockedPrototype(CallSite, $Array("receiver", "fun", "pos"), $Array(
   "getPosition", CallSiteGetPosition,
   "isConstructor", CallSiteIsConstructor,
   "toString", CallSiteToString
-));
+]);
 
 
 function FormatEvalOrigin(script) {
@@ -1218,10 +1181,11 @@ function SetUpError() {
       %FunctionSetPrototype(f, new ErrorPrototype());
     } else {
       %FunctionSetPrototype(f, new $Error());
+      %InternalSetPrototype(f, $Error);
     }
     %FunctionSetInstanceClassName(f, 'Error');
     %AddNamedProperty(f.prototype, 'constructor', f, DONT_ENUM);
-    %AddNamedProperty(f.prototype, "name", name, DONT_ENUM);
+    %AddNamedProperty(f.prototype, 'name', name, DONT_ENUM);
     %SetCode(f, function(m) {
       if (%_IsConstructCall()) {
         try { captureStackTrace(this, f); } catch (e) { }

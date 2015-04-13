@@ -76,16 +76,20 @@ InstructionSelectorTest::Stream InstructionSelectorTest::StreamBuilder::Build(
       InstructionOperand* output = instr->OutputAt(i);
       EXPECT_NE(InstructionOperand::IMMEDIATE, output->kind());
       if (output->IsConstant()) {
-        s.constants_.insert(std::make_pair(
-            output->index(), sequence.GetConstant(output->index())));
+        int vreg = ConstantOperand::cast(output)->virtual_register();
+        s.constants_.insert(std::make_pair(vreg, sequence.GetConstant(vreg)));
       }
     }
     for (size_t i = 0; i < instr->InputCount(); ++i) {
       InstructionOperand* input = instr->InputAt(i);
       EXPECT_NE(InstructionOperand::CONSTANT, input->kind());
       if (input->IsImmediate()) {
-        s.immediates_.insert(std::make_pair(
-            input->index(), sequence.GetImmediate(input->index())));
+        auto imm = ImmediateOperand::cast(input);
+        if (imm->type() == ImmediateOperand::INDEXED) {
+          int index = imm->indexed_value();
+          s.immediates_.insert(
+              std::make_pair(index, sequence.GetImmediate(imm)));
+        }
       }
     }
     s.instructions_.push_back(instr);
@@ -347,9 +351,13 @@ TARGET_TEST_F(InstructionSelectorTest, CallJSFunctionWithDeopt) {
   Node* receiver = m.Parameter(1);
   Node* context = m.Parameter(2);
 
-  Node* parameters = m.NewNode(m.common()->StateValues(1), m.Int32Constant(1));
-  Node* locals = m.NewNode(m.common()->StateValues(0));
-  Node* stack = m.NewNode(m.common()->StateValues(0));
+  ZoneVector<MachineType> int32_type(1, kMachInt32, zone());
+  ZoneVector<MachineType> empty_types(zone());
+
+  Node* parameters =
+      m.NewNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(1));
+  Node* locals = m.NewNode(m.common()->TypedStateValues(&empty_types));
+  Node* stack = m.NewNode(m.common()->TypedStateValues(&empty_types));
   Node* context_dummy = m.Int32Constant(0);
 
   Node* state_node = m.NewNode(
@@ -387,10 +395,17 @@ TARGET_TEST_F(InstructionSelectorTest, CallFunctionStubWithDeopt) {
   Node* receiver = m.Parameter(1);
   Node* context = m.Int32Constant(1);  // Context is ignored.
 
+  ZoneVector<MachineType> int32_type(1, kMachInt32, zone());
+  ZoneVector<MachineType> float64_type(1, kMachFloat64, zone());
+  ZoneVector<MachineType> tagged_type(1, kMachAnyTagged, zone());
+
   // Build frame state for the state before the call.
-  Node* parameters = m.NewNode(m.common()->StateValues(1), m.Int32Constant(43));
-  Node* locals = m.NewNode(m.common()->StateValues(1), m.Float64Constant(0.5));
-  Node* stack = m.NewNode(m.common()->StateValues(1), m.UndefinedConstant());
+  Node* parameters =
+      m.NewNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(43));
+  Node* locals = m.NewNode(m.common()->TypedStateValues(&float64_type),
+                           m.Float64Constant(0.5));
+  Node* stack = m.NewNode(m.common()->TypedStateValues(&tagged_type),
+                          m.UndefinedConstant());
 
   Node* context_sentinel = m.Int32Constant(0);
   Node* frame_state_before = m.NewNode(
@@ -473,10 +488,17 @@ TARGET_TEST_F(InstructionSelectorTest,
   Node* receiver = m.Parameter(1);
   Node* context = m.Int32Constant(66);
 
+  ZoneVector<MachineType> int32_type(1, kMachInt32, zone());
+  ZoneVector<MachineType> int32x2_type(2, kMachInt32, zone());
+  ZoneVector<MachineType> float64_type(1, kMachFloat64, zone());
+
   // Build frame state for the state before the call.
-  Node* parameters = m.NewNode(m.common()->StateValues(1), m.Int32Constant(63));
-  Node* locals = m.NewNode(m.common()->StateValues(1), m.Int32Constant(64));
-  Node* stack = m.NewNode(m.common()->StateValues(1), m.Int32Constant(65));
+  Node* parameters =
+      m.NewNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(63));
+  Node* locals =
+      m.NewNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(64));
+  Node* stack =
+      m.NewNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(65));
   Node* frame_state_parent =
       m.NewNode(m.common()->FrameState(JS_FRAME, bailout_id_parent,
                                        OutputFrameStateCombine::Ignore()),
@@ -484,11 +506,11 @@ TARGET_TEST_F(InstructionSelectorTest,
 
   Node* context2 = m.Int32Constant(46);
   Node* parameters2 =
-      m.NewNode(m.common()->StateValues(1), m.Int32Constant(43));
-  Node* locals2 =
-      m.NewNode(m.common()->StateValues(1), m.Float64Constant(0.25));
-  Node* stack2 = m.NewNode(m.common()->StateValues(2), m.Int32Constant(44),
-                           m.Int32Constant(45));
+      m.NewNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(43));
+  Node* locals2 = m.NewNode(m.common()->TypedStateValues(&float64_type),
+                            m.Float64Constant(0.25));
+  Node* stack2 = m.NewNode(m.common()->TypedStateValues(&int32x2_type),
+                           m.Int32Constant(44), m.Int32Constant(45));
   Node* frame_state_before =
       m.NewNode(m.common()->FrameState(JS_FRAME, bailout_id_before,
                                        OutputFrameStateCombine::Push()),

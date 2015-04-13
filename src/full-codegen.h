@@ -156,6 +156,11 @@ class FullCodeGenerator: public AstVisitor {
       return previous_;
     }
 
+    // Like the Exit() method above, but limited to accumulating stack depth.
+    virtual NestedStatement* AccumulateDepth(int* stack_depth) {
+      return previous_;
+    }
+
    protected:
     MacroAssembler* masm() { return codegen_->masm(); }
 
@@ -225,22 +230,36 @@ class FullCodeGenerator: public AstVisitor {
   // The try block of a try/catch statement.
   class TryCatch : public NestedStatement {
    public:
-    explicit TryCatch(FullCodeGenerator* codegen) : NestedStatement(codegen) {
-    }
+    static const int kElementCount = TryBlockConstant::kElementCount;
+
+    explicit TryCatch(FullCodeGenerator* codegen) : NestedStatement(codegen) {}
     virtual ~TryCatch() {}
 
-    virtual NestedStatement* Exit(int* stack_depth, int* context_length);
+    virtual NestedStatement* Exit(int* stack_depth, int* context_length) {
+      *stack_depth += kElementCount;
+      return previous_;
+    }
+    virtual NestedStatement* AccumulateDepth(int* stack_depth) {
+      *stack_depth += kElementCount;
+      return previous_;
+    }
   };
 
   // The try block of a try/finally statement.
   class TryFinally : public NestedStatement {
    public:
+    static const int kElementCount = TryBlockConstant::kElementCount;
+
     TryFinally(FullCodeGenerator* codegen, Label* finally_entry)
         : NestedStatement(codegen), finally_entry_(finally_entry) {
     }
     virtual ~TryFinally() {}
 
     virtual NestedStatement* Exit(int* stack_depth, int* context_length);
+    virtual NestedStatement* AccumulateDepth(int* stack_depth) {
+      *stack_depth += kElementCount;
+      return previous_;
+    }
 
    private:
     Label* finally_entry_;
@@ -251,10 +270,14 @@ class FullCodeGenerator: public AstVisitor {
    public:
     static const int kElementCount = 3;
 
-    explicit Finally(FullCodeGenerator* codegen) : NestedStatement(codegen) { }
+    explicit Finally(FullCodeGenerator* codegen) : NestedStatement(codegen) {}
     virtual ~Finally() {}
 
     virtual NestedStatement* Exit(int* stack_depth, int* context_length) {
+      *stack_depth += kElementCount;
+      return previous_;
+    }
+    virtual NestedStatement* AccumulateDepth(int* stack_depth) {
       *stack_depth += kElementCount;
       return previous_;
     }
@@ -271,6 +294,10 @@ class FullCodeGenerator: public AstVisitor {
     virtual ~ForIn() {}
 
     virtual NestedStatement* Exit(int* stack_depth, int* context_length) {
+      *stack_depth += kElementCount;
+      return previous_;
+    }
+    virtual NestedStatement* AccumulateDepth(int* stack_depth) {
       *stack_depth += kElementCount;
       return previous_;
     }
@@ -531,7 +558,8 @@ class FullCodeGenerator: public AstVisitor {
   F(RegExpConstructResult)                \
   F(GetFromCache)                         \
   F(NumberToString)                       \
-  F(DebugIsActive)
+  F(DebugIsActive)                        \
+  F(CallSuperWithSpread)
 
 #define GENERATOR_DECLARATION(Name) void Emit##Name(CallRuntime* call);
   FOR_EACH_FULL_CODE_INTRINSIC(GENERATOR_DECLARATION)
@@ -561,6 +589,10 @@ class FullCodeGenerator: public AstVisitor {
   // Platform-specific support for allocating a new closure based on
   // the given function info.
   void EmitNewClosure(Handle<SharedFunctionInfo> info, bool pretenure);
+
+  // Re-usable portions of CallRuntime
+  void EmitLoadJSRuntimeFunction(CallRuntime* expr);
+  void EmitCallJSRuntimeFunction(CallRuntime* expr);
 
   // Platform-specific support for compiling assignments.
 
@@ -659,6 +691,7 @@ class FullCodeGenerator: public AstVisitor {
   void EmitSetHomeObjectIfNeeded(Expression* initializer, int offset);
 
   void EmitLoadSuperConstructor();
+  void EmitInitializeThisAfterSuper(SuperReference* super_ref);
 
   void CallIC(Handle<Code> code,
               TypeFeedbackId id = TypeFeedbackId::None());
@@ -675,6 +708,8 @@ class FullCodeGenerator: public AstVisitor {
   void SetSourcePosition(int pos);
 
   // Non-local control flow support.
+  void EnterTryBlock(int handler_index, Label* handler);
+  void ExitTryBlock(int handler_index);
   void EnterFinallyBlock();
   void ExitFinallyBlock();
 
@@ -686,7 +721,7 @@ class FullCodeGenerator: public AstVisitor {
     loop_depth_--;
   }
 
-  MacroAssembler* masm() { return masm_; }
+  MacroAssembler* masm() const { return masm_; }
 
   class ExpressionContext;
   const ExpressionContext* context() { return context_; }
@@ -730,7 +765,10 @@ class FullCodeGenerator: public AstVisitor {
   void PopulateDeoptimizationData(Handle<Code> code);
   void PopulateTypeFeedbackInfo(Handle<Code> code);
 
-  Handle<FixedArray> handler_table() { return handler_table_; }
+  bool MustCreateObjectLiteralWithRuntime(ObjectLiteral* expr) const;
+  bool MustCreateArrayLiteralWithRuntime(ArrayLiteral* expr) const;
+
+  Handle<HandlerTable> handler_table() { return handler_table_; }
 
   struct BailoutEntry {
     BailoutId id;
@@ -948,7 +986,7 @@ class FullCodeGenerator: public AstVisitor {
   ZoneList<BailoutEntry> bailout_entries_;
   ZoneList<BackEdgeEntry> back_edges_;
   int ic_total_count_;
-  Handle<FixedArray> handler_table_;
+  Handle<HandlerTable> handler_table_;
   Handle<Cell> profiling_counter_;
   bool generate_debug_code_;
 

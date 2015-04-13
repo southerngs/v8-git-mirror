@@ -71,6 +71,14 @@ class Arm64OperandConverter FINAL : public InstructionOperandConverter {
         return Operand(InputRegister32(index), ASR, InputInt5(index + 1));
       case kMode_Operand2_R_ROR_I:
         return Operand(InputRegister32(index), ROR, InputInt5(index + 1));
+      case kMode_Operand2_R_UXTB:
+        return Operand(InputRegister32(index), UXTB);
+      case kMode_Operand2_R_UXTH:
+        return Operand(InputRegister32(index), UXTH);
+      case kMode_Operand2_R_SXTB:
+        return Operand(InputRegister32(index), SXTB);
+      case kMode_Operand2_R_SXTH:
+        return Operand(InputRegister32(index), SXTH);
       case kMode_MRI:
       case kMode_MRR:
         break;
@@ -91,6 +99,14 @@ class Arm64OperandConverter FINAL : public InstructionOperandConverter {
         return Operand(InputRegister64(index), ASR, InputInt6(index + 1));
       case kMode_Operand2_R_ROR_I:
         return Operand(InputRegister64(index), ROR, InputInt6(index + 1));
+      case kMode_Operand2_R_UXTB:
+        return Operand(InputRegister64(index), UXTB);
+      case kMode_Operand2_R_UXTH:
+        return Operand(InputRegister64(index), UXTH);
+      case kMode_Operand2_R_SXTB:
+        return Operand(InputRegister64(index), SXTB);
+      case kMode_Operand2_R_SXTH:
+        return Operand(InputRegister64(index), SXTH);
       case kMode_MRI:
       case kMode_MRR:
         break;
@@ -107,6 +123,10 @@ class Arm64OperandConverter FINAL : public InstructionOperandConverter {
       case kMode_Operand2_R_LSR_I:
       case kMode_Operand2_R_ASR_I:
       case kMode_Operand2_R_ROR_I:
+      case kMode_Operand2_R_UXTB:
+      case kMode_Operand2_R_UXTH:
+      case kMode_Operand2_R_SXTB:
+      case kMode_Operand2_R_SXTH:
         break;
       case kMode_MRI:
         *first_index += 2;
@@ -168,7 +188,8 @@ class Arm64OperandConverter FINAL : public InstructionOperandConverter {
     DCHECK(!op->IsDoubleRegister());
     DCHECK(op->IsStackSlot() || op->IsDoubleStackSlot());
     // The linkage computes where all spill slots are located.
-    FrameOffset offset = linkage()->GetFrameOffset(op->index(), frame(), 0);
+    FrameOffset offset = linkage()->GetFrameOffset(
+        AllocatedOperand::cast(op)->index(), frame(), 0);
     return MemOperand(offset.from_stack_pointer() ? masm->StackPointer() : fp,
                       offset.offset());
   }
@@ -588,6 +609,10 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       __ Ubfx(i.OutputRegister32(), i.InputRegister32(0), i.InputInt8(1),
               i.InputInt8(2));
       break;
+    case kArm64Bfi:
+      __ Bfi(i.OutputRegister(), i.InputRegister(1), i.InputInt6(2),
+             i.InputInt6(3));
+      break;
     case kArm64TestAndBranch32:
     case kArm64TestAndBranch:
       // Pseudo instructions turned into tbz/tbnz in AssembleArchBranch.
@@ -596,27 +621,22 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       // Pseudo instruction turned into cbz/cbnz in AssembleArchBranch.
       break;
     case kArm64Claim: {
-      int words = MiscField::decode(instr->opcode());
-      __ Claim(words);
+      __ Claim(i.InputInt32(0));
       break;
     }
     case kArm64Poke: {
-      int slot = MiscField::decode(instr->opcode());
-      Operand operand(slot * kPointerSize);
+      Operand operand(i.InputInt32(1) * kPointerSize);
       __ Poke(i.InputRegister(0), operand);
       break;
     }
-    case kArm64PokePairZero: {
-      // TODO(dcarney): test slot offset and register order.
-      int slot = MiscField::decode(instr->opcode()) - 1;
-      __ PokePair(i.InputRegister(0), xzr, slot * kPointerSize);
-      break;
-    }
     case kArm64PokePair: {
-      int slot = MiscField::decode(instr->opcode()) - 1;
+      int slot = i.InputInt32(2) - 1;
       __ PokePair(i.InputRegister(1), i.InputRegister(0), slot * kPointerSize);
       break;
     }
+    case kArm64Clz32:
+      __ Clz(i.OutputRegister32(), i.InputRegister32(0));
+      break;
     case kArm64Cmp:
       __ Cmp(i.InputRegister(0), i.InputOperand(1));
       break;
@@ -634,6 +654,46 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       break;
     case kArm64Tst32:
       __ Tst(i.InputRegister32(0), i.InputOperand32(1));
+      break;
+    case kArm64Float32Cmp:
+      if (instr->InputAt(1)->IsDoubleRegister()) {
+        __ Fcmp(i.InputFloat32Register(0), i.InputFloat32Register(1));
+      } else {
+        DCHECK(instr->InputAt(1)->IsImmediate());
+        // 0.0 is the only immediate supported by fcmp instructions.
+        DCHECK(i.InputDouble(1) == 0.0);
+        __ Fcmp(i.InputFloat32Register(0), i.InputDouble(1));
+      }
+      break;
+    case kArm64Float32Add:
+      __ Fadd(i.OutputFloat32Register(), i.InputFloat32Register(0),
+              i.InputFloat32Register(1));
+      break;
+    case kArm64Float32Sub:
+      __ Fsub(i.OutputFloat32Register(), i.InputFloat32Register(0),
+              i.InputFloat32Register(1));
+      break;
+    case kArm64Float32Mul:
+      __ Fmul(i.OutputFloat32Register(), i.InputFloat32Register(0),
+              i.InputFloat32Register(1));
+      break;
+    case kArm64Float32Div:
+      __ Fdiv(i.OutputFloat32Register(), i.InputFloat32Register(0),
+              i.InputFloat32Register(1));
+      break;
+    case kArm64Float32Max:
+      __ Fmax(i.OutputFloat32Register(), i.InputFloat32Register(0),
+              i.InputFloat32Register(1));
+      break;
+    case kArm64Float32Min:
+      __ Fmin(i.OutputFloat32Register(), i.InputFloat32Register(0),
+              i.InputFloat32Register(1));
+      break;
+    case kArm64Float32Abs:
+      __ Fabs(i.OutputFloat32Register(), i.InputFloat32Register(0));
+      break;
+    case kArm64Float32Sqrt:
+      __ Fsqrt(i.OutputFloat32Register(), i.InputFloat32Register(0));
       break;
     case kArm64Float64Cmp:
       if (instr->InputAt(1)->IsDoubleRegister()) {
@@ -672,6 +732,20 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
                        0, 2);
       break;
     }
+    case kArm64Float64Max:
+      __ Fmax(i.OutputDoubleRegister(), i.InputDoubleRegister(0),
+              i.InputDoubleRegister(1));
+      break;
+    case kArm64Float64Min:
+      __ Fmin(i.OutputDoubleRegister(), i.InputDoubleRegister(0),
+              i.InputDoubleRegister(1));
+      break;
+    case kArm64Float64Abs:
+      __ Fabs(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
+      break;
+    case kArm64Float64Neg:
+      __ Fneg(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
+      break;
     case kArm64Float64Sqrt:
       __ Fsqrt(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
       break;
@@ -697,10 +771,12 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       __ Fmov(i.OutputRegister32(), i.InputFloat32Register(0));
       break;
     case kArm64Float64ExtractHighWord32:
+      // TODO(arm64): This should use MOV (to general) when NEON is supported.
       __ Fmov(i.OutputRegister(), i.InputFloat64Register(0));
       __ Lsr(i.OutputRegister(), i.OutputRegister(), 32);
       break;
     case kArm64Float64InsertLowWord32: {
+      // TODO(arm64): This should use MOV (from general) when NEON is supported.
       UseScratchRegisterScope scope(masm());
       Register tmp = scope.AcquireX();
       __ Fmov(tmp, i.InputFloat64Register(0));
@@ -709,11 +785,16 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       break;
     }
     case kArm64Float64InsertHighWord32: {
+      // TODO(arm64): This should use MOV (from general) when NEON is supported.
       UseScratchRegisterScope scope(masm());
       Register tmp = scope.AcquireX();
       __ Fmov(tmp.W(), i.InputFloat32Register(0));
       __ Bfi(tmp, i.InputRegister(1), 32, 32);
       __ Fmov(i.OutputFloat64Register(), tmp);
+      break;
+    }
+    case kArm64Float64MoveU64: {
+      __ Fmov(i.OutputFloat64Register(), i.InputRegister(0));
       break;
     }
     case kArm64Ldrb:
@@ -818,7 +899,7 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       ASSEMBLE_CHECKED_STORE_FLOAT(64);
       break;
   }
-}
+}  // NOLINT(readability/fn_size)
 
 
 // Assemble branches after this instruction.
@@ -969,6 +1050,8 @@ void CodeGenerator::AssemblePrologue() {
     // remaining stack slots.
     if (FLAG_code_comments) __ RecordComment("-- OSR entrypoint --");
     osr_pc_offset_ = __ pc_offset();
+    // TODO(titzer): cannot address target function == local #-1
+    __ ldr(x1, MemOperand(fp, JavaScriptFrameConstants::kFunctionOffset));
     DCHECK(stack_slots >= frame()->GetOsrStackSlotCount());
     stack_slots -= frame()->GetOsrStackSlotCount();
   }
@@ -1044,7 +1127,21 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
       Register dst = destination->IsRegister() ? g.ToRegister(destination)
                                                : scope.AcquireX();
       if (src.type() == Constant::kHeapObject) {
-        __ LoadObject(dst, src.ToHeapObject());
+        Handle<HeapObject> src_object = src.ToHeapObject();
+        if (info()->IsOptimizing() &&
+            src_object.is_identical_to(info()->context())) {
+          // Loading the context from the frame is way cheaper than
+          // materializing the actual context heap object address.
+          __ Ldr(dst, MemOperand(fp, StandardFrameConstants::kContextOffset));
+        } else if (info()->IsOptimizing() &&
+                   src_object.is_identical_to(info()->closure())) {
+          // Loading the JSFunction from the frame is way cheaper than
+          // materializing the actual JSFunction heap object address.
+          __ Ldr(dst,
+                 MemOperand(fp, JavaScriptFrameConstants::kFunctionOffset));
+        } else {
+          __ LoadObject(dst, src_object);
+        }
       } else {
         __ Mov(dst, g.ToImmediate(source));
       }

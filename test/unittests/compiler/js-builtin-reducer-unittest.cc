@@ -62,58 +62,6 @@ Type* const kNumberTypes[] = {
 
 
 // -----------------------------------------------------------------------------
-// Math.abs
-
-
-TEST_F(JSBuiltinReducerTest, MathAbs) {
-  Handle<JSFunction> f = MathFunction("abs");
-
-  TRACED_FOREACH(Type*, t0, kNumberTypes) {
-    Node* p0 = Parameter(t0, 0);
-    Node* fun = HeapConstant(Unique<HeapObject>::CreateUninitialized(f));
-    Node* call =
-        graph()->NewNode(javascript()->CallFunction(3, NO_CALL_FUNCTION_FLAGS),
-                         fun, UndefinedConstant(), p0);
-    Reduction r = Reduce(call);
-
-    if (t0->Is(Type::Unsigned32())) {
-      ASSERT_TRUE(r.Changed());
-      EXPECT_THAT(r.replacement(), p0);
-    } else {
-      Capture<Node*> branch;
-      ASSERT_TRUE(r.Changed());
-      EXPECT_THAT(
-          r.replacement(),
-          IsSelect(kMachNone,
-                   IsNumberLessThan(IsNumberConstant(BitEq(0.0)), p0), p0,
-                   IsNumberSubtract(IsNumberConstant(BitEq(0.0)), p0)));
-    }
-  }
-}
-
-
-// -----------------------------------------------------------------------------
-// Math.sqrt
-
-
-TEST_F(JSBuiltinReducerTest, MathSqrt) {
-  Handle<JSFunction> f = MathFunction("sqrt");
-
-  TRACED_FOREACH(Type*, t0, kNumberTypes) {
-    Node* p0 = Parameter(t0, 0);
-    Node* fun = HeapConstant(Unique<HeapObject>::CreateUninitialized(f));
-    Node* call =
-        graph()->NewNode(javascript()->CallFunction(3, NO_CALL_FUNCTION_FLAGS),
-                         fun, UndefinedConstant(), p0);
-    Reduction r = Reduce(call);
-
-    ASSERT_TRUE(r.Changed());
-    EXPECT_THAT(r.replacement(), IsFloat64Sqrt(p0));
-  }
-}
-
-
-// -----------------------------------------------------------------------------
 // Math.max
 
 
@@ -164,7 +112,7 @@ TEST_F(JSBuiltinReducerTest, MathMax2) {
       if (t0->Is(Type::Integral32()) && t1->Is(Type::Integral32())) {
         ASSERT_TRUE(r.Changed());
         EXPECT_THAT(r.replacement(),
-                    IsSelect(kMachNone, IsNumberLessThan(p1, p0), p1, p0));
+                    IsSelect(kMachNone, IsNumberLessThan(p1, p0), p0, p1));
       } else {
         ASSERT_FALSE(r.Changed());
         EXPECT_EQ(IrOpcode::kJSCallFunction, call->opcode());

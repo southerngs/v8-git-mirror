@@ -42,7 +42,6 @@
 #include "src/assembler.h"
 #include "src/compiler.h"
 #include "src/isolate.h"
-#include "src/serialize.h"
 
 namespace v8 {
 namespace internal {
@@ -529,6 +528,11 @@ class Assembler : public AssemblerBase {
       Address instruction_payload, Code* code, Address target) {
     set_target_address_at(instruction_payload, code, target);
   }
+
+  // This sets the internal reference at the pc.
+  inline static void deserialization_set_target_internal_reference_at(
+      Address pc, Address target,
+      RelocInfo::Mode mode = RelocInfo::INTERNAL_REFERENCE);
 
   static const int kSpecialTargetSize = kPointerSize;
 

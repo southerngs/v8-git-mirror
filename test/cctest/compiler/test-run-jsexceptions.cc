@@ -31,17 +31,14 @@ TEST(ThrowMessagePosition) {
   v8::Handle<v8::Message> message;
 
   message = T.CheckThrowsReturnMessage(T.Val(1), T.undefined());
-  CHECK(!message.IsEmpty());
   CHECK_EQ(2, message->GetLineNumber());
   CHECK_EQ(40, message->GetStartPosition());
 
   message = T.CheckThrowsReturnMessage(T.Val(2), T.undefined());
-  CHECK(!message.IsEmpty());
   CHECK_EQ(3, message->GetLineNumber());
   CHECK_EQ(67, message->GetStartPosition());
 
   message = T.CheckThrowsReturnMessage(T.Val(3), T.undefined());
-  CHECK(!message.IsEmpty());
   CHECK_EQ(4, message->GetLineNumber());
   CHECK_EQ(95, message->GetStartPosition());
 }
@@ -57,11 +54,9 @@ TEST(ThrowMessageDirectly) {
   v8::Handle<v8::Message> message;
 
   message = T.CheckThrowsReturnMessage(T.false_value(), T.Val("Wat?"));
-  CHECK(!message.IsEmpty());
   CHECK(message->Get()->Equals(v8_str("Uncaught Error: Wat?")));
 
   message = T.CheckThrowsReturnMessage(T.true_value(), T.Val("Kaboom!"));
-  CHECK(!message.IsEmpty());
   CHECK(message->Get()->Equals(v8_str("Uncaught Kaboom!")));
 }
 
@@ -80,11 +75,9 @@ TEST(ThrowMessageIndirectly) {
   v8::Handle<v8::Message> message;
 
   message = T.CheckThrowsReturnMessage(T.false_value(), T.Val("Wat?"));
-  CHECK(!message.IsEmpty());
   CHECK(message->Get()->Equals(v8_str("Uncaught Error: Wat?")));
 
   message = T.CheckThrowsReturnMessage(T.true_value(), T.Val("Kaboom!"));
-  CHECK(!message.IsEmpty());
   CHECK(message->Get()->Equals(v8_str("Uncaught Kaboom!")));
 }
 
@@ -239,9 +232,7 @@ TEST(DeoptTry) {
       "})";
   FunctionTester T(src);
 
-#if 0  // TODO(mstarzinger): Enable once we can.
   T.CheckCall(T.Val(2), T.Val(1));
-#endif
 }
 
 

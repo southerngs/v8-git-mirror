@@ -233,7 +233,7 @@ void StaticMarkingVisitor<StaticVisitor>::VisitCell(Heap* heap,
                                                     RelocInfo* rinfo) {
   DCHECK(rinfo->rmode() == RelocInfo::CELL);
   Cell* cell = rinfo->target_cell();
-  // No need to record slots because the cell space is not compacted during GC.
+  heap->mark_compact_collector()->RecordRelocSlot(rinfo, cell);
   if (!rinfo->host()->IsWeakObject(cell)) {
     StaticVisitor::MarkObject(heap, cell);
   }
@@ -585,10 +585,6 @@ template <typename StaticVisitor>
 void StaticMarkingVisitor<StaticVisitor>::MarkMapContents(Heap* heap,
                                                           Map* map) {
   Object* raw_transitions = map->raw_transitions();
-  if (TransitionArray::IsSimpleTransition(raw_transitions)) {
-    StaticVisitor::VisitPointer(
-        heap, HeapObject::RawField(map, Map::kTransitionsOffset));
-  }
   if (TransitionArray::IsFullTransitionArray(raw_transitions)) {
     MarkTransitionArray(heap, TransitionArray::cast(raw_transitions));
   }
@@ -684,7 +680,7 @@ bool StaticMarkingVisitor<StaticVisitor>::IsFlushable(Heap* heap,
   // Code is either on stack, in compilation cache or referenced
   // by optimized version of function.
   MarkBit code_mark = Marking::MarkBitFrom(function->code());
-  if (code_mark.Get()) {
+  if (Marking::IsBlackOrGrey(code_mark)) {
     return false;
   }
 
@@ -713,7 +709,7 @@ bool StaticMarkingVisitor<StaticVisitor>::IsFlushable(
   // Code is either on stack, in compilation cache or referenced
   // by optimized version of function.
   MarkBit code_mark = Marking::MarkBitFrom(shared_info->code());
-  if (code_mark.Get()) {
+  if (Marking::IsBlackOrGrey(code_mark)) {
     return false;
   }
 
@@ -842,6 +838,8 @@ void Code::CodeIterateBody(ObjectVisitor* v) {
                   RelocInfo::ModeMask(RelocInfo::EMBEDDED_OBJECT) |
                   RelocInfo::ModeMask(RelocInfo::CELL) |
                   RelocInfo::ModeMask(RelocInfo::EXTERNAL_REFERENCE) |
+                  RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) |
+                  RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE_ENCODED) |
                   RelocInfo::ModeMask(RelocInfo::JS_RETURN) |
                   RelocInfo::ModeMask(RelocInfo::DEBUG_BREAK_SLOT) |
                   RelocInfo::ModeMask(RelocInfo::RUNTIME_ENTRY);
@@ -869,6 +867,8 @@ void Code::CodeIterateBody(Heap* heap) {
                   RelocInfo::ModeMask(RelocInfo::EMBEDDED_OBJECT) |
                   RelocInfo::ModeMask(RelocInfo::CELL) |
                   RelocInfo::ModeMask(RelocInfo::EXTERNAL_REFERENCE) |
+                  RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) |
+                  RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE_ENCODED) |
                   RelocInfo::ModeMask(RelocInfo::JS_RETURN) |
                   RelocInfo::ModeMask(RelocInfo::DEBUG_BREAK_SLOT) |
                   RelocInfo::ModeMask(RelocInfo::RUNTIME_ENTRY);

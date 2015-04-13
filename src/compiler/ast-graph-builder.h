@@ -7,6 +7,8 @@
 
 #include "src/ast.h"
 #include "src/compiler/js-graph.h"
+#include "src/compiler/liveness-analyzer.h"
+#include "src/compiler/state-values-utils.h"
 
 namespace v8 {
 namespace internal {
@@ -17,6 +19,7 @@ namespace compiler {
 
 class ControlBuilder;
 class Graph;
+class JSTypeFeedbackTable;
 class LoopAssignmentAnalysis;
 class LoopBuilder;
 class Node;
@@ -28,7 +31,8 @@ class Node;
 class AstGraphBuilder : public AstVisitor {
  public:
   AstGraphBuilder(Zone* local_zone, CompilationInfo* info, JSGraph* jsgraph,
-                  LoopAssignmentAnalysis* loop_assignment = NULL);
+                  LoopAssignmentAnalysis* loop_assignment = NULL,
+                  JSTypeFeedbackTable* js_type_feedback = NULL);
 
   // Creates a graph by visiting the entire AST.
   bool CreateGraph(bool constant_context, bool stack_check = true);
@@ -97,6 +101,15 @@ class AstGraphBuilder : public AstVisitor {
   // Result of loop assignment analysis performed before graph creation.
   LoopAssignmentAnalysis* loop_assignment_analysis_;
 
+  // Cache for StateValues nodes for frame states.
+  StateValuesCache state_values_cache_;
+
+  // Analyzer of local variable liveness.
+  LivenessAnalyzer liveness_analyzer_;
+
+  // Type feedback table.
+  JSTypeFeedbackTable* js_type_feedback_;
+
   // Growth increment for the temporary buffer used to construct input lists to
   // new nodes.
   static const int kInputBufferSizeIncrement = 64;
@@ -117,6 +130,7 @@ class AstGraphBuilder : public AstVisitor {
   Scope* current_scope() const;
   Node* current_context() const;
   Node* exit_control() const { return exit_control_; }
+  LivenessAnalyzer* liveness_analyzer() { return &liveness_analyzer_; }
 
   void set_environment(Environment* env) { environment_ = env; }
   void set_ast_context(AstContext* ctx) { ast_context_ = ctx; }
@@ -208,6 +222,10 @@ class AstGraphBuilder : public AstVisitor {
   // If so, record the stack height into the compilation and return {true}.
   bool CheckOsrEntry(IterationStatement* stmt);
 
+  // Computes local variable liveness and replaces dead variables in
+  // frame states with the undefined values.
+  void ClearNonLiveSlotsInFrameStates();
+
   // Helper to wrap a Handle<T> into a Unique<T>.
   template <class T>
   Unique<T> MakeUnique(Handle<T> object) {
@@ -227,8 +245,9 @@ class AstGraphBuilder : public AstVisitor {
   // Builder to create a receiver check for sloppy mode.
   Node* BuildPatchReceiverToGlobalProxy(Node* receiver);
 
-  // Builders to create local function and block contexts.
-  Node* BuildLocalFunctionContext(Node* context, Node* closure);
+  // Builders to create local function, script and block contexts.
+  Node* BuildLocalFunctionContext(Node* context);
+  Node* BuildLocalScriptContext(Scope* scope);
   Node* BuildLocalBlockContext(Scope* scope);
 
   // Builder to create an arguments object if it is used.
@@ -250,12 +269,14 @@ class AstGraphBuilder : public AstVisitor {
 
   // Builders for property loads and stores.
   Node* BuildKeyedLoad(Node* receiver, Node* key,
-                       const VectorSlotPair& feedback);
+                       const VectorSlotPair& feedback, TypeFeedbackId id);
   Node* BuildNamedLoad(Node* receiver, Handle<Name> name,
-                       const VectorSlotPair& feedback,
+                       const VectorSlotPair& feedback, TypeFeedbackId id,
                        ContextualMode mode = NOT_CONTEXTUAL);
-  Node* BuildKeyedStore(Node* receiver, Node* key, Node* value);
-  Node* BuildNamedStore(Node* receiver, Handle<Name>, Node* value);
+  Node* BuildKeyedStore(Node* receiver, Node* key, Node* value,
+                        TypeFeedbackId id);
+  Node* BuildNamedStore(Node* receiver, Handle<Name>, Node* value,
+                        TypeFeedbackId id);
 
   // Builders for accessing the function context.
   Node* BuildLoadBuiltinsObject();
@@ -280,6 +301,7 @@ class AstGraphBuilder : public AstVisitor {
   Node* BuildThrowError(Node* exception, BailoutId bailout_id);
   Node* BuildThrowReferenceError(Variable* var, BailoutId bailout_id);
   Node* BuildThrowConstAssignError(BailoutId bailout_id);
+  Node* BuildThrowStaticPrototypeError(BailoutId bailout_id);
 
   // Builders for dynamic hole-checks at runtime.
   Node* BuildHoleCheckSilent(Node* value, Node* for_hole, Node* not_hole);
@@ -363,35 +385,24 @@ class AstGraphBuilder::Environment : public ZoneObject {
 
   int parameters_count() const { return parameters_count_; }
   int locals_count() const { return locals_count_; }
+  int context_chain_length() { return static_cast<int>(contexts_.size()); }
   int stack_height() {
     return static_cast<int>(values()->size()) - parameters_count_ -
            locals_count_;
   }
 
-  // Operations on parameter or local variables. The parameter indices are
-  // shifted by 1 (receiver is parameter index -1 but environment index 0).
-  void Bind(Variable* variable, Node* node) {
-    DCHECK(variable->IsStackAllocated());
-    if (variable->IsParameter()) {
-      values()->at(variable->index() + 1) = node;
-    } else {
-      DCHECK(variable->IsStackLocal());
-      values()->at(variable->index() + parameters_count_) = node;
-    }
-  }
-  Node* Lookup(Variable* variable) {
-    DCHECK(variable->IsStackAllocated());
-    if (variable->IsParameter()) {
-      return values()->at(variable->index() + 1);
-    } else {
-      DCHECK(variable->IsStackLocal());
-      return values()->at(variable->index() + parameters_count_);
-    }
-  }
+  // Operations on parameter or local variables.
+  void Bind(Variable* variable, Node* node);
+  Node* Lookup(Variable* variable);
+  void MarkAllLocalsLive();
 
+  // Operations on the context chain.
   Node* Context() const { return contexts_.back(); }
   void PushContext(Node* context) { contexts()->push_back(context); }
   void PopContext() { contexts()->pop_back(); }
+  void TrimContextChain(int trim_to_length) {
+    contexts()->resize(trim_to_length);
+  }
 
   // Operations on the operand stack.
   void Push(Node* node) {
@@ -423,7 +434,7 @@ class AstGraphBuilder::Environment : public ZoneObject {
     DCHECK(depth >= 0 && depth <= stack_height());
     values()->erase(values()->end() - depth, values()->end());
   }
-  void Trim(int trim_to_height) {
+  void TrimStack(int trim_to_height) {
     int depth = stack_height() - trim_to_height;
     DCHECK(depth >= 0 && depth <= stack_height());
     values()->erase(values()->end() - depth, values()->end());
@@ -470,15 +481,14 @@ class AstGraphBuilder::Environment : public ZoneObject {
   // Copies this environment at a loop header control-flow point.
   Environment* CopyForLoop(BitVector* assigned, bool is_osr = false) {
     PrepareForLoop(assigned, is_osr);
-    return Copy();
+    return CopyAndShareLiveness();
   }
-
-  int ContextStackDepth() { return static_cast<int>(contexts_.size()); }
 
  private:
   AstGraphBuilder* builder_;
   int parameters_count_;
   int locals_count_;
+  LivenessAnalyzerBlock* liveness_block_;
   NodeVector values_;
   NodeVector contexts_;
   Node* control_dependency_;
@@ -487,15 +497,18 @@ class AstGraphBuilder::Environment : public ZoneObject {
   Node* locals_node_;
   Node* stack_node_;
 
-  explicit Environment(const Environment* copy);
+  explicit Environment(Environment* copy);
   Environment* Copy() { return new (zone()) Environment(this); }
+  Environment* CopyAndShareLiveness();
   void UpdateStateValues(Node** state_values, int offset, int count);
+  void UpdateStateValuesWithCache(Node** state_values, int offset, int count);
   Zone* zone() const { return builder_->local_zone(); }
   Graph* graph() const { return builder_->graph(); }
   AstGraphBuilder* builder() const { return builder_; }
   CommonOperatorBuilder* common() { return builder_->common(); }
   NodeVector* values() { return &values_; }
   NodeVector* contexts() { return &contexts_; }
+  LivenessAnalyzerBlock* liveness_block() { return liveness_block_; }
 
   // Prepare environment to be used as loop header.
   void PrepareForLoop(BitVector* assigned, bool is_osr = false);

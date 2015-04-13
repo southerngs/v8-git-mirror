@@ -379,6 +379,9 @@ class RelocInfo {
     EXTERNAL_REFERENCE,  // The address of an external C++ function.
     INTERNAL_REFERENCE,  // An address inside the same function.
 
+    // Encoded internal reference, used only on MIPS, MIPS64 and PPC.
+    INTERNAL_REFERENCE_ENCODED,
+
     // Marks constant and veneer pools. Only used on ARM and ARM64.
     // They use a custom noncompact encoding.
     CONST_POOL,
@@ -394,10 +397,6 @@ class RelocInfo {
     CODE_AGE_SEQUENCE,  // Not stored in RelocInfo array, used explictly by
                         // code aging.
 
-    // Encoded internal reference, used only on MIPS and MIPS64.
-    // Re-uses previous ARM-only encoding, to fit in RealRelocMode space.
-    INTERNAL_REFERENCE_ENCODED = CONST_POOL,
-
     FIRST_REAL_RELOC_MODE = CODE_TARGET,
     LAST_REAL_RELOC_MODE = VENEER_POOL,
     FIRST_PSEUDO_RELOC_MODE = CODE_AGE_SEQUENCE,
@@ -406,7 +405,7 @@ class RelocInfo {
     LAST_GCED_ENUM = CELL,
     // Modes <= LAST_COMPACT_ENUM are guaranteed to have compact encoding.
     LAST_COMPACT_ENUM = CODE_TARGET_WITH_ID,
-    LAST_STANDARD_NONCOMPACT_ENUM = INTERNAL_REFERENCE
+    LAST_STANDARD_NONCOMPACT_ENUM = INTERNAL_REFERENCE_ENCODED
   };
 
   RelocInfo() {}
@@ -436,6 +435,7 @@ class RelocInfo {
   static inline bool IsEmbeddedObject(Mode mode) {
     return mode == EMBEDDED_OBJECT;
   }
+  static inline bool IsCell(Mode mode) { return mode == CELL; }
   static inline bool IsRuntimeEntry(Mode mode) {
     return mode == RUNTIME_ENTRY;
   }
@@ -582,10 +582,13 @@ class RelocInfo {
   // applies to; can only be called if rmode_ is EXTERNAL_REFERENCE.
   INLINE(Address target_external_reference());
 
-  // Read/modify the reference in the instruction this relocation
+  // Read the reference in the instruction this relocation
   // applies to; can only be called if rmode_ is INTERNAL_REFERENCE.
   INLINE(Address target_internal_reference());
-  INLINE(void set_target_internal_reference(Address target));
+
+  // Return the reference address this relocation applies to;
+  // can only be called if rmode_ is INTERNAL_REFERENCE.
+  INLINE(Address target_internal_reference_address());
 
   // Read/modify the address of a call instruction. This is used to relocate
   // the break points where straight-line code is patched with a call
@@ -937,14 +940,8 @@ class ExternalReference BASE_EMBEDDED {
   // Used for fast allocation in generated code.
   static ExternalReference new_space_allocation_top_address(Isolate* isolate);
   static ExternalReference new_space_allocation_limit_address(Isolate* isolate);
-  static ExternalReference old_pointer_space_allocation_top_address(
-      Isolate* isolate);
-  static ExternalReference old_pointer_space_allocation_limit_address(
-      Isolate* isolate);
-  static ExternalReference old_data_space_allocation_top_address(
-      Isolate* isolate);
-  static ExternalReference old_data_space_allocation_limit_address(
-      Isolate* isolate);
+  static ExternalReference old_space_allocation_top_address(Isolate* isolate);
+  static ExternalReference old_space_allocation_limit_address(Isolate* isolate);
 
   static ExternalReference mod_two_doubles_operation(Isolate* isolate);
   static ExternalReference power_double_double_function(Isolate* isolate);

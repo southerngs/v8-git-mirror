@@ -141,7 +141,6 @@
         'test-mementos.cc',
         'test-migrations.cc',
         'test-object-observe.cc',
-        'test-ordered-hash-table.cc',
         'test-parsing.cc',
         'test-platform.cc',
         'test-profile-generator.cc',
@@ -158,6 +157,7 @@
         'test-thread-termination.cc',
         'test-threads.cc',
         'test-transitions.cc',
+        'test-typedarrays.cc',
         'test-types.cc',
         'test-unbound-queue.cc',
         'test-unboxed-doubles.cc',
@@ -272,20 +272,13 @@
             },
           },
         }],
+        ['OS=="aix"', {
+          'ldflags': [ '-Wl,-bbigtoc' ],
+        }],
         ['component=="shared_library"', {
           # cctest can't be built against a shared library, so we need to
           # depend on the underlying static target in that case.
-          'conditions': [
-            ['v8_use_snapshot=="true" and v8_use_external_startup_data==0', {
-              'dependencies': ['../../tools/gyp/v8.gyp:v8_snapshot'],
-            }],
-            ['v8_use_snapshot=="true" and v8_use_external_startup_data==1', {
-              'dependencies': ['../../tools/gyp/v8.gyp:v8_external_snapshot'],
-            }],
-            ['v8_use_snapshot!="true"', {
-              'dependencies': ['../../tools/gyp/v8.gyp:v8_nosnapshot'],
-            }],
-          ],
+          'dependencies': ['../../tools/gyp/v8.gyp:v8_maybe_snapshot'],
         }, {
           'dependencies': ['../../tools/gyp/v8.gyp:v8'],
         }],

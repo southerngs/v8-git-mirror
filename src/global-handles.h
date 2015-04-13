@@ -162,14 +162,6 @@ class GlobalHandles {
     return number_of_global_handles_;
   }
 
-  // Collect up data for the weak handle callbacks after GC has completed, but
-  // before memory is reclaimed.
-  void CollectAllPhantomCallbackData();
-
-  // Collect up data for the weak handle callbacks referenced by young
-  // generation after GC has completed, but before memory is reclaimed.
-  void CollectYoungPhantomCallbackData();
-
   // Clear the weakness of a global handle.
   static void* ClearWeakness(Object** location);
 
@@ -349,17 +341,25 @@ class GlobalHandles {
 class GlobalHandles::PendingPhantomCallback {
  public:
   typedef v8::WeakCallbackInfo<void> Data;
-  PendingPhantomCallback(Node* node, Data data, Data::Callback callback)
-      : node_(node), data_(data), callback_(callback) {}
+  PendingPhantomCallback(
+      Node* node, Data::Callback callback, void* parameter,
+      void* internal_fields[v8::kInternalFieldsInWeakCallback])
+      : node_(node), callback_(callback), parameter_(parameter) {
+    for (int i = 0; i < v8::kInternalFieldsInWeakCallback; ++i) {
+      internal_fields_[i] = internal_fields[i];
+    }
+  }
 
-  void invoke();
+  void Invoke(Isolate* isolate);
 
   Node* node() { return node_; }
+  Data::Callback callback() { return callback_; }
 
  private:
   Node* node_;
-  Data data_;
   Data::Callback callback_;
+  void* parameter_;
+  void* internal_fields_[v8::kInternalFieldsInWeakCallback];
 };
 
 

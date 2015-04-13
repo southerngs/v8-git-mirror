@@ -40,6 +40,7 @@
   # they don't fail then test.py has failed.
   'test-serialize/TestThatAlwaysFails': [FAIL],
   'test-serialize/DependentTestThatAlwaysFails': [FAIL],
+  'test-api/SealHandleScope': [FAIL],
 
   # This test always fails.  It tests that LiveEdit causes abort when turned off.
   'test-debug/LiveEditDisabled': [FAIL],
@@ -97,24 +98,26 @@
   'test-api/Threading*': [PASS, NO_VARIANTS],
   'test-heap/IncrementalMarkingStepMakesBigProgressWithLargeObjects': [PASS, NO_VARIANTS],
   'test-heap-profiler/ManyLocalsInSharedContext': [PASS, NO_VARIANTS],
+  'test-serialize/SerializeToplevelLargeCodeObject': [PASS, NO_VARIANTS],
   'test-debug/ThreadedDebugging': [PASS, NO_VARIANTS],
   'test-debug/DebugBreakLoop': [PASS, NO_VARIANTS],
   # BUG(3742).
   'test-mark-compact/MarkCompactCollector': [PASS, ['arch==arm', NO_VARIANTS]],
 
-  # TODO(jarin/mstarzinger): Investigate debugger issues with TurboFan.
-  'test-debug/DebugStepNatives': [PASS, NO_VARIANTS],
-  'test-debug/DebugStepFunctionApply': [PASS, NO_VARIANTS],
-  'test-debug/DebugStepFunctionCall': [PASS, NO_VARIANTS],
+  # TODO(mstarzinger): The rewriter is not being called when top-level code is
+  # optimized and hence scripts don't "return" the correct value. Fix this.
+  'test-compiler/CompileFunctionInContext*': [PASS, NO_VARIANTS],
+
+  # TODO(mstarzinger): Crankshaft messes with debugger, investigate and fix!
+  'test-debug/BreakPointThroughJavaScript': [PASS, NO_VARIANTS],  # in no-snap mode.
+  'test-debug/ScriptBreakPointByIdThroughJavaScript': [PASS, NO_VARIANTS],
+  'test-debug/ScriptBreakPointByNameThroughJavaScript': [PASS, NO_VARIANTS],
 
   # TODO(jarin): Cannot lazy-deoptimize from conversions before comparisons.
   'test-js-typed-lowering/OrderCompareEffects': [SKIP],
 
   # TODO(jochen): Reenable after we removed the CHECK() from the marking queue.
   'test-mark-compact/MarkingDeque': [SKIP],
-
-  'test-heap/TestInternalWeakLists': [PASS, ['arch==arm', NO_VARIANTS]],
-  'test-heap/TestInternalWeakListsTraverseWithGC': [PASS, ['arch==arm', NO_VARIANTS]],
 
   ############################################################################
   # Slow tests.
@@ -281,6 +284,7 @@
   'codegen-tester/CompareWrapper': [SKIP],
   'codegen-tester/ParametersEqual': [SKIP],
   'test-simplified-lowering/LowerStringOps_to_call_and_compare': [SKIP],
+  'test-serialize/SerializeInternalReference': [FAIL],
 }],  # 'arch == x87'
 
 ##############################################################################
@@ -397,23 +401,21 @@
 
 }],  # 'arch == nacl_ia32 or arch == nacl_x64'
 
-['arch == ppc64', {
-  #issue 2857
+##############################################################################
+['system == aix and arch == ppc64', {
+
+  # BUG 2857
   'test-log/EquivalenceOfLoggingAndTraversal' : [SKIP],
-  #test has assumption that does not hold for larger PPC page sizes
-  'test-heap/FirstPageFitsStartup' : [SKIP],
-}],  # 'arch == ppc64'
+
+}],  # 'system == aix and arch == ppc64'
 
 ##############################################################################
 ['arch == ppc and simulator_run == True or arch == ppc64 and simulator_run == True', {
 
   # Pass but take too long with the simulator.
-  'test-api/Threading1': [SKIP],
-  'test-api/Threading2': [SKIP],
-  'test-api/ExternalArrays': [SKIP],
-
-  # will not pass until we agree/implement changes to serializce.cc
-  'test-serialize/SerializeInternalReference': [SKIP],
+  'test-api/Threading1': [PASS, SLOW],
+  'test-api/Threading2': [PASS, SLOW],
+  'test-api/ExternalArrays': [PASS, SLOW],
 
 }],  # 'arch == ppc64 and simulator_run == True'
 ]

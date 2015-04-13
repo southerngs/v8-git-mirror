@@ -316,8 +316,7 @@ bool IC::TryRemoveInvalidPrototypeDependentStub(Handle<Object> receiver,
     LookupIterator it(global, name, LookupIterator::OWN_SKIP_INTERCEPTOR);
     if (it.state() == LookupIterator::ACCESS_CHECK) return false;
     if (!it.IsFound()) return false;
-    Handle<PropertyCell> cell = it.GetPropertyCell();
-    return cell->type()->IsConstant();
+    return it.property_details().cell_type() == PropertyCellType::kConstant;
   }
 
   return true;
@@ -722,7 +721,7 @@ MaybeHandle<Object> LoadIC::Load(Handle<Object> object, Handle<Name> name) {
 
   bool use_ic = MigrateDeprecated(object) ? false : FLAG_use_ic;
 
-  if (FLAG_harmony_scoping && object->IsGlobalObject() && name->IsString()) {
+  if (object->IsGlobalObject() && name->IsString()) {
     // Look up in script context table.
     Handle<String> str_name = Handle<String>::cast(name);
     Handle<GlobalObject> global = Handle<GlobalObject>::cast(object);
@@ -988,7 +987,7 @@ Handle<Code> LoadIC::load_global(Isolate* isolate, Handle<GlobalObject> global,
 Handle<Code> LoadIC::initialize_stub_in_optimized_code(
     Isolate* isolate, ExtraICState extra_state, State initialization_state) {
   if (FLAG_vector_ics) {
-    return VectorLoadStub(isolate, LoadICState(extra_state)).GetCode();
+    return VectorRawLoadStub(isolate, LoadICState(extra_state)).GetCode();
   }
   return PropertyICCompiler::ComputeLoad(isolate, initialization_state,
                                          extra_state);
@@ -1006,8 +1005,8 @@ Handle<Code> KeyedLoadIC::initialize_stub(Isolate* isolate) {
 
 Handle<Code> KeyedLoadIC::initialize_stub_in_optimized_code(
     Isolate* isolate, State initialization_state) {
-  if (FLAG_vector_ics) {
-    return VectorKeyedLoadStub(isolate).GetCode();
+  if (FLAG_vector_ics && initialization_state != MEGAMORPHIC) {
+    return VectorRawKeyedLoadStub(isolate).GetCode();
   }
   switch (initialization_state) {
     case UNINITIALIZED:
@@ -1220,16 +1219,13 @@ Handle<Code> LoadIC::CompileHandler(LookupIterator* lookup,
 
     case LookupIterator::ACCESSOR: {
       // Use simple field loads for some well-known callback properties.
-      if (receiver_is_holder) {
-        DCHECK(receiver->IsJSObject());
-        Handle<JSObject> js_receiver = Handle<JSObject>::cast(receiver);
-        int object_offset;
-        if (Accessors::IsJSObjectFieldAccessor(map, lookup->name(),
-                                               &object_offset)) {
-          FieldIndex index =
-              FieldIndex::ForInObjectOffset(object_offset, js_receiver->map());
-          return SimpleFieldLoad(index);
-        }
+      // The method will only return true for absolute truths based on the
+      // receiver maps.
+      int object_offset;
+      if (Accessors::IsJSObjectFieldAccessor(map, lookup->name(),
+                                             &object_offset)) {
+        FieldIndex index = FieldIndex::ForInObjectOffset(object_offset, *map);
+        return SimpleFieldLoad(index);
       }
 
       Handle<Object> accessors = lookup->GetAccessors();
@@ -1543,7 +1539,7 @@ bool StoreIC::LookupForWrite(LookupIterator* it, Handle<Object> value,
 MaybeHandle<Object> StoreIC::Store(Handle<Object> object, Handle<Name> name,
                                    Handle<Object> value,
                                    JSReceiver::StoreFromKeyed store_mode) {
-  if (FLAG_harmony_scoping && object->IsGlobalObject() && name->IsString()) {
+  if (object->IsGlobalObject() && name->IsString()) {
     // Look up in script context table.
     Handle<String> str_name = Handle<String>::cast(name);
     Handle<GlobalObject> global = Handle<GlobalObject>::cast(object);
@@ -1556,6 +1552,15 @@ MaybeHandle<Object> StoreIC::Store(Handle<Object> object, Handle<Name> name,
           script_contexts, lookup_result.context_index);
       if (lookup_result.mode == CONST) {
         return TypeError("const_assign", object, name);
+      }
+
+      Handle<Object> previous_value =
+          FixedArray::get(script_context, lookup_result.slot_index);
+
+      if (*previous_value == *isolate()->factory()->the_hole_value()) {
+        // Do not install stubs and stay pre-monomorphic for
+        // uninitialized accesses.
+        return ReferenceError("not_defined", name);
       }
 
       if (FLAG_use_ic &&
@@ -1708,9 +1713,8 @@ void StoreIC::UpdateCaches(LookupIterator* lookup, Handle<Object> value,
 
 static Handle<Code> PropertyCellStoreHandler(
     Isolate* isolate, Handle<JSObject> receiver, Handle<GlobalObject> holder,
-    Handle<Name> name, Handle<PropertyCell> cell, Handle<Object> value) {
-  auto union_type = PropertyCell::UpdatedType(cell, value);
-  StoreGlobalStub stub(isolate, union_type->IsConstant(),
+    Handle<Name> name, Handle<PropertyCell> cell, PropertyCellType type) {
+  StoreGlobalStub stub(isolate, type == PropertyCellType::kConstant,
                        receiver->IsJSGlobalProxy());
   auto code = stub.GetCodeCopyFromTemplate(holder, cell);
   // TODO(verwaest): Move caching of these NORMAL stubs outside as well.
@@ -1733,10 +1737,14 @@ Handle<Code> StoreIC::CompileHandler(LookupIterator* lookup,
     case LookupIterator::TRANSITION: {
       auto store_target = lookup->GetStoreTarget();
       if (store_target->IsGlobalObject()) {
-        auto cell = lookup->GetTransitionPropertyCell();
-        return PropertyCellStoreHandler(
+        // TODO(dcarney): this currently just deopts. Use the transition cell.
+        auto cell = isolate()->factory()->NewPropertyCell();
+        cell->set_value(*value);
+        auto code = PropertyCellStoreHandler(
             isolate(), store_target, Handle<GlobalObject>::cast(store_target),
-            lookup->name(), cell, value);
+            lookup->name(), cell, PropertyCellType::kConstant);
+        cell->set_value(isolate()->heap()->the_hole_value());
+        return code;
       }
       Handle<Map> transition = lookup->transition_map();
       // Currently not handled by CompileStoreTransition.
@@ -1807,9 +1815,11 @@ Handle<Code> StoreIC::CompileHandler(LookupIterator* lookup,
           DCHECK(holder.is_identical_to(receiver) ||
                  receiver->map()->prototype() == *holder);
           auto cell = lookup->GetPropertyCell();
+          auto union_type = PropertyCell::UpdatedType(
+              cell, value, lookup->property_details());
           return PropertyCellStoreHandler(isolate(), receiver,
                                           Handle<GlobalObject>::cast(holder),
-                                          lookup->name(), cell, value);
+                                          lookup->name(), cell, union_type);
         }
         DCHECK(holder.is_identical_to(receiver));
         return isolate()->builtins()->StoreIC_Normal();
@@ -2901,30 +2911,10 @@ RUNTIME_FUNCTION(LoadPropertyWithInterceptorOnly) {
   Handle<JSObject> holder =
       args.at<JSObject>(NamedLoadHandlerCompiler::kInterceptorArgsHolderIndex);
   HandleScope scope(isolate);
-  Handle<InterceptorInfo> interceptor_info(holder->GetNamedInterceptor());
-
-  if (name->IsSymbol() && !interceptor_info->can_intercept_symbols())
-    return isolate->heap()->no_interceptor_result_sentinel();
-
-  Address getter_address = v8::ToCData<Address>(interceptor_info->getter());
-  v8::GenericNamedPropertyGetterCallback getter =
-      FUNCTION_CAST<v8::GenericNamedPropertyGetterCallback>(getter_address);
-  DCHECK(getter != NULL);
-
-  PropertyCallbackArguments callback_args(isolate, interceptor_info->data(),
-                                          *receiver, *holder);
-  {
-    // Use the interceptor getter.
-    v8::Handle<v8::Value> r =
-        callback_args.Call(getter, v8::Utils::ToLocal(name));
-    RETURN_FAILURE_IF_SCHEDULED_EXCEPTION(isolate);
-    if (!r.IsEmpty()) {
-      Handle<Object> result = v8::Utils::OpenHandle(*r);
-      result->VerifyApiCallResultType();
-      return *v8::Utils::OpenHandle(*r);
-    }
-  }
-
+  auto res = JSObject::GetPropertyWithInterceptor(holder, receiver, name);
+  RETURN_FAILURE_IF_SCHEDULED_EXCEPTION(isolate);
+  Handle<Object> result;
+  if (res.ToHandle(&result)) return *result;
   return isolate->heap()->no_interceptor_result_sentinel();
 }
 

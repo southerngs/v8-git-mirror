@@ -129,8 +129,7 @@ Instruction* InstructionSequenceTest::EndBlock(BlockCompletion completion) {
 
 
 InstructionSequenceTest::TestOperand InstructionSequenceTest::Imm(int32_t imm) {
-  int index = sequence()->AddImmediate(Constant(imm));
-  return TestOperand(kImmediate, index);
+  return TestOperand(kImmediate, imm);
 }
 
 
@@ -290,22 +289,20 @@ Instruction* InstructionSequenceTest::EmitBranch(TestOperand input_op) {
                                ConvertInputOp(Imm()), ConvertInputOp(Imm())};
   InstructionCode opcode = kArchJmp | FlagsModeField::encode(kFlags_branch) |
                            FlagsConditionField::encode(kEqual);
-  auto instruction =
-      NewInstruction(opcode, 0, nullptr, 4, inputs)->MarkAsControl();
+  auto instruction = NewInstruction(opcode, 0, nullptr, 4, inputs);
   return AddInstruction(instruction);
 }
 
 
 Instruction* InstructionSequenceTest::EmitFallThrough() {
-  auto instruction = NewInstruction(kArchNop, 0, nullptr)->MarkAsControl();
+  auto instruction = NewInstruction(kArchNop, 0, nullptr);
   return AddInstruction(instruction);
 }
 
 
 Instruction* InstructionSequenceTest::EmitJump() {
   InstructionOperand inputs[1]{ConvertInputOp(Imm())};
-  auto instruction =
-      NewInstruction(kArchJmp, 0, nullptr, 1, inputs)->MarkAsControl();
+  auto instruction = NewInstruction(kArchJmp, 0, nullptr, 1, inputs);
   return AddInstruction(instruction);
 }
 
@@ -359,7 +356,7 @@ InstructionOperand* InstructionSequenceTest::ConvertInputs(
 InstructionOperand InstructionSequenceTest::ConvertInputOp(TestOperand op) {
   if (op.type_ == kImmediate) {
     CHECK_EQ(op.vreg_.value_, kNoValue);
-    return ImmediateOperand(op.value_);
+    return ImmediateOperand(ImmediateOperand::INLINE, op.value_);
   }
   CHECK_NE(op.vreg_.value_, kNoValue);
   switch (op.type_) {
@@ -372,6 +369,9 @@ InstructionOperand InstructionSequenceTest::ConvertInputOp(TestOperand op) {
       return Unallocated(op, UnallocatedOperand::MUST_HAVE_REGISTER);
     case kRegister:
       return Unallocated(op, UnallocatedOperand::MUST_HAVE_REGISTER,
+                         UnallocatedOperand::USED_AT_START);
+    case kSlot:
+      return Unallocated(op, UnallocatedOperand::MUST_HAVE_SLOT,
                          UnallocatedOperand::USED_AT_START);
     case kFixedRegister:
       CHECK(0 <= op.value_ && op.value_ < num_general_registers_);

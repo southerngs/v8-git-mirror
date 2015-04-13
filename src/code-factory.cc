@@ -53,7 +53,7 @@ Callable CodeFactory::KeyedLoadICInOptimizedCode(
     Isolate* isolate, InlineCacheState initialization_state) {
   auto code = KeyedLoadIC::initialize_stub_in_optimized_code(
       isolate, initialization_state);
-  if (FLAG_vector_ics) {
+  if (FLAG_vector_ics && initialization_state != MEGAMORPHIC) {
     return Callable(code, VectorLoadICDescriptor(isolate));
   }
   return Callable(code, LoadDescriptor(isolate));
@@ -107,7 +107,7 @@ Callable CodeFactory::KeyedStoreICInOptimizedCode(
 // static
 Callable CodeFactory::CompareIC(Isolate* isolate, Token::Value op) {
   Handle<Code> code = CompareIC::GetUninitialized(isolate, op);
-  return Callable(code, BinaryOpDescriptor(isolate));
+  return Callable(code, CompareDescriptor(isolate));
 }
 
 

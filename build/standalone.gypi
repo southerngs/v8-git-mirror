@@ -87,7 +87,6 @@
     'werror%': '-Werror',
     'use_goma%': '<(use_goma)',
     'gomadir%': '<(gomadir)',
-    'host_clang%': '1',
 
     # .gyp files or targets should set v8_code to 1 if they build V8 specific
     # code, as opposed to external code.  This variable is used to control such
@@ -148,10 +147,16 @@
       }, {
         'v8_enable_gdbjit%': 0,
       }],
-      ['(OS=="linux" or OS=="mac") and (target_arch=="ia32" or target_arch=="x64")', {
+      ['(OS=="linux" or OS=="mac") and (target_arch=="ia32" or target_arch=="x64") and \
+        (v8_target_arch!="x87")', {
         'clang%': 1,
       }, {
         'clang%': 0,
+      }],
+      ['host_arch!="ppc" and host_arch!="ppc64" and host_arch!="ppc64le"', {
+        'host_clang%': '1',
+      }, {
+        'host_clang%': '0',
       }],
     ],
     # Default ARM variable settings.
@@ -177,10 +182,11 @@
     'default_configuration': 'Debug',
     'configurations': {
       'DebugBaseCommon': {
-        'cflags': [ '-g', '-O0' ],
         'conditions': [
-          [ 'OS=="aix"', {
-            'cflags': [ '-gxcoff' ],
+          ['OS=="aix"', {
+            'cflags': [ '-g', '-Og', '-gxcoff' ],
+          }, {
+            'cflags': [ '-g', '-O0' ],
           }],
         ],
       },
@@ -202,6 +208,9 @@
         # things when their commandline changes). Nothing should ever read this
         # define.
         'defines': ['CR_CLANG_REVISION=<!(<(DEPTH)/tools/clang/scripts/update.sh --print-revision)'],
+        'cflags+': [
+          '-Wno-format-pedantic',
+        ],
       }],
     ],
     'target_conditions': [
@@ -334,7 +343,7 @@
         'cflags_cc': [ '-Wnon-virtual-dtor', '-fno-rtti', '-std=gnu++0x' ],
         'ldflags': [ '-pthread', ],
         'conditions': [
-          [ 'host_arch=="ppc64"', {
+          [ 'host_arch=="ppc64" and OS!="aix"', {
             'cflags': [ '-mminimal-toc' ],
           }],
           [ 'visibility=="hidden" and v8_enable_backtrace==0', {

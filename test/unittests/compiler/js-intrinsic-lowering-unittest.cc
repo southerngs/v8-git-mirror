@@ -3,12 +3,14 @@
 // found in the LICENSE file.
 
 #include "src/compiler/access-builder.h"
+#include "src/compiler/diamond.h"
 #include "src/compiler/js-graph.h"
 #include "src/compiler/js-intrinsic-lowering.h"
 #include "src/compiler/js-operator.h"
 #include "test/unittests/compiler/graph-unittest.h"
 #include "test/unittests/compiler/node-test-utils.h"
 #include "testing/gmock-support.h"
+
 
 using testing::_;
 using testing::AllOf;
@@ -27,8 +29,9 @@ class JSIntrinsicLoweringTest : public GraphTest {
   ~JSIntrinsicLoweringTest() OVERRIDE {}
 
  protected:
-  Reduction Reduce(Node* node) {
-    MachineOperatorBuilder machine(zone());
+  Reduction Reduce(Node* node, MachineOperatorBuilder::Flags flags =
+                                   MachineOperatorBuilder::kNoFlags) {
+    MachineOperatorBuilder machine(zone(), kMachPtr, flags);
     JSGraph jsgraph(isolate(), graph(), common(), javascript(), &machine);
     JSIntrinsicLowering reducer(&jsgraph);
     return reducer.Reduce(node);
@@ -220,6 +223,143 @@ TEST_F(JSIntrinsicLoweringTest, InlineIsRegExp) {
           IsMerge(IsIfTrue(AllOf(CaptureEq(&branch),
                                  IsBranch(IsObjectIsSmi(input), control))),
                   AllOf(CaptureEq(&if_false), IsIfFalse(CaptureEq(&branch))))));
+}
+
+
+// -----------------------------------------------------------------------------
+// %_JSValueGetValue
+
+
+TEST_F(JSIntrinsicLoweringTest, InlineJSValueGetValue) {
+  Node* const input = Parameter(0);
+  Node* const context = Parameter(1);
+  Node* const effect = graph()->start();
+  Node* const control = graph()->start();
+  Reduction const r = Reduce(graph()->NewNode(
+      javascript()->CallRuntime(Runtime::kInlineJSValueGetValue, 1), input,
+      context, effect, control));
+  ASSERT_TRUE(r.Changed());
+  EXPECT_THAT(r.replacement(),
+              IsLoadField(AccessBuilder::ForValue(), input, effect, control));
+}
+
+
+// -----------------------------------------------------------------------------
+// %_Likely
+
+TEST_F(JSIntrinsicLoweringTest, Likely) {
+  Node* const input = Parameter(0);
+  Node* const context = Parameter(1);
+  Node* const effect = graph()->start();
+  Node* const control = graph()->start();
+  Node* const likely =
+      graph()->NewNode(javascript()->CallRuntime(Runtime::kInlineLikely, 1),
+                       input, context, effect, control);
+  Node* const to_boolean =
+      graph()->NewNode(javascript()->ToBoolean(), likely, context);
+  Diamond d(graph(), common(), to_boolean);
+  graph()->SetEnd(graph()->NewNode(common()->End(), d.merge));
+
+  ASSERT_EQ(BranchHint::kNone, BranchHintOf(d.branch->op()));
+  Reduction const r = Reduce(likely);
+  ASSERT_TRUE(r.Changed());
+  EXPECT_THAT(r.replacement(), input);
+  ASSERT_EQ(BranchHint::kTrue, BranchHintOf(d.branch->op()));
+}
+
+
+// -----------------------------------------------------------------------------
+// %_MathFloor
+
+
+TEST_F(JSIntrinsicLoweringTest, InlineMathFloor) {
+  Node* const input = Parameter(0);
+  Node* const context = Parameter(1);
+  Node* const effect = graph()->start();
+  Node* const control = graph()->start();
+  Reduction const r = Reduce(
+      graph()->NewNode(javascript()->CallRuntime(Runtime::kInlineMathFloor, 1),
+                       input, context, effect, control),
+      MachineOperatorBuilder::kFloat64RoundDown);
+  ASSERT_TRUE(r.Changed());
+  EXPECT_THAT(r.replacement(), IsFloat64RoundDown(input));
+}
+
+
+// -----------------------------------------------------------------------------
+// %_MathSqrt
+
+
+TEST_F(JSIntrinsicLoweringTest, InlineMathSqrt) {
+  Node* const input = Parameter(0);
+  Node* const context = Parameter(1);
+  Node* const effect = graph()->start();
+  Node* const control = graph()->start();
+  Reduction const r = Reduce(
+      graph()->NewNode(javascript()->CallRuntime(Runtime::kInlineMathSqrt, 1),
+                       input, context, effect, control));
+  ASSERT_TRUE(r.Changed());
+  EXPECT_THAT(r.replacement(), IsFloat64Sqrt(input));
+}
+
+
+// -----------------------------------------------------------------------------
+// %_StringGetLength
+
+
+TEST_F(JSIntrinsicLoweringTest, InlineStringGetLength) {
+  Node* const input = Parameter(0);
+  Node* const context = Parameter(1);
+  Node* const effect = graph()->start();
+  Node* const control = graph()->start();
+  Reduction const r = Reduce(graph()->NewNode(
+      javascript()->CallRuntime(Runtime::kInlineStringGetLength, 1), input,
+      context, effect, control));
+  ASSERT_TRUE(r.Changed());
+  EXPECT_THAT(r.replacement(),
+              IsLoadField(AccessBuilder::ForStringLength(zone()), input, effect,
+                          control));
+}
+
+
+// -----------------------------------------------------------------------------
+// %_MathClz32
+
+
+TEST_F(JSIntrinsicLoweringTest, InlineMathClz32) {
+  Node* const input = Parameter(0);
+  Node* const context = Parameter(1);
+  Node* const effect = graph()->start();
+  Node* const control = graph()->start();
+  Reduction const r = Reduce(
+      graph()->NewNode(javascript()->CallRuntime(Runtime::kInlineMathClz32, 1),
+                       input, context, effect, control));
+  ASSERT_TRUE(r.Changed());
+  EXPECT_THAT(r.replacement(), IsWord32Clz(input));
+}
+
+
+// -----------------------------------------------------------------------------
+// %_Unlikely
+
+TEST_F(JSIntrinsicLoweringTest, Unlikely) {
+  Node* const input = Parameter(0);
+  Node* const context = Parameter(1);
+  Node* const effect = graph()->start();
+  Node* const control = graph()->start();
+  Node* const unlikely =
+      graph()->NewNode(javascript()->CallRuntime(Runtime::kInlineUnlikely, 1),
+                       input, context, effect, control);
+  Node* const to_boolean =
+      graph()->NewNode(javascript()->ToBoolean(), unlikely, context);
+  Diamond d(graph(), common(), to_boolean);
+  graph()->SetEnd(graph()->NewNode(common()->End(), d.merge));
+
+  ASSERT_EQ(BranchHint::kNone, BranchHintOf(d.branch->op()));
+  Reduction const r = Reduce(unlikely);
+  ASSERT_TRUE(r.Changed());
+  EXPECT_THAT(r.replacement(), input);
+  ASSERT_EQ(BranchHint::kFalse, BranchHintOf(d.branch->op()));
 }
 
 

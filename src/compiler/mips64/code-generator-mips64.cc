@@ -110,7 +110,8 @@ class MipsOperandConverter FINAL : public InstructionOperandConverter {
     DCHECK(!op->IsDoubleRegister());
     DCHECK(op->IsStackSlot() || op->IsDoubleStackSlot());
     // The linkage computes where all spill slots are located.
-    FrameOffset offset = linkage()->GetFrameOffset(op->index(), frame(), 0);
+    FrameOffset offset = linkage()->GetFrameOffset(
+        AllocatedOperand::cast(op)->index(), frame(), 0);
     return MemOperand(offset.from_stack_pointer() ? sp : fp, offset.offset());
   }
 };
@@ -511,6 +512,9 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
     case kMips64Xor:
       __ Xor(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
       break;
+    case kMips64Clz:
+      __ Clz(i.OutputRegister(), i.InputRegister(0));
+      break;
     case kMips64Shl:
       if (instr->InputAt(1)->IsRegister()) {
         __ sllv(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
@@ -586,11 +590,9 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       __ Dror(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
       break;
     case kMips64Tst:
-    case kMips64Tst32:
       // Pseudo-instruction used for cmp/branch. No opcode emitted here.
       break;
     case kMips64Cmp:
-    case kMips64Cmp32:
       // Pseudo-instruction used for cmp/branch. No opcode emitted here.
       break;
     case kMips64Mov:
@@ -603,6 +605,48 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       }
       break;
 
+    case kMips64CmpS:
+      // Psuedo-instruction used for FP cmp/branch. No opcode emitted here.
+      break;
+    case kMips64AddS:
+      // TODO(plind): add special case: combine mult & add.
+      __ add_s(i.OutputDoubleRegister(), i.InputDoubleRegister(0),
+               i.InputDoubleRegister(1));
+      break;
+    case kMips64SubS:
+      __ sub_s(i.OutputDoubleRegister(), i.InputDoubleRegister(0),
+               i.InputDoubleRegister(1));
+      break;
+    case kMips64MulS:
+      // TODO(plind): add special case: right op is -1.0, see arm port.
+      __ mul_s(i.OutputDoubleRegister(), i.InputDoubleRegister(0),
+               i.InputDoubleRegister(1));
+      break;
+    case kMips64DivS:
+      __ div_s(i.OutputDoubleRegister(), i.InputDoubleRegister(0),
+               i.InputDoubleRegister(1));
+      break;
+    case kMips64ModS: {
+      // TODO(bmeurer): We should really get rid of this special instruction,
+      // and generate a CallAddress instruction instead.
+      FrameScope scope(masm(), StackFrame::MANUAL);
+      __ PrepareCallCFunction(0, 2, kScratchReg);
+      __ MovToFloatParameters(i.InputDoubleRegister(0),
+                              i.InputDoubleRegister(1));
+      // TODO(balazs.kilvady): implement mod_two_floats_operation(isolate())
+      __ CallCFunction(ExternalReference::mod_two_doubles_operation(isolate()),
+                       0, 2);
+      // Move the result in the double result register.
+      __ MovFromFloatResult(i.OutputSingleRegister());
+      break;
+    }
+    case kMips64AbsS:
+      __ abs_s(i.OutputSingleRegister(), i.InputSingleRegister(0));
+      break;
+    case kMips64SqrtS: {
+      __ sqrt_s(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
+      break;
+    }
     case kMips64CmpD:
       // Psuedo-instruction used for FP cmp/branch. No opcode emitted here.
       break;
@@ -637,6 +681,13 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       __ MovFromFloatResult(i.OutputDoubleRegister());
       break;
     }
+    case kMips64AbsD:
+      __ abs_d(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
+      break;
+    case kMips64SqrtD: {
+      __ sqrt_d(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
+      break;
+    }
     case kMips64Float64RoundDown: {
       ASSEMBLE_ROUND_DOUBLE_TO_DOUBLE(floor_l_d, Floor);
       break;
@@ -647,10 +698,6 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
     }
     case kMips64Float64RoundUp: {
       ASSEMBLE_ROUND_DOUBLE_TO_DOUBLE(ceil_l_d, Ceil);
-      break;
-    }
-    case kMips64SqrtD: {
-      __ sqrt_d(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
       break;
     }
     case kMips64CvtSD: {
@@ -749,13 +796,11 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
       __ Push(i.InputRegister(0));
       break;
     case kMips64StackClaim: {
-      int words = MiscField::decode(instr->opcode());
-      __ Dsubu(sp, sp, Operand(words << kPointerSizeLog2));
+      __ Dsubu(sp, sp, Operand(i.InputInt32(0)));
       break;
     }
     case kMips64StoreToStackSlot: {
-      int slot = MiscField::decode(instr->opcode());
-      __ sd(i.InputRegister(0), MemOperand(sp, slot << kPointerSizeLog2));
+      __ sd(i.InputRegister(0), MemOperand(sp, i.InputInt32(1)));
       break;
     }
     case kMips64StoreWriteBarrier: {
@@ -815,6 +860,38 @@ void CodeGenerator::AssembleArchInstruction(Instruction* instr) {
   out << "Unsupported " << #opcode << " condition: \"" << condition << "\""; \
   UNIMPLEMENTED();
 
+static bool convertCondition(FlagsCondition condition, Condition& cc,
+                             bool& acceptNaN) {
+  acceptNaN = false;
+  switch (condition) {
+    case kEqual:
+      cc = eq;
+      return true;
+    case kNotEqual:
+      cc = ne;
+      acceptNaN = true;
+      return true;
+    case kUnsignedLessThan:
+      cc = lt;
+      return true;
+    case kUnsignedGreaterThanOrEqual:
+      cc = ge;
+      acceptNaN = true;
+      return true;
+    case kUnsignedLessThanOrEqual:
+      cc = le;
+      return true;
+    case kUnsignedGreaterThan:
+      cc = gt;
+      acceptNaN = true;
+      return true;
+    default:
+      break;
+  }
+  return false;
+}
+
+
 // Assembles branches after an instruction.
 void CodeGenerator::AssembleArchBranch(Instruction* instr, BranchInfo* branch) {
   MipsOperandConverter i(this, instr);
@@ -826,24 +903,12 @@ void CodeGenerator::AssembleArchBranch(Instruction* instr, BranchInfo* branch) {
   // implemented differently than on the other arch's. The compare operations
   // emit mips psuedo-instructions, which are handled here by branch
   // instructions that do the actual comparison. Essential that the input
-  // registers to compare psuedo-op are not modified before this branch op, as
+  // registers to compare pseudo-op are not modified before this branch op, as
   // they are tested here.
-  // TODO(plind): Add CHECK() to ensure that test/cmp and this branch were
-  //    not separated by other instructions.
 
   if (instr->arch_opcode() == kMips64Tst) {
     cc = FlagsConditionToConditionTst(branch->condition);
     __ And(at, i.InputRegister(0), i.InputOperand(1));
-    __ Branch(tlabel, cc, at, Operand(zero_reg));
-  } else if (instr->arch_opcode() == kMips64Tst32) {
-    cc = FlagsConditionToConditionTst(branch->condition);
-    // Zero-extend registers on MIPS64 only 64-bit operand
-    // branch and compare op. is available.
-    // This is a disadvantage to perform 32-bit operation on MIPS64.
-    // Try to force globally in front-end Word64 representation to be preferred
-    // for MIPS64 even for Word32.
-    __ And(at, i.InputRegister(0), i.InputOperand(1));
-    __ Dext(at, at, 0, 32);
     __ Branch(tlabel, cc, at, Operand(zero_reg));
   } else if (instr->arch_opcode() == kMips64Dadd ||
              instr->arch_opcode() == kMips64Dsub) {
@@ -857,74 +922,29 @@ void CodeGenerator::AssembleArchBranch(Instruction* instr, BranchInfo* branch) {
     __ Branch(tlabel, cc, i.InputRegister(0), i.InputOperand(1));
 
     if (!branch->fallthru) __ Branch(flabel);  // no fallthru to flabel.
-
-  } else if (instr->arch_opcode() == kMips64Cmp32) {
-    cc = FlagsConditionToConditionCmp(branch->condition);
-
-    switch (branch->condition) {
-      case kEqual:
-      case kNotEqual:
-      case kSignedLessThan:
-      case kSignedGreaterThanOrEqual:
-      case kSignedLessThanOrEqual:
-      case kSignedGreaterThan:
-        // Sign-extend registers on MIPS64 only 64-bit operand
-        // branch and compare op. is available.
-        __ sll(i.InputRegister(0), i.InputRegister(0), 0);
-        if (instr->InputAt(1)->IsRegister()) {
-          __ sll(i.InputRegister(1), i.InputRegister(1), 0);
-        }
-        break;
-      case kUnsignedLessThan:
-      case kUnsignedGreaterThanOrEqual:
-      case kUnsignedLessThanOrEqual:
-      case kUnsignedGreaterThan:
-        // Zero-extend registers on MIPS64 only 64-bit operand
-        // branch and compare op. is available.
-        __ Dext(i.InputRegister(0), i.InputRegister(0), 0, 32);
-        if (instr->InputAt(1)->IsRegister()) {
-          __ Dext(i.InputRegister(1), i.InputRegister(1), 0, 32);
-        }
-        break;
-      default:
-        UNSUPPORTED_COND(kMips64Cmp, branch->condition);
-        break;
+  } else if (instr->arch_opcode() == kMips64CmpS) {
+    // TODO(dusmil) optimize unordered checks to use fewer instructions
+    // even if we have to unfold BranchF macro.
+    bool acceptNaN = false;
+    if (!convertCondition(branch->condition, cc, acceptNaN)) {
+      UNSUPPORTED_COND(kMips64CmpS, branch->condition);
     }
-    __ Branch(tlabel, cc, i.InputRegister(0), i.InputOperand(1));
+    Label* nan = acceptNaN ? tlabel : flabel;
+    __ BranchF32(tlabel, nan, cc, i.InputSingleRegister(0),
+                 i.InputSingleRegister(1));
 
     if (!branch->fallthru) __ Branch(flabel);  // no fallthru to flabel.
+
   } else if (instr->arch_opcode() == kMips64CmpD) {
     // TODO(dusmil) optimize unordered checks to use less instructions
     // even if we have to unfold BranchF macro.
-    Label* nan = flabel;
-    switch (branch->condition) {
-      case kEqual:
-        cc = eq;
-        break;
-      case kNotEqual:
-        cc = ne;
-        nan = tlabel;
-        break;
-      case kUnsignedLessThan:
-        cc = lt;
-        break;
-      case kUnsignedGreaterThanOrEqual:
-        cc = ge;
-        nan = tlabel;
-        break;
-      case kUnsignedLessThanOrEqual:
-        cc = le;
-        break;
-      case kUnsignedGreaterThan:
-        cc = gt;
-        nan = tlabel;
-        break;
-      default:
-        UNSUPPORTED_COND(kMips64CmpD, branch->condition);
-        break;
+    bool acceptNaN = false;
+    if (!convertCondition(branch->condition, cc, acceptNaN)) {
+      UNSUPPORTED_COND(kMips64CmpD, branch->condition);
     }
-    __ BranchF(tlabel, nan, cc, i.InputDoubleRegister(0),
-               i.InputDoubleRegister(1));
+    Label* nan = acceptNaN ? tlabel : flabel;
+    __ BranchF64(tlabel, nan, cc, i.InputDoubleRegister(0),
+                 i.InputDoubleRegister(1));
 
     if (!branch->fallthru) __ Branch(flabel);  // no fallthru to flabel.
   } else {
@@ -966,14 +986,6 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
     __ And(at, i.InputRegister(0), i.InputOperand(1));
     __ Branch(USE_DELAY_SLOT, &done, cc, at, Operand(zero_reg));
     __ li(result, Operand(1));  // In delay slot.
-  } else if (instr->arch_opcode() == kMips64Tst32) {
-    cc = FlagsConditionToConditionTst(condition);
-    // Zero-extend register on MIPS64 only 64-bit operand
-    // branch and compare op. is available.
-    __ And(at, i.InputRegister(0), i.InputOperand(1));
-    __ Dext(at, at, 0, 32);
-    __ Branch(USE_DELAY_SLOT, &done, cc, at, Operand(zero_reg));
-    __ li(result, Operand(1));  // In delay slot.
   } else if (instr->arch_opcode() == kMips64Dadd ||
              instr->arch_opcode() == kMips64Dsub) {
     cc = FlagsConditionToConditionOvf(condition);
@@ -985,42 +997,6 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
     Register left = i.InputRegister(0);
     Operand right = i.InputOperand(1);
     cc = FlagsConditionToConditionCmp(condition);
-    __ Branch(USE_DELAY_SLOT, &done, cc, left, right);
-    __ li(result, Operand(1));  // In delay slot.
-  } else if (instr->arch_opcode() == kMips64Cmp32) {
-    Register left = i.InputRegister(0);
-    Operand right = i.InputOperand(1);
-    cc = FlagsConditionToConditionCmp(condition);
-
-    switch (condition) {
-      case kEqual:
-      case kNotEqual:
-      case kSignedLessThan:
-      case kSignedGreaterThanOrEqual:
-      case kSignedLessThanOrEqual:
-      case kSignedGreaterThan:
-        // Sign-extend registers on MIPS64 only 64-bit operand
-        // branch and compare op. is available.
-        __ sll(left, left, 0);
-        if (instr->InputAt(1)->IsRegister()) {
-          __ sll(i.InputRegister(1), i.InputRegister(1), 0);
-        }
-        break;
-      case kUnsignedLessThan:
-      case kUnsignedGreaterThanOrEqual:
-      case kUnsignedLessThanOrEqual:
-      case kUnsignedGreaterThan:
-        // Zero-extend registers on MIPS64 only 64-bit operand
-        // branch and compare op. is available.
-        __ Dext(left, left, 0, 32);
-        if (instr->InputAt(1)->IsRegister()) {
-          __ Dext(i.InputRegister(1), i.InputRegister(1), 0, 32);
-        }
-        break;
-      default:
-        UNSUPPORTED_COND(kMips64Cmp32, condition);
-        break;
-    }
     __ Branch(USE_DELAY_SLOT, &done, cc, left, right);
     __ li(result, Operand(1));  // In delay slot.
   } else if (instr->arch_opcode() == kMips64CmpD) {
@@ -1141,6 +1117,8 @@ void CodeGenerator::AssemblePrologue() {
     // remaining stack slots.
     if (FLAG_code_comments) __ RecordComment("-- OSR entrypoint --");
     osr_pc_offset_ = __ pc_offset();
+    // TODO(titzer): cannot address target function == local #-1
+    __ ld(a1, MemOperand(fp, JavaScriptFrameConstants::kFunctionOffset));
     DCHECK(stack_slots >= frame()->GetOsrStackSlotCount());
     stack_slots -= frame()->GetOsrStackSlotCount();
   }
@@ -1226,9 +1204,24 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
         case Constant::kExternalReference:
           __ li(dst, Operand(src.ToExternalReference()));
           break;
-        case Constant::kHeapObject:
-          __ li(dst, src.ToHeapObject());
+        case Constant::kHeapObject: {
+          Handle<HeapObject> src_object = src.ToHeapObject();
+          if (info()->IsOptimizing() &&
+              src_object.is_identical_to(info()->context())) {
+            // Loading the context from the frame is way cheaper than
+            // materializing the actual context heap object address.
+            __ ld(dst, MemOperand(fp, StandardFrameConstants::kContextOffset));
+          } else if (info()->IsOptimizing() &&
+                     src_object.is_identical_to(info()->closure())) {
+            // Loading the JSFunction from the frame is way cheaper than
+            // materializing the actual JSFunction heap object address.
+            __ ld(dst,
+                  MemOperand(fp, JavaScriptFrameConstants::kFunctionOffset));
+          } else {
+            __ li(dst, src_object);
+          }
           break;
+        }
         case Constant::kRpoNumber:
           UNREACHABLE();  // TODO(titzer): loading RPO numbers on mips64.
           break;
@@ -1329,9 +1322,9 @@ void CodeGenerator::AssembleSwap(InstructionOperand* source,
     Register temp_0 = kScratchReg;
     FPURegister temp_1 = kScratchDoubleReg;
     MemOperand src0 = g.ToMemOperand(source);
-    MemOperand src1(src0.rm(), src0.offset() + kPointerSize);
+    MemOperand src1(src0.rm(), src0.offset() + kIntSize);
     MemOperand dst0 = g.ToMemOperand(destination);
-    MemOperand dst1(dst0.rm(), dst0.offset() + kPointerSize);
+    MemOperand dst1(dst0.rm(), dst0.offset() + kIntSize);
     __ ldc1(temp_1, dst0);  // Save destination in temp_1.
     __ lw(temp_0, src0);    // Then use temp_0 to copy source to destination.
     __ sw(temp_0, dst0);

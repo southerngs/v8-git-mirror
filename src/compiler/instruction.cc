@@ -33,6 +33,8 @@ std::ostream& operator<<(std::ostream& os,
                                    unalloc->fixed_register_index()) << ")";
         case UnallocatedOperand::MUST_HAVE_REGISTER:
           return os << "(R)";
+        case UnallocatedOperand::MUST_HAVE_SLOT:
+          return os << "(S)";
         case UnallocatedOperand::SAME_AS_FIRST_INPUT:
           return os << "(1)";
         case UnallocatedOperand::ANY:
@@ -40,17 +42,33 @@ std::ostream& operator<<(std::ostream& os,
       }
     }
     case InstructionOperand::CONSTANT:
-      return os << "[constant:" << op.index() << "]";
-    case InstructionOperand::IMMEDIATE:
-      return os << "[immediate:" << op.index() << "]";
-    case InstructionOperand::STACK_SLOT:
-      return os << "[stack:" << op.index() << "]";
-    case InstructionOperand::DOUBLE_STACK_SLOT:
-      return os << "[double_stack:" << op.index() << "]";
-    case InstructionOperand::REGISTER:
-      return os << "[" << conf->general_register_name(op.index()) << "|R]";
-    case InstructionOperand::DOUBLE_REGISTER:
-      return os << "[" << conf->double_register_name(op.index()) << "|R]";
+      return os << "[constant:" << ConstantOperand::cast(op).virtual_register()
+                << "]";
+    case InstructionOperand::IMMEDIATE: {
+      auto imm = ImmediateOperand::cast(op);
+      switch (imm.type()) {
+        case ImmediateOperand::INLINE:
+          return os << "#" << imm.inline_value();
+        case ImmediateOperand::INDEXED:
+          return os << "[immediate:" << imm.indexed_value() << "]";
+      }
+    }
+    case InstructionOperand::ALLOCATED:
+      switch (AllocatedOperand::cast(op).allocated_kind()) {
+        case AllocatedOperand::STACK_SLOT:
+          return os << "[stack:" << StackSlotOperand::cast(op).index() << "]";
+        case AllocatedOperand::DOUBLE_STACK_SLOT:
+          return os << "[double_stack:"
+                    << DoubleStackSlotOperand::cast(op).index() << "]";
+        case AllocatedOperand::REGISTER:
+          return os << "["
+                    << conf->general_register_name(
+                           RegisterOperand::cast(op).index()) << "|R]";
+        case AllocatedOperand::DOUBLE_REGISTER:
+          return os << "["
+                    << conf->double_register_name(
+                           DoubleRegisterOperand::cast(op).index()) << "|R]";
+      }
     case InstructionOperand::INVALID:
       return os << "(x)";
   }
@@ -107,9 +125,11 @@ MoveOperands* ParallelMove::PrepareInsertAfter(MoveOperands* move) const {
 Instruction::Instruction(InstructionCode opcode)
     : opcode_(opcode),
       bit_field_(OutputCountField::encode(0) | InputCountField::encode(0) |
-                 TempCountField::encode(0) | IsCallField::encode(false) |
-                 IsControlField::encode(false)),
-      pointer_map_(NULL) {}
+                 TempCountField::encode(0) | IsCallField::encode(false)),
+      reference_map_(NULL) {
+  parallel_moves_[0] = nullptr;
+  parallel_moves_[1] = nullptr;
+}
 
 
 Instruction::Instruction(InstructionCode opcode, size_t output_count,
@@ -120,8 +140,10 @@ Instruction::Instruction(InstructionCode opcode, size_t output_count,
       bit_field_(OutputCountField::encode(output_count) |
                  InputCountField::encode(input_count) |
                  TempCountField::encode(temp_count) |
-                 IsCallField::encode(false) | IsControlField::encode(false)),
-      pointer_map_(NULL) {
+                 IsCallField::encode(false)),
+      reference_map_(NULL) {
+  parallel_moves_[0] = nullptr;
+  parallel_moves_[1] = nullptr;
   size_t offset = 0;
   for (size_t i = 0; i < output_count; ++i) {
     DCHECK(!outputs[i].IsInvalid());
@@ -138,11 +160,12 @@ Instruction::Instruction(InstructionCode opcode, size_t output_count,
 }
 
 
-bool GapInstruction::IsRedundant() const {
-  for (int i = GapInstruction::FIRST_INNER_POSITION;
-       i <= GapInstruction::LAST_INNER_POSITION; i++) {
-    if (parallel_moves_[i] != NULL && !parallel_moves_[i]->IsRedundant())
+bool Instruction::AreMovesRedundant() const {
+  for (int i = Instruction::FIRST_GAP_POSITION;
+       i <= Instruction::LAST_GAP_POSITION; i++) {
+    if (parallel_moves_[i] != nullptr && !parallel_moves_[i]->IsRedundant()) {
       return false;
+    }
   }
   return true;
 }
@@ -164,42 +187,27 @@ std::ostream& operator<<(std::ostream& os,
 }
 
 
-void PointerMap::RecordPointer(InstructionOperand* op, Zone* zone) {
+void ReferenceMap::RecordReference(const InstructionOperand& op) {
   // Do not record arguments as pointers.
-  if (op->IsStackSlot() && op->index() < 0) return;
-  DCHECK(!op->IsDoubleRegister() && !op->IsDoubleStackSlot());
-  pointer_operands_.Add(op, zone);
+  if (op.IsStackSlot() && StackSlotOperand::cast(op).index() < 0) return;
+  DCHECK(!op.IsDoubleRegister() && !op.IsDoubleStackSlot());
+  reference_operands_.push_back(op);
 }
 
 
-void PointerMap::RemovePointer(InstructionOperand* op) {
-  // Do not record arguments as pointers.
-  if (op->IsStackSlot() && op->index() < 0) return;
-  DCHECK(!op->IsDoubleRegister() && !op->IsDoubleStackSlot());
-  for (int i = 0; i < pointer_operands_.length(); ++i) {
-    if (pointer_operands_[i]->Equals(op)) {
-      pointer_operands_.Remove(i);
-      --i;
-    }
-  }
-}
-
-
-void PointerMap::RecordUntagged(InstructionOperand* op, Zone* zone) {
-  // Do not record arguments as pointers.
-  if (op->IsStackSlot() && op->index() < 0) return;
-  DCHECK(!op->IsDoubleRegister() && !op->IsDoubleStackSlot());
-  untagged_operands_.Add(op, zone);
-}
-
-
-std::ostream& operator<<(std::ostream& os, const PointerMap& pm) {
+std::ostream& operator<<(std::ostream& os, const ReferenceMap& pm) {
   os << "{";
-  for (ZoneList<InstructionOperand*>::iterator op =
-           pm.pointer_operands_.begin();
-       op != pm.pointer_operands_.end(); ++op) {
-    if (op != pm.pointer_operands_.begin()) os << ";";
-    os << *op;
+  bool first = true;
+  PrintableInstructionOperand poi = {RegisterConfiguration::ArchDefault(),
+                                     nullptr};
+  for (auto& op : pm.reference_operands_) {
+    if (!first) {
+      os << ";";
+    } else {
+      first = false;
+    }
+    poi.op_ = &op;
+    os << poi;
   }
   return os << "}";
 }
@@ -288,6 +296,19 @@ std::ostream& operator<<(std::ostream& os,
   const Instruction& instr = *printable.instr_;
   PrintableInstructionOperand printable_op = {printable.register_configuration_,
                                               NULL};
+  os << "gap ";
+  for (int i = Instruction::FIRST_GAP_POSITION;
+       i <= Instruction::LAST_GAP_POSITION; i++) {
+    os << "(";
+    if (instr.parallel_moves()[i] != NULL) {
+      PrintableParallelMove ppm = {printable.register_configuration_,
+                                   instr.parallel_moves()[i]};
+      os << ppm;
+    }
+    os << ") ";
+  }
+  os << "\n          ";
+
   if (instr.OutputCount() > 1) os << "(";
   for (size_t i = 0; i < instr.OutputCount(); i++) {
     if (i > 0) os << ", ";
@@ -298,20 +319,7 @@ std::ostream& operator<<(std::ostream& os,
   if (instr.OutputCount() > 1) os << ") = ";
   if (instr.OutputCount() == 1) os << " = ";
 
-  if (instr.IsGapMoves()) {
-    const GapInstruction* gap = GapInstruction::cast(&instr);
-    os << "gap ";
-    for (int i = GapInstruction::FIRST_INNER_POSITION;
-         i <= GapInstruction::LAST_INNER_POSITION; i++) {
-      os << "(";
-      if (gap->parallel_moves_[i] != NULL) {
-        PrintableParallelMove ppm = {printable.register_configuration_,
-                                     gap->parallel_moves_[i]};
-        os << ppm;
-      }
-      os << ") ";
-    }
-  } else if (instr.IsSourcePosition()) {
+  if (instr.IsSourcePosition()) {
     const SourcePositionInstruction* pos =
         SourcePositionInstruction::cast(&instr);
     os << "position (" << pos->source_position().raw() << ")";
@@ -478,7 +486,7 @@ InstructionSequence::InstructionSequence(Isolate* isolate,
       immediates_(zone()),
       instructions_(zone()),
       next_virtual_register_(0),
-      pointer_maps_(zone()),
+      reference_maps_(zone()),
       doubles_(std::less<int>(), VirtualRegisterSet::allocator_type(zone())),
       references_(std::less<int>(), VirtualRegisterSet::allocator_type(zone())),
       deoptimization_entries_(zone()) {
@@ -493,9 +501,9 @@ int InstructionSequence::NextVirtualRegister() {
 }
 
 
-GapInstruction* InstructionSequence::GetBlockStart(RpoNumber rpo) const {
+Instruction* InstructionSequence::GetBlockStart(RpoNumber rpo) const {
   const InstructionBlock* block = InstructionBlockAt(rpo);
-  return GapInstruction::cast(InstructionAt(block->code_start()));
+  return InstructionAt(block->code_start());
 }
 
 
@@ -521,16 +529,14 @@ void InstructionSequence::EndBlock(RpoNumber rpo) {
 
 
 int InstructionSequence::AddInstruction(Instruction* instr) {
-  GapInstruction* gap = GapInstruction::New(zone());
-  instructions_.push_back(gap);
   int index = static_cast<int>(instructions_.size());
   instructions_.push_back(instr);
-  if (instr->NeedsPointerMap()) {
-    DCHECK(instr->pointer_map() == NULL);
-    PointerMap* pointer_map = new (zone()) PointerMap(zone());
-    pointer_map->set_instruction_position(index);
-    instr->set_pointer_map(pointer_map);
-    pointer_maps_.push_back(pointer_map);
+  if (instr->NeedsReferenceMap()) {
+    DCHECK(instr->reference_map() == NULL);
+    ReferenceMap* reference_map = new (zone()) ReferenceMap(zone());
+    reference_map->set_instruction_position(index);
+    instr->set_reference_map(reference_map);
+    reference_maps_.push_back(reference_map);
   }
   return index;
 }
@@ -570,13 +576,6 @@ void InstructionSequence::MarkAsDouble(int virtual_register) {
 }
 
 
-void InstructionSequence::AddGapMove(int index, InstructionOperand* from,
-                                     InstructionOperand* to) {
-  GapAt(index)->GetOrCreateParallelMove(GapInstruction::START, zone())->AddMove(
-      from, to, zone());
-}
-
-
 InstructionSequence::StateId InstructionSequence::AddFrameStateDescriptor(
     FrameStateDescriptor* descriptor) {
   int deoptimization_id = static_cast<int>(deoptimization_entries_.size());
@@ -592,6 +591,16 @@ FrameStateDescriptor* InstructionSequence::GetFrameStateDescriptor(
 
 int InstructionSequence::GetFrameStateDescriptorCount() {
   return static_cast<int>(deoptimization_entries_.size());
+}
+
+
+RpoNumber InstructionSequence::InputRpo(Instruction* instr, size_t index) {
+  InstructionOperand* operand = instr->InputAt(index);
+  Constant constant =
+      operand->IsImmediate()
+          ? GetImmediate(ImmediateOperand::cast(operand))
+          : GetConstant(ConstantOperand::cast(operand)->virtual_register());
+  return constant.ToRpoNumber();
 }
 
 

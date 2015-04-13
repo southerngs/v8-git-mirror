@@ -1086,44 +1086,28 @@ void MacroAssembler::DebugBreak() {
 }
 
 
-void MacroAssembler::PushTryHandler(StackHandler::Kind kind,
-                                    int handler_index) {
+void MacroAssembler::PushStackHandler() {
   // Adjust this code if not the case.
-  STATIC_ASSERT(StackHandlerConstants::kSize == 3 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kSize == 1 * kPointerSize);
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kStateOffset == 1 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kContextOffset == 2 * kPointerSize);
-
-  // For the JSEntry handler, we must preserve r1-r7, r0,r8-r12 are available.
-  // We want the stack to look like
-  // sp -> NextOffset
-  //       state
-  //       context
 
   // Link the current handler as the next handler.
+  // Preserve r3-r7.
   mov(r8, Operand(ExternalReference(Isolate::kHandlerAddress, isolate())));
   LoadP(r0, MemOperand(r8));
-  StorePU(r0, MemOperand(sp, -StackHandlerConstants::kSize));
+  push(r0);
+
   // Set this new handler as the current one.
   StoreP(sp, MemOperand(r8));
-
-  unsigned state = StackHandler::IndexField::encode(handler_index) |
-                   StackHandler::KindField::encode(kind);
-  LoadIntLiteral(r8, state);
-
-  if (kind == StackHandler::JS_ENTRY) {
-    LoadSmiLiteral(cp, Smi::FromInt(0));  // Indicates no context.
-  }
-  StoreP(r8, MemOperand(sp, StackHandlerConstants::kStateOffset));
-  StoreP(cp, MemOperand(sp, StackHandlerConstants::kContextOffset));
 }
 
 
-void MacroAssembler::PopTryHandler() {
+void MacroAssembler::PopStackHandler() {
+  STATIC_ASSERT(StackHandlerConstants::kSize == 1 * kPointerSize);
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0);
+
   pop(r4);
   mov(ip, Operand(ExternalReference(Isolate::kHandlerAddress, isolate())));
-  addi(sp, sp, Operand(StackHandlerConstants::kSize - kPointerSize));
   StoreP(r4, MemOperand(ip));
 }
 
@@ -1384,7 +1368,6 @@ void MacroAssembler::Allocate(int object_size, Register result,
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
     // Align the next allocation. Storing the filler map without checking top is
     // safe in new-space because the limit of the heap is aligned there.
-    DCHECK((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
 #if V8_TARGET_ARCH_PPC64
     STATIC_ASSERT(kPointerAlignment == kDoubleAlignment);
 #else
@@ -1392,7 +1375,7 @@ void MacroAssembler::Allocate(int object_size, Register result,
     andi(scratch2, result, Operand(kDoubleAlignmentMask));
     Label aligned;
     beq(&aligned, cr0);
-    if ((flags & PRETENURE_OLD_DATA_SPACE) != 0) {
+    if ((flags & PRETENURE) != 0) {
       cmpl(result, ip);
       bge(gc_required);
     }
@@ -1483,7 +1466,6 @@ void MacroAssembler::Allocate(Register object_size, Register result,
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
     // Align the next allocation. Storing the filler map without checking top is
     // safe in new-space because the limit of the heap is aligned there.
-    DCHECK((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
 #if V8_TARGET_ARCH_PPC64
     STATIC_ASSERT(kPointerAlignment == kDoubleAlignment);
 #else
@@ -1491,7 +1473,7 @@ void MacroAssembler::Allocate(Register object_size, Register result,
     andi(scratch2, result, Operand(kDoubleAlignmentMask));
     Label aligned;
     beq(&aligned, cr0);
-    if ((flags & PRETENURE_OLD_DATA_SPACE) != 0) {
+    if ((flags & PRETENURE) != 0) {
       cmpl(result, ip);
       bge(gc_required);
     }

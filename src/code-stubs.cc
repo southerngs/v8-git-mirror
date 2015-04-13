@@ -620,26 +620,6 @@ CallInterfaceDescriptor StoreTransitionStub::GetCallInterfaceDescriptor() {
 }
 
 
-static void InitializeVectorLoadStub(Isolate* isolate,
-                                     CodeStubDescriptor* descriptor,
-                                     Address deoptimization_handler) {
-  DCHECK(FLAG_vector_ics);
-  descriptor->Initialize(deoptimization_handler);
-}
-
-
-void VectorLoadStub::InitializeDescriptor(CodeStubDescriptor* descriptor) {
-  InitializeVectorLoadStub(isolate(), descriptor,
-                           FUNCTION_ADDR(LoadIC_MissFromStubFailure));
-}
-
-
-void VectorKeyedLoadStub::InitializeDescriptor(CodeStubDescriptor* descriptor) {
-  InitializeVectorLoadStub(isolate(), descriptor,
-                           FUNCTION_ADDR(KeyedLoadIC_MissFromStubFailure));
-}
-
-
 void MegamorphicLoadStub::InitializeDescriptor(CodeStubDescriptor* d) {}
 
 
@@ -768,6 +748,21 @@ void StoreElementStub::Generate(MacroAssembler* masm) {
     case SLOPPY_ARGUMENTS_ELEMENTS:
       UNREACHABLE();
       break;
+  }
+}
+
+
+// static
+void StoreFastElementStub::GenerateAheadOfTime(Isolate* isolate) {
+  StoreFastElementStub(isolate, false, FAST_HOLEY_ELEMENTS, STANDARD_STORE)
+      .GetCode();
+  StoreFastElementStub(isolate, false, FAST_HOLEY_ELEMENTS,
+                       STORE_AND_GROW_NO_TRANSITION).GetCode();
+  for (int i = FIRST_FAST_ELEMENTS_KIND; i <= LAST_FAST_ELEMENTS_KIND; i++) {
+    ElementsKind kind = static_cast<ElementsKind>(i);
+    StoreFastElementStub(isolate, true, kind, STANDARD_STORE).GetCode();
+    StoreFastElementStub(isolate, true, kind, STORE_AND_GROW_NO_TRANSITION)
+        .GetCode();
   }
 }
 

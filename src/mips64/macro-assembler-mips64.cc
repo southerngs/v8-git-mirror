@@ -1261,12 +1261,42 @@ void MacroAssembler::li(Register rd, Operand j, LiFlags mode) {
         ori(rd, rd, (j.imm64_ & kImm16Mask));
       }
     } else {
-      lui(rd, (j.imm64_ >> 48) & kImm16Mask);
-      ori(rd, rd, (j.imm64_ >> 32) & kImm16Mask);
-      dsll(rd, rd, 16);
-      ori(rd, rd, (j.imm64_ >> 16) & kImm16Mask);
-      dsll(rd, rd, 16);
-      ori(rd, rd, j.imm64_ & kImm16Mask);
+      if (is_int48(j.imm64_)) {
+        if ((j.imm64_ >> 32) & kImm16Mask) {
+          lui(rd, (j.imm64_ >> 32) & kImm16Mask);
+          if ((j.imm64_ >> 16) & kImm16Mask) {
+            ori(rd, rd, (j.imm64_ >> 16) & kImm16Mask);
+          }
+        } else {
+          ori(rd, zero_reg, (j.imm64_ >> 16) & kImm16Mask);
+        }
+        dsll(rd, rd, 16);
+        if (j.imm64_ & kImm16Mask) {
+          ori(rd, rd, j.imm64_ & kImm16Mask);
+        }
+      } else {
+        lui(rd, (j.imm64_ >> 48) & kImm16Mask);
+        if ((j.imm64_ >> 32) & kImm16Mask) {
+          ori(rd, rd, (j.imm64_ >> 32) & kImm16Mask);
+        }
+        if ((j.imm64_ >> 16) & kImm16Mask) {
+          dsll(rd, rd, 16);
+          ori(rd, rd, (j.imm64_ >> 16) & kImm16Mask);
+          if (j.imm64_ & kImm16Mask) {
+            dsll(rd, rd, 16);
+            ori(rd, rd, j.imm64_ & kImm16Mask);
+          } else {
+            dsll(rd, rd, 16);
+          }
+        } else {
+          if (j.imm64_ & kImm16Mask) {
+            dsll32(rd, rd, 0);
+            ori(rd, rd, j.imm64_ & kImm16Mask);
+          } else {
+            dsll32(rd, rd, 0);
+          }
+        }
+      }
     }
   } else if (MustUseReg(j.rmode_)) {
     RecordRelocInfo(j.rmode_, j.imm64_);
@@ -1599,18 +1629,18 @@ void MacroAssembler::Madd_d(FPURegister fd, FPURegister fr, FPURegister fs,
 }
 
 
-void MacroAssembler::BranchF(Label* target,
-                             Label* nan,
-                             Condition cc,
-                             FPURegister cmp1,
-                             FPURegister cmp2,
-                             BranchDelaySlot bd) {
+void MacroAssembler::BranchFCommon(SecondaryField sizeField, Label* target,
+                                   Label* nan, Condition cc, FPURegister cmp1,
+                                   FPURegister cmp2, BranchDelaySlot bd) {
   BlockTrampolinePoolScope block_trampoline_pool(this);
   if (cc == al) {
     Branch(bd, target);
     return;
   }
 
+  if (kArchVariant == kMips64r6) {
+    sizeField = sizeField == D ? L : W;
+  }
   DCHECK(nan || target);
   // Check for unordered (NaN) cases.
   if (nan) {
@@ -1632,35 +1662,35 @@ void MacroAssembler::BranchF(Label* target,
       // have been handled by the caller.
       switch (cc) {
         case lt:
-          c(OLT, D, cmp1, cmp2);
+          c(OLT, sizeField, cmp1, cmp2);
           bc1t(target);
           break;
         case gt:
-          c(ULE, D, cmp1, cmp2);
+          c(ULE, sizeField, cmp1, cmp2);
           bc1f(target);
           break;
         case ge:
-          c(ULT, D, cmp1, cmp2);
+          c(ULT, sizeField, cmp1, cmp2);
           bc1f(target);
           break;
         case le:
-          c(OLE, D, cmp1, cmp2);
+          c(OLE, sizeField, cmp1, cmp2);
           bc1t(target);
           break;
         case eq:
-          c(EQ, D, cmp1, cmp2);
+          c(EQ, sizeField, cmp1, cmp2);
           bc1t(target);
           break;
         case ueq:
-          c(UEQ, D, cmp1, cmp2);
+          c(UEQ, sizeField, cmp1, cmp2);
           bc1t(target);
           break;
         case ne:
-          c(EQ, D, cmp1, cmp2);
+          c(EQ, sizeField, cmp1, cmp2);
           bc1f(target);
           break;
         case nue:
-          c(UEQ, D, cmp1, cmp2);
+          c(UEQ, sizeField, cmp1, cmp2);
           bc1f(target);
           break;
         default:
@@ -1676,35 +1706,35 @@ void MacroAssembler::BranchF(Label* target,
       DCHECK(!cmp1.is(f31) && !cmp2.is(f31));
       switch (cc) {
         case lt:
-          cmp(OLT, L, f31, cmp1, cmp2);
+          cmp(OLT, sizeField, f31, cmp1, cmp2);
           bc1nez(target, f31);
           break;
         case gt:
-          cmp(ULE, L, f31, cmp1, cmp2);
+          cmp(ULE, sizeField, f31, cmp1, cmp2);
           bc1eqz(target, f31);
           break;
         case ge:
-          cmp(ULT, L, f31, cmp1, cmp2);
+          cmp(ULT, sizeField, f31, cmp1, cmp2);
           bc1eqz(target, f31);
           break;
         case le:
-          cmp(OLE, L, f31, cmp1, cmp2);
+          cmp(OLE, sizeField, f31, cmp1, cmp2);
           bc1nez(target, f31);
           break;
         case eq:
-          cmp(EQ, L, f31, cmp1, cmp2);
+          cmp(EQ, sizeField, f31, cmp1, cmp2);
           bc1nez(target, f31);
           break;
         case ueq:
-          cmp(UEQ, L, f31, cmp1, cmp2);
+          cmp(UEQ, sizeField, f31, cmp1, cmp2);
           bc1nez(target, f31);
           break;
         case ne:
-          cmp(EQ, L, f31, cmp1, cmp2);
+          cmp(EQ, sizeField, f31, cmp1, cmp2);
           bc1eqz(target, f31);
           break;
         case nue:
-          cmp(UEQ, L, f31, cmp1, cmp2);
+          cmp(UEQ, sizeField, f31, cmp1, cmp2);
           bc1eqz(target, f31);
           break;
         default:
@@ -1748,16 +1778,34 @@ void MacroAssembler::Move(FPURegister dst, double imm) {
     // Move the low part of the double into the lower bits of the corresponding
     // FPU register.
     if (lo != 0) {
-      li(at, Operand(lo));
-      mtc1(at, dst);
+      if (!(lo & kImm16Mask)) {
+        lui(at, (lo >> kLuiShift) & kImm16Mask);
+        mtc1(at, dst);
+      } else if (!(lo & kHiMask)) {
+        ori(at, zero_reg, lo & kImm16Mask);
+        mtc1(at, dst);
+      } else {
+        lui(at, (lo >> kLuiShift) & kImm16Mask);
+        ori(at, at, lo & kImm16Mask);
+        mtc1(at, dst);
+      }
     } else {
       mtc1(zero_reg, dst);
     }
     // Move the high part of the double into the high bits of the corresponding
     // FPU register.
     if (hi != 0) {
-      li(at, Operand(hi));
-      mthc1(at, dst);
+      if (!(hi & kImm16Mask)) {
+        lui(at, (hi >> kLuiShift) & kImm16Mask);
+        mthc1(at, dst);
+      } else if (!(hi & kHiMask)) {
+        ori(at, zero_reg, hi & kImm16Mask);
+        mthc1(at, dst);
+      } else {
+        lui(at, (hi >> kLuiShift) & kImm16Mask);
+        ori(at, at, hi & kImm16Mask);
+        mthc1(at, dst);
+      }
     } else {
       mthc1(zero_reg, dst);
     }
@@ -2122,7 +2170,7 @@ void MacroAssembler::BranchShort(int16_t offset, Condition cond, Register rs,
       // Unsigned comparison.
       case Ugreater:
         if (r2.is(zero_reg)) {
-          bgtz(rs, offset);
+          bne(rs, zero_reg, offset);
         } else {
           sltu(scratch, r2, rs);
           bne(scratch, zero_reg, offset);
@@ -2130,7 +2178,7 @@ void MacroAssembler::BranchShort(int16_t offset, Condition cond, Register rs,
         break;
       case Ugreater_equal:
         if (r2.is(zero_reg)) {
-          bgez(rs, offset);
+          b(offset);
         } else {
           sltu(scratch, rs, r2);
           beq(scratch, zero_reg, offset);
@@ -2147,7 +2195,7 @@ void MacroAssembler::BranchShort(int16_t offset, Condition cond, Register rs,
         break;
       case Uless_equal:
         if (r2.is(zero_reg)) {
-          b(offset);
+          beq(rs, zero_reg, offset);
         } else {
           sltu(scratch, r2, rs);
           beq(scratch, zero_reg, offset);
@@ -2237,7 +2285,7 @@ void MacroAssembler::BranchShort(int16_t offset, Condition cond, Register rs,
       // Unsigned comparison.
       case Ugreater:
         if (rt.imm64_ == 0) {
-          bgtz(rs, offset);
+          bne(rs, zero_reg, offset);
         } else {
           r2 = scratch;
           li(r2, rt);
@@ -2247,7 +2295,7 @@ void MacroAssembler::BranchShort(int16_t offset, Condition cond, Register rs,
         break;
       case Ugreater_equal:
         if (rt.imm64_ == 0) {
-          bgez(rs, offset);
+          b(offset);
         } else if (is_int16(rt.imm64_)) {
           sltiu(scratch, rs, rt.imm64_);
           beq(scratch, zero_reg, offset);
@@ -2274,7 +2322,7 @@ void MacroAssembler::BranchShort(int16_t offset, Condition cond, Register rs,
         break;
       case Uless_equal:
         if (rt.imm64_ == 0) {
-          b(offset);
+          beq(rs, zero_reg, offset);
         } else {
           r2 = scratch;
           li(r2, rt);
@@ -2376,7 +2424,7 @@ void MacroAssembler::BranchShort(Label* L, Condition cond, Register rs,
       case Ugreater:
         if (r2.is(zero_reg)) {
           offset = shifted_branch_offset(L, false);
-           bgtz(rs, offset);
+          bne(rs, zero_reg, offset);
         } else {
           sltu(scratch, r2, rs);
           offset = shifted_branch_offset(L, false);
@@ -2386,7 +2434,7 @@ void MacroAssembler::BranchShort(Label* L, Condition cond, Register rs,
       case Ugreater_equal:
         if (r2.is(zero_reg)) {
           offset = shifted_branch_offset(L, false);
-          bgez(rs, offset);
+          b(offset);
         } else {
           sltu(scratch, rs, r2);
           offset = shifted_branch_offset(L, false);
@@ -2406,7 +2454,7 @@ void MacroAssembler::BranchShort(Label* L, Condition cond, Register rs,
       case Uless_equal:
         if (r2.is(zero_reg)) {
           offset = shifted_branch_offset(L, false);
-          b(offset);
+          beq(rs, zero_reg, offset);
         } else {
           sltu(scratch, r2, rs);
           offset = shifted_branch_offset(L, false);
@@ -2528,7 +2576,7 @@ void MacroAssembler::BranchShort(Label* L, Condition cond, Register rs,
       case Ugreater_equal:
         if (rt.imm64_ == 0) {
           offset = shifted_branch_offset(L, false);
-          bgez(rs, offset);
+          b(offset);
         } else if (is_int16(rt.imm64_)) {
           sltiu(scratch, rs, rt.imm64_);
           offset = shifted_branch_offset(L, false);
@@ -3059,24 +3107,6 @@ void MacroAssembler::Ret(Condition cond,
 }
 
 
-void MacroAssembler::J(Label* L, BranchDelaySlot bdslot) {
-  BlockTrampolinePoolScope block_trampoline_pool(this);
-
-  uint64_t imm28;
-  imm28 = jump_address(L);
-  imm28 &= kImm28Mask;
-  { BlockGrowBufferScope block_buf_growth(this);
-    // Buffer growth (and relocation) must be blocked for internal references
-    // until associated instructions are emitted and available to be patched.
-    RecordRelocInfo(RelocInfo::INTERNAL_REFERENCE_ENCODED);
-    j(imm28);
-  }
-  // Emit a nop in the branch delay slot if required.
-  if (bdslot == PROTECT)
-    nop();
-}
-
-
 void MacroAssembler::Jr(Label* L, BranchDelaySlot bdslot) {
   BlockTrampolinePoolScope block_trampoline_pool(this);
 
@@ -3116,6 +3146,7 @@ void MacroAssembler::Jalr(Label* L, BranchDelaySlot bdslot) {
 
 
 void MacroAssembler::DropAndRet(int drop) {
+  DCHECK(is_int16(drop * kPointerSize));
   Ret(USE_DELAY_SLOT);
   daddiu(sp, sp, drop * kPointerSize);
 }
@@ -3153,7 +3184,7 @@ void MacroAssembler::Drop(int count,
      Branch(&skip, NegateCondition(cond), reg, op);
   }
 
-  daddiu(sp, sp, count * kPointerSize);
+  Daddu(sp, sp, Operand(count * kPointerSize));
 
   if (cond != al) {
     bind(&skip);
@@ -3222,47 +3253,26 @@ void MacroAssembler::DebugBreak() {
 // ---------------------------------------------------------------------------
 // Exception handling.
 
-void MacroAssembler::PushTryHandler(StackHandler::Kind kind,
-                                    int handler_index) {
+void MacroAssembler::PushStackHandler() {
   // Adjust this code if not the case.
-  STATIC_ASSERT(StackHandlerConstants::kSize == 3 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kSize == 1 * kPointerSize);
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kStateOffset == 1 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kContextOffset == 2 * kPointerSize);
-
-  // For the JSEntry handler, we must preserve a0-a3 and s0.
-  // a5-a7 are available. We will build up the handler from the bottom by
-  // pushing on the stack.
-  // Set up the the state (r6) for pushing.
-  unsigned state =
-      StackHandler::IndexField::encode(handler_index) |
-      StackHandler::KindField::encode(kind);
-  li(a5, Operand(CodeObject()), CONSTANT_SIZE);
-  li(a6, Operand(state));
-
-  // Push the context and state.
-  if (kind == StackHandler::JS_ENTRY) {
-    DCHECK(Smi::FromInt(0) == 0);
-    // The zero_reg indicates no context.
-    // The operands are reversed to match the order of MultiPush/Pop.
-    Push(zero_reg, a6);
-  } else {
-    MultiPush(a6.bit() | cp.bit());
-  }
 
   // Link the current handler as the next handler.
   li(a6, Operand(ExternalReference(Isolate::kHandlerAddress, isolate())));
   ld(a5, MemOperand(a6));
   push(a5);
+
   // Set this new handler as the current one.
   sd(sp, MemOperand(a6));
 }
 
 
-void MacroAssembler::PopTryHandler() {
+void MacroAssembler::PopStackHandler() {
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0);
   pop(a1);
-  Daddu(sp, sp, Operand(StackHandlerConstants::kSize - kPointerSize));
+  Daddu(sp, sp, Operand(static_cast<int64_t>(StackHandlerConstants::kSize -
+                                             kPointerSize)));
   li(at, Operand(ExternalReference(Isolate::kHandlerAddress, isolate())));
   sd(a1, MemOperand(at));
 }

@@ -55,13 +55,13 @@ class CodeGenerator FINAL : public GapResolver::Assembler {
   bool IsNextInAssemblyOrder(RpoNumber block) const;
 
   // Record a safepoint with the given pointer map.
-  void RecordSafepoint(PointerMap* pointers, Safepoint::Kind kind,
+  void RecordSafepoint(ReferenceMap* references, Safepoint::Kind kind,
                        int arguments, Safepoint::DeoptMode deopt_mode);
 
   // Assemble code for the specified instruction.
   void AssembleInstruction(Instruction* instr);
   void AssembleSourcePosition(SourcePositionInstruction* instr);
-  void AssembleGap(GapInstruction* gap);
+  void AssembleGaps(Instruction* instr);
 
   // ===========================================================================
   // ============= Architecture-specific code generation methods. ==============

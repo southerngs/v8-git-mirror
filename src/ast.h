@@ -92,6 +92,7 @@ namespace internal {
   V(CountOperation)             \
   V(BinaryOperation)            \
   V(CompareOperation)           \
+  V(Spread)                     \
   V(ThisFunction)               \
   V(SuperReference)             \
   V(CaseClause)
@@ -188,7 +189,7 @@ class AstProperties FINAL BASE_EMBEDDED {
  public:
   class Flags : public EnumSet<AstPropertiesFlag, int> {};
 
-  AstProperties() : node_count_(0) {}
+  explicit AstProperties(Zone* zone) : node_count_(0), spec_(zone) {}
 
   Flags* flags() { return &flags_; }
   int node_count() { return node_count_; }
@@ -200,12 +201,12 @@ class AstProperties FINAL BASE_EMBEDDED {
   int ic_slots() const { return spec_.ic_slots(); }
   void increase_ic_slots(int count) { spec_.increase_ic_slots(count); }
   void SetKind(int ic_slot, Code::Kind kind) { spec_.SetKind(ic_slot, kind); }
-  const FeedbackVectorSpec& get_spec() const { return spec_; }
+  const ZoneFeedbackVectorSpec* get_spec() const { return &spec_; }
 
  private:
   Flags flags_;
   int node_count_;
-  FeedbackVectorSpec spec_;
+  ZoneFeedbackVectorSpec spec_;
 };
 
 
@@ -1482,10 +1483,12 @@ class ObjectLiteral FINAL : public MaterializedLiteral {
   Handle<FixedArray> constant_properties() const {
     return constant_properties_;
   }
+  int properties_count() const { return constant_properties_->length() / 2; }
   ZoneList<Property*>* properties() const { return properties_; }
   bool fast_elements() const { return fast_elements_; }
   bool may_store_doubles() const { return may_store_doubles_; }
   bool has_function() const { return has_function_; }
+  bool has_elements() const { return has_elements_; }
 
   // Decide if a property should be in the object boilerplate.
   static bool IsBoilerplateProperty(Property* property);
@@ -1499,16 +1502,20 @@ class ObjectLiteral FINAL : public MaterializedLiteral {
   void CalculateEmitStore(Zone* zone);
 
   // Assemble bitfield of flags for the CreateObjectLiteral helper.
-  int ComputeFlags() const {
+  int ComputeFlags(bool disable_mementos = false) const {
     int flags = fast_elements() ? kFastElements : kNoFlags;
     flags |= has_function() ? kHasFunction : kNoFlags;
+    if (disable_mementos) {
+      flags |= kDisableMementos;
+    }
     return flags;
   }
 
   enum Flags {
     kNoFlags = 0,
     kFastElements = 1,
-    kHasFunction = 1 << 1
+    kHasFunction = 1 << 1,
+    kDisableMementos = 1 << 2
   };
 
   struct Accessors: public ZoneObject {
@@ -1533,6 +1540,7 @@ class ObjectLiteral FINAL : public MaterializedLiteral {
         properties_(properties),
         boilerplate_properties_(boilerplate_properties),
         fast_elements_(false),
+        has_elements_(false),
         may_store_doubles_(false),
         has_function_(has_function) {}
   static int parent_num_ids() { return MaterializedLiteral::num_ids(); }
@@ -1543,6 +1551,7 @@ class ObjectLiteral FINAL : public MaterializedLiteral {
   ZoneList<Property*>* properties_;
   int boilerplate_properties_;
   bool fast_elements_;
+  bool has_elements_;
   bool may_store_doubles_;
   bool has_function_;
 };
@@ -1578,6 +1587,12 @@ class ArrayLiteral FINAL : public MaterializedLiteral {
   DECLARE_NODE_TYPE(ArrayLiteral)
 
   Handle<FixedArray> constant_elements() const { return constant_elements_; }
+  ElementsKind constant_elements_kind() const {
+    DCHECK_EQ(2, constant_elements_->length());
+    return static_cast<ElementsKind>(
+        Smi::cast(constant_elements_->get(0))->value());
+  }
+
   ZoneList<Expression*>* values() const { return values_; }
 
   BailoutId CreateLiteralId() const { return BailoutId(local_id(0)); }
@@ -1593,9 +1608,11 @@ class ArrayLiteral FINAL : public MaterializedLiteral {
   void BuildConstantElements(Isolate* isolate);
 
   // Assemble bitfield of flags for the CreateArrayLiteral helper.
-  int ComputeFlags() const {
+  int ComputeFlags(bool disable_mementos = false) const {
     int flags = depth() == 1 ? kShallowElements : kNoFlags;
-    flags |= ArrayLiteral::kDisableMementos;
+    if (disable_mementos) {
+      flags |= kDisableMementos;
+    }
     return flags;
   }
 
@@ -1623,9 +1640,7 @@ class VariableProxy FINAL : public Expression {
  public:
   DECLARE_NODE_TYPE(VariableProxy)
 
-  bool IsValidReferenceExpression() const OVERRIDE {
-    return !is_resolved() || var()->IsValidReference();
-  }
+  bool IsValidReferenceExpression() const OVERRIDE { return !is_this(); }
 
   bool IsArguments() const { return is_resolved() && var()->is_arguments(); }
 
@@ -1680,8 +1695,9 @@ class VariableProxy FINAL : public Expression {
   VariableProxy(Zone* zone, Variable* var, int start_position,
                 int end_position);
 
-  VariableProxy(Zone* zone, const AstRawString* name, bool is_this,
-                int start_position, int end_position);
+  VariableProxy(Zone* zone, const AstRawString* name,
+                Variable::Kind variable_kind, int start_position,
+                int end_position);
 
   class IsThisField : public BitField8<bool, 0, 1> {};
   class IsAssignedField : public BitField8<bool, 1, 1> {};
@@ -1847,15 +1863,16 @@ class Call FINAL : public Expression {
 
   Handle<JSFunction> target() { return target_; }
 
-  Handle<Cell> cell() { return cell_; }
-
   Handle<AllocationSite> allocation_site() { return allocation_site_; }
 
+  void SetKnownGlobalTarget(Handle<JSFunction> target) {
+    target_ = target;
+    set_is_uninitialized(false);
+  }
   void set_target(Handle<JSFunction> target) { target_ = target; }
   void set_allocation_site(Handle<AllocationSite> site) {
     allocation_site_ = site;
   }
-  bool ComputeGlobalTarget(Handle<GlobalObject> global, LookupIterator* it);
 
   static int num_ids() { return parent_num_ids() + 2; }
   BailoutId ReturnId() const { return BailoutId(local_id(0)); }
@@ -1910,7 +1927,6 @@ class Call FINAL : public Expression {
   Expression* expression_;
   ZoneList<Expression*>* arguments_;
   Handle<JSFunction> target_;
-  Handle<Cell> cell_;
   Handle<AllocationSite> allocation_site_;
   class IsUninitializedField : public BitField8<bool, 0, 1> {};
   uint8_t bit_field_;
@@ -1957,6 +1973,10 @@ class CallNew FINAL : public Expression {
   }
   void set_is_monomorphic(bool monomorphic) { is_monomorphic_ = monomorphic; }
   void set_target(Handle<JSFunction> target) { target_ = target; }
+  void SetKnownGlobalTarget(Handle<JSFunction> target) {
+    target_ = target;
+    is_monomorphic_ = true;
+  }
 
  protected:
   CallNew(Zone* zone, Expression* expression, ZoneList<Expression*>* arguments,
@@ -2241,6 +2261,26 @@ class CompareOperation FINAL : public Expression {
   Expression* right_;
 
   Type* combined_type_;
+};
+
+
+class Spread FINAL : public Expression {
+ public:
+  DECLARE_NODE_TYPE(Spread)
+
+  Expression* expression() const { return expression_; }
+
+  static int num_ids() { return parent_num_ids(); }
+
+ protected:
+  Spread(Zone* zone, Expression* expression, int pos)
+      : Expression(zone, pos), expression_(expression) {}
+  static int parent_num_ids() { return Expression::num_ids(); }
+
+ private:
+  int local_id(int n) const { return base_id() + parent_num_ids() + n; }
+
+  Expression* expression_;
 };
 
 
@@ -2555,7 +2595,7 @@ class FunctionLiteral FINAL : public Expression {
   void set_ast_properties(AstProperties* ast_properties) {
     ast_properties_ = *ast_properties;
   }
-  const FeedbackVectorSpec& feedback_vector_spec() const {
+  const ZoneFeedbackVectorSpec* feedback_vector_spec() const {
     return ast_properties_.get_spec();
   }
   bool dont_optimize() { return dont_optimize_reason_ != kNoReason; }
@@ -2579,6 +2619,7 @@ class FunctionLiteral FINAL : public Expression {
         scope_(scope),
         body_(body),
         raw_inferred_name_(ast_value_factory->empty_string()),
+        ast_properties_(zone),
         dont_optimize_reason_(kNoReason),
         materialized_literal_count_(materialized_literal_count),
         expected_property_count_(expected_property_count),
@@ -3397,11 +3438,12 @@ class AstNodeFactory FINAL BASE_EMBEDDED {
     return new (zone_) VariableProxy(zone_, var, start_position, end_position);
   }
 
-  VariableProxy* NewVariableProxy(const AstRawString* name, bool is_this,
+  VariableProxy* NewVariableProxy(const AstRawString* name,
+                                  Variable::Kind variable_kind,
                                   int start_position = RelocInfo::kNoPosition,
                                   int end_position = RelocInfo::kNoPosition) {
     return new (zone_)
-        VariableProxy(zone_, name, is_this, start_position, end_position);
+        VariableProxy(zone_, name, variable_kind, start_position, end_position);
   }
 
   Property* NewProperty(Expression* obj, Expression* key, int pos) {
@@ -3452,6 +3494,10 @@ class AstNodeFactory FINAL BASE_EMBEDDED {
                                         Expression* right,
                                         int pos) {
     return new (zone_) CompareOperation(zone_, op, left, right, pos);
+  }
+
+  Spread* NewSpread(Expression* expression, int pos) {
+    return new (zone_) Spread(zone_, expression, pos);
   }
 
   Conditional* NewConditional(Expression* condition,

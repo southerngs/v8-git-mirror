@@ -311,9 +311,6 @@ class ThreadLocalTop BASE_EMBEDDED {
   ExternalCallbackScope* external_callback_scope_;
   StateTag current_vm_state_;
 
-  // Generated code scratch locations.
-  int32_t formal_count_;
-
   // Call back function to report unsafe JS accesses.
   v8::FailedAccessCheckCallback failed_access_check_callback_;
 
@@ -379,8 +376,9 @@ typedef List<HeapObject*> DebugObjectCache;
   V(Relocatable*, relocatable_top, NULL)                                       \
   V(DebugObjectCache*, string_stream_debug_object_cache, NULL)                 \
   V(Object*, string_stream_current_security_token, NULL)                       \
-  /* Serializer state. */                                                      \
   V(ExternalReferenceTable*, external_reference_table, NULL)                   \
+  V(HashMap*, external_reference_map, NULL)                                    \
+  V(HashMap*, root_index_map, NULL)                                            \
   V(int, pending_microtask_count, 0)                                           \
   V(bool, autorun_microtasks, true)                                            \
   V(HStatistics*, hstatistics, NULL)                                           \
@@ -530,6 +528,8 @@ class Isolate {
 
   static void GlobalTearDown();
 
+  void ClearSerializerData();
+
   // Find the PerThread for this particular (isolate, thread) combination
   // If one does not yet exist, return null.
   PerIsolateThreadData* FindPerThreadDataForThisThread();
@@ -608,9 +608,6 @@ class Isolate {
   v8::TryCatch* try_catch_handler() {
     return thread_local_top_.try_catch_handler();
   }
-  Address try_catch_handler_address() {
-    return thread_local_top_.try_catch_handler_address();
-  }
   bool* external_caught_exception_address() {
     return &thread_local_top_.external_caught_exception_;
   }
@@ -635,7 +632,8 @@ class Isolate {
     thread_local_top_.scheduled_exception_ = heap_.the_hole_value();
   }
 
-  bool IsFinallyOnTop();
+  bool IsJavaScriptHandlerOnTop(Object* exception);
+  bool IsExternalHandlerOnTop(Object* exception);
 
   bool is_catchable_by_javascript(Object* exception) {
     return exception != heap()->termination_exception();
@@ -664,9 +662,6 @@ class Isolate {
     return &thread_local_top_.js_entry_sp_;
   }
 
-  // Generated code scratch locations.
-  void* formal_count_address() { return &thread_local_top_.formal_count_; }
-
   // Returns the global object of the current context. It could be
   // a builtin object, or a JS global object.
   Handle<GlobalObject> global_object() {
@@ -692,7 +687,7 @@ class Isolate {
   bool OptionalRescheduleException(bool is_bottom_call);
 
   // Push and pop a promise and the current try-catch handler.
-  void PushPromise(Handle<JSObject> promise);
+  void PushPromise(Handle<JSObject> promise, Handle<JSFunction> function);
   void PopPromise();
   Handle<Object> GetPromiseOnStackOnThrow();
 
@@ -752,6 +747,7 @@ class Isolate {
   // Exception throwing support. The caller should use the result
   // of Throw() as its return value.
   Object* Throw(Object* exception, MessageLocation* location = NULL);
+  Object* ThrowIllegalOperation();
 
   template <typename T>
   MUST_USE_RESULT MaybeHandle<T> Throw(Handle<Object> exception,
@@ -760,14 +756,20 @@ class Isolate {
     return MaybeHandle<T>();
   }
 
-  // Re-throw an exception.  This involves no error reporting since
-  // error reporting was handled when the exception was thrown
-  // originally.
+  // Re-throw an exception.  This involves no error reporting since error
+  // reporting was handled when the exception was thrown originally.
   Object* ReThrow(Object* exception);
 
   // Find the correct handler for the current pending exception. This also
   // clears and returns the current pending exception.
   Object* FindHandler();
+
+  // Tries to predict whether an exception will be caught. Note that this can
+  // only produce an estimate, because it is undecidable whether a finally
+  // clause will consume or re-throw an exception. We conservatively assume any
+  // finally clause will behave as if the exception were consumed.
+  enum CatchType { NOT_CAUGHT, CAUGHT_BY_JAVASCRIPT, CAUGHT_BY_EXTERNAL };
+  CatchType PredictExceptionCatcher();
 
   void ScheduleThrow(Object* exception);
   // Re-set pending message, script and positions reported to the TryCatch
@@ -778,14 +780,9 @@ class Isolate {
   void ReportPendingMessages();
   // Return pending location if any or unfilled structure.
   MessageLocation GetMessageLocation();
-  Object* ThrowIllegalOperation();
 
   // Promote a scheduled exception to pending. Asserts has_scheduled_exception.
   Object* PromoteScheduledException();
-  // Checks if exception should be reported and finds out if it's
-  // caught externally.
-  bool ShouldReportException(bool* can_be_caught_externally,
-                             bool catchable_by_javascript);
 
   // Attempts to compute the current source location, storing the
   // result in the target out parameter.
@@ -811,7 +808,6 @@ class Isolate {
   void Iterate(ObjectVisitor* v, ThreadLocalTop* t);
   char* Iterate(ObjectVisitor* v, char* t);
   void IterateThread(ThreadVisitor* v, char* t);
-
 
   // Returns the current native context.
   Handle<Context> native_context();
@@ -990,7 +986,9 @@ class Isolate {
   }
 
   bool serializer_enabled() const { return serializer_enabled_; }
-  bool snapshot_available() const { return snapshot_blob_ != NULL; }
+  bool snapshot_available() const {
+    return snapshot_blob_ != NULL && snapshot_blob_->raw_size != 0;
+  }
 
   bool IsDead() { return has_fatal_error_; }
   void SignalFatalError() { has_fatal_error_ = true; }
@@ -1402,15 +1400,15 @@ class Isolate {
 
 class PromiseOnStack {
  public:
-  PromiseOnStack(StackHandler* handler, Handle<JSObject> promise,
+  PromiseOnStack(Handle<JSFunction> function, Handle<JSObject> promise,
                  PromiseOnStack* prev)
-      : handler_(handler), promise_(promise), prev_(prev) {}
-  StackHandler* handler() { return handler_; }
+      : function_(function), promise_(promise), prev_(prev) {}
+  Handle<JSFunction> function() { return function_; }
   Handle<JSObject> promise() { return promise_; }
   PromiseOnStack* prev() { return prev_; }
 
  private:
-  StackHandler* handler_;
+  Handle<JSFunction> function_;
   Handle<JSObject> promise_;
   PromiseOnStack* prev_;
 };

@@ -184,11 +184,12 @@ class Deoptimizer : public Malloced {
 
   struct DeoptInfo {
     DeoptInfo(SourcePosition position, const char* m, DeoptReason d)
-        : position(position), mnemonic(m), deopt_reason(d) {}
+        : position(position), mnemonic(m), deopt_reason(d), inlining_id(0) {}
 
     SourcePosition position;
     const char* mnemonic;
     DeoptReason deopt_reason;
+    int inlining_id;
   };
 
   static DeoptInfo GetDeoptInfo(Code* code, byte* from);
@@ -321,11 +322,10 @@ class Deoptimizer : public Malloced {
   static const int kNotDeoptimizationEntry = -1;
 
   // Generators for the deoptimization entry code.
-  class EntryGenerator BASE_EMBEDDED {
+  class TableEntryGenerator BASE_EMBEDDED {
    public:
-    EntryGenerator(MacroAssembler* masm, BailoutType type)
-        : masm_(masm), type_(type) { }
-    virtual ~EntryGenerator() { }
+    TableEntryGenerator(MacroAssembler* masm, BailoutType type, int count)
+        : masm_(masm), type_(type), count_(count) {}
 
     void Generate();
 
@@ -334,24 +334,13 @@ class Deoptimizer : public Malloced {
     BailoutType type() const { return type_; }
     Isolate* isolate() const { return masm_->isolate(); }
 
-    virtual void GeneratePrologue() { }
-
-   private:
-    MacroAssembler* masm_;
-    Deoptimizer::BailoutType type_;
-  };
-
-  class TableEntryGenerator : public EntryGenerator {
-   public:
-    TableEntryGenerator(MacroAssembler* masm, BailoutType type,  int count)
-        : EntryGenerator(masm, type), count_(count) { }
-
-   protected:
-    virtual void GeneratePrologue();
+    void GeneratePrologue();
 
    private:
     int count() const { return count_; }
 
+    MacroAssembler* masm_;
+    Deoptimizer::BailoutType type_;
     int count_;
   };
 

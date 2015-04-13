@@ -167,9 +167,9 @@ Address RelocInfo::target_internal_reference() {
 }
 
 
-void RelocInfo::set_target_internal_reference(Address target) {
+Address RelocInfo::target_internal_reference_address() {
   DCHECK(rmode_ == INTERNAL_REFERENCE);
-  Memory::Address_at(pc_) = target;
+  return reinterpret_cast<Address>(pc_);
 }
 
 
@@ -205,6 +205,7 @@ Cell* RelocInfo::target_cell() {
 void RelocInfo::set_target_cell(Cell* cell,
                                 WriteBarrierMode write_barrier_mode,
                                 ICacheFlushMode icache_flush_mode) {
+  DCHECK(cell->IsCell());
   DCHECK(rmode_ == RelocInfo::CELL);
   Address address = cell->address() + Cell::kValueOffset;
   Memory::Address_at(pc_) = address;
@@ -281,7 +282,8 @@ Object** RelocInfo::call_object_address() {
 
 
 void RelocInfo::WipeOut() {
-  if (IsEmbeddedObject(rmode_) || IsExternalReference(rmode_)) {
+  if (IsEmbeddedObject(rmode_) || IsExternalReference(rmode_) ||
+      IsInternalReference(rmode_)) {
     Memory::Address_at(pc_) = NULL;
   } else if (IsCodeTarget(rmode_) || IsRuntimeEntry(rmode_)) {
     // Effectively write zero into the relocation.
@@ -313,7 +315,8 @@ void RelocInfo::Visit(Isolate* isolate, ObjectVisitor* visitor) {
     visitor->VisitCell(this);
   } else if (mode == RelocInfo::EXTERNAL_REFERENCE) {
     visitor->VisitExternalReference(this);
-    CpuFeatures::FlushICache(pc_, sizeof(Address));
+  } else if (mode == RelocInfo::INTERNAL_REFERENCE) {
+    visitor->VisitInternalReference(this);
   } else if (RelocInfo::IsCodeAgeSequence(mode)) {
     visitor->VisitCodeAgeSequence(this);
   } else if (((RelocInfo::IsJSReturn(mode) &&
@@ -340,7 +343,8 @@ void RelocInfo::Visit(Heap* heap) {
     StaticVisitor::VisitCell(heap, this);
   } else if (mode == RelocInfo::EXTERNAL_REFERENCE) {
     StaticVisitor::VisitExternalReference(this);
-    CpuFeatures::FlushICache(pc_, sizeof(Address));
+  } else if (mode == RelocInfo::INTERNAL_REFERENCE) {
+    StaticVisitor::VisitInternalReference(this);
   } else if (RelocInfo::IsCodeAgeSequence(mode)) {
     StaticVisitor::VisitCodeAgeSequence(heap, this);
   } else if (heap->isolate()->debug()->has_break_points() &&
@@ -526,6 +530,12 @@ void Assembler::emit_near_disp(Label* L) {
   }
   L->link_to(pc_offset(), Label::kNear);
   *pc_++ = disp;
+}
+
+
+void Assembler::deserialization_set_target_internal_reference_at(
+    Address pc, Address target, RelocInfo::Mode mode) {
+  Memory::Address_at(pc) = target;
 }
 
 

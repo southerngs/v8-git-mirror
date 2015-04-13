@@ -15,12 +15,12 @@ static size_t OperandCount(const Instruction* instr) {
 }
 
 
-static void VerifyGapEmpty(const GapInstruction* gap) {
-  for (int i = GapInstruction::FIRST_INNER_POSITION;
-       i <= GapInstruction::LAST_INNER_POSITION; i++) {
-    GapInstruction::InnerPosition inner_pos =
-        static_cast<GapInstruction::InnerPosition>(i);
-    CHECK(!gap->GetParallelMove(inner_pos));
+static void VerifyEmptyGaps(const Instruction* instr) {
+  for (int i = Instruction::FIRST_GAP_POSITION;
+       i <= Instruction::LAST_GAP_POSITION; i++) {
+    Instruction::GapPosition inner_pos =
+        static_cast<Instruction::GapPosition>(i);
+    CHECK(instr->GetParallelMove(inner_pos) == nullptr);
   }
 }
 
@@ -60,6 +60,8 @@ RegisterAllocatorVerifier::RegisterAllocatorVerifier(
   // Construct OperandConstraints for all InstructionOperands, eliminating
   // kSameAsFirst along the way.
   for (const auto* instr : sequence->instructions()) {
+    // All gaps should be totally unallocated at this point.
+    VerifyEmptyGaps(instr);
     const size_t operand_count = OperandCount(instr);
     auto* op_constraints = zone->NewArray<OperandConstraint>(operand_count);
     size_t count = 0;
@@ -79,11 +81,6 @@ RegisterAllocatorVerifier::RegisterAllocatorVerifier(
         op_constraints[count].value_ = op_constraints[0].value_;
       }
       VerifyOutput(op_constraints[count]);
-    }
-    // All gaps should be totally unallocated at this point.
-    if (instr->IsGapMoves()) {
-      CHECK(operand_count == 0);
-      VerifyGapEmpty(GapInstruction::cast(instr));
     }
     InstructionConstraint instr_constraint = {instr, operand_count,
                                               op_constraints};
@@ -122,11 +119,14 @@ void RegisterAllocatorVerifier::BuildConstraint(const InstructionOperand* op,
   constraint->virtual_register_ = InstructionOperand::kInvalidVirtualRegister;
   if (op->IsConstant()) {
     constraint->type_ = kConstant;
-    constraint->value_ = ConstantOperand::cast(op)->index();
+    constraint->value_ = ConstantOperand::cast(op)->virtual_register();
     constraint->virtual_register_ = constraint->value_;
   } else if (op->IsImmediate()) {
+    auto imm = ImmediateOperand::cast(op);
+    int value = imm->type() == ImmediateOperand::INLINE ? imm->inline_value()
+                                                        : imm->indexed_value();
     constraint->type_ = kImmediate;
-    constraint->value_ = ImmediateOperand::cast(op)->index();
+    constraint->value_ = value;
   } else {
     CHECK(op->IsUnallocated());
     const auto* unallocated = UnallocatedOperand::cast(op);
@@ -162,6 +162,13 @@ void RegisterAllocatorVerifier::BuildConstraint(const InstructionOperand* op,
             constraint->type_ = kRegister;
           }
           break;
+        case UnallocatedOperand::MUST_HAVE_SLOT:
+          if (sequence()->IsDouble(vreg)) {
+            constraint->type_ = kDoubleSlot;
+          } else {
+            constraint->type_ = kSlot;
+          }
+          break;
         case UnallocatedOperand::SAME_AS_FIRST_INPUT:
           constraint->type_ = kSameAsFirst;
           break;
@@ -176,29 +183,41 @@ void RegisterAllocatorVerifier::CheckConstraint(
   switch (constraint->type_) {
     case kConstant:
       CHECK(op->IsConstant());
-      CHECK_EQ(op->index(), constraint->value_);
+      CHECK_EQ(ConstantOperand::cast(op)->virtual_register(),
+               constraint->value_);
       return;
-    case kImmediate:
+    case kImmediate: {
       CHECK(op->IsImmediate());
-      CHECK_EQ(op->index(), constraint->value_);
+      auto imm = ImmediateOperand::cast(op);
+      int value = imm->type() == ImmediateOperand::INLINE
+                      ? imm->inline_value()
+                      : imm->indexed_value();
+      CHECK_EQ(value, constraint->value_);
       return;
+    }
     case kRegister:
       CHECK(op->IsRegister());
       return;
     case kFixedRegister:
       CHECK(op->IsRegister());
-      CHECK_EQ(op->index(), constraint->value_);
+      CHECK_EQ(RegisterOperand::cast(op)->index(), constraint->value_);
       return;
     case kDoubleRegister:
       CHECK(op->IsDoubleRegister());
       return;
     case kFixedDoubleRegister:
       CHECK(op->IsDoubleRegister());
-      CHECK_EQ(op->index(), constraint->value_);
+      CHECK_EQ(DoubleRegisterOperand::cast(op)->index(), constraint->value_);
       return;
     case kFixedSlot:
       CHECK(op->IsStackSlot());
-      CHECK_EQ(op->index(), constraint->value_);
+      CHECK_EQ(StackSlotOperand::cast(op)->index(), constraint->value_);
+      return;
+    case kSlot:
+      CHECK(op->IsStackSlot());
+      return;
+    case kDoubleSlot:
+      CHECK(op->IsDoubleStackSlot());
       return;
     case kNone:
       CHECK(op->IsRegister() || op->IsStackSlot());
@@ -301,7 +320,10 @@ class OperandMap : public ZoneObject {
       if (i->IsEliminated()) continue;
       auto cur = map().find(i->source());
       CHECK(cur != map().end());
-      to_insert.insert(std::make_pair(i->destination(), cur->second));
+      auto res =
+          to_insert.insert(std::make_pair(i->destination(), cur->second));
+      // Ensure injectivity of moves.
+      CHECK(res.second);
     }
     // Drop current mappings.
     for (auto i = moves->begin(); i != moves->end(); ++i) {
@@ -313,11 +335,11 @@ class OperandMap : public ZoneObject {
     map().insert(to_insert.begin(), to_insert.end());
   }
 
-  void RunGapInstruction(Zone* zone, const GapInstruction* gap) {
-    for (int i = GapInstruction::FIRST_INNER_POSITION;
-         i <= GapInstruction::LAST_INNER_POSITION; i++) {
-      auto inner_pos = static_cast<GapInstruction::InnerPosition>(i);
-      auto move = gap->GetParallelMove(inner_pos);
+  void RunGaps(Zone* zone, const Instruction* instr) {
+    for (int i = Instruction::FIRST_GAP_POSITION;
+         i <= Instruction::LAST_GAP_POSITION; i++) {
+      auto inner_pos = static_cast<Instruction::GapPosition>(i);
+      auto move = instr->GetParallelMove(inner_pos);
       if (move == nullptr) continue;
       RunParallelMoves(zone, move);
     }
@@ -330,11 +352,11 @@ class OperandMap : public ZoneObject {
 
   void DropRegisters(const RegisterConfiguration* config) {
     for (int i = 0; i < config->num_general_registers(); ++i) {
-      InstructionOperand op(InstructionOperand::REGISTER, i);
+      RegisterOperand op(i);
       Drop(&op);
     }
     for (int i = 0; i < config->num_double_registers(); ++i) {
-      InstructionOperand op(InstructionOperand::DOUBLE_REGISTER, i);
+      DoubleRegisterOperand op(i);
       Drop(&op);
     }
   }
@@ -632,11 +654,7 @@ void RegisterAllocatorVerifier::VerifyGapMoves(BlockMaps* block_maps,
          ++instr_index) {
       const auto& instr_constraint = constraints_[instr_index];
       const auto instr = instr_constraint.instruction_;
-      if (instr->IsSourcePosition()) continue;
-      if (instr->IsGapMoves()) {
-        current->RunGapInstruction(zone(), GapInstruction::cast(instr));
-        continue;
-      }
+      current->RunGaps(zone(), instr);
       const auto op_constraints = instr_constraint.operand_constraints_;
       size_t count = 0;
       for (size_t i = 0; i < instr->InputCount(); ++i, ++count) {

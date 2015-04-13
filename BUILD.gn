@@ -32,10 +32,14 @@ v8_toolset_for_d8 = "host"
 # TODO(GYP): For now we only support 32-bit little-endian target builds from an
 # x64 Linux host. Eventually we need to support all of the host/target
 # configurations v8 runs on.
-if (host_cpu == "x64" &&
-    (target_cpu == "arm" || target_cpu == "mipsel" || target_cpu == "x86")) {
-  assert(host_os == "linux")
-  snapshot_toolchain = "//build/toolchain/linux:clang_x86"
+if (host_cpu == "x64" && host_os == "linux") {
+  if (target_cpu == "arm" || target_cpu == "mipsel" || target_cpu == "x86") {
+    snapshot_toolchain = "//build/toolchain/linux:clang_x86"
+  } else if (target_cpu == "x64") {
+    snapshot_toolchain = "//build/toolchain/linux:clang_x64"
+  } else {
+    assert(false, "Need environment for this arch")
+  }
 } else {
   snapshot_toolchain = default_toolchain
 }
@@ -114,7 +118,7 @@ config("toolchain") {
   defines = []
   cflags = []
 
-  # TODO(jochen): Add support for arm subarchs, mips, mipsel.
+  # TODO(jochen): Add support for arm subarchs, mips, mipsel, mips64el.
 
   if (v8_target_arch == "arm") {
     defines += [ "V8_TARGET_ARCH_ARM" ]
@@ -124,14 +128,12 @@ config("toolchain") {
       }
       if (arm_fpu == "vfpv3-d16") {
         defines += [ "CAN_USE_VFP3_INSTRUCTIONS" ]
-      }
-      if (arm_fpu == "vfpv3") {
+      } else if (arm_fpu == "vfpv3") {
         defines += [
           "CAN_USE_VFP3_INSTRUCTIONS",
           "CAN_USE_VFP32DREGS",
         ]
-      }
-      if (arm_fpu == "neon") {
+      } else if (arm_fpu == "neon") {
         defines += [
           "CAN_USE_VFP3_INSTRUCTIONS",
           "CAN_USE_VFP32DREGS",
@@ -139,6 +141,7 @@ config("toolchain") {
         ]
       }
     } else {
+      # These defines ares used for the ARM simulator.
       defines += [
         "CAN_USE_ARMV7_INSTRUCTIONS",
         "CAN_USE_VFP3_INSTRUCTIONS",
@@ -151,6 +154,12 @@ config("toolchain") {
   }
   if (v8_target_arch == "arm64") {
     defines += [ "V8_TARGET_ARCH_ARM64" ]
+  }
+  if (v8_target_arch == "mipsel") {
+    defines += [ "V8_TARGET_ARCH_MIPS" ]
+  }
+  if (v8_target_arch == "mips64el") {
+    defines += [ "V8_TARGET_ARCH_MIPS64" ]
   }
   if (v8_target_arch == "x86") {
     defines += [ "V8_TARGET_ARCH_IA32" ]
@@ -217,6 +226,7 @@ action("js2c") {
     "src/debug-debugger.js",
     "src/mirror-debugger.js",
     "src/liveedit-debugger.js",
+    "src/templates.js",
     "src/macros.py",
   ]
 
@@ -255,13 +265,13 @@ action("js2c_experimental") {
     "src/macros.py",
     "src/proxy.js",
     "src/generator.js",
-    "src/harmony-string.js",
     "src/harmony-array.js",
     "src/harmony-array-includes.js",
     "src/harmony-typedarray.js",
     "src/harmony-tostring.js",
-    "src/harmony-templates.js",
     "src/harmony-regexp.js",
+    "src/harmony-reflect.js",
+    "src/harmony-spread.js"
   ]
 
   outputs = [
@@ -398,7 +408,7 @@ source_set("v8_nosnapshot") {
   sources = [
     "$target_gen_dir/libraries.cc",
     "$target_gen_dir/experimental-libraries.cc",
-    "src/snapshot-empty.cc",
+    "src/snapshot/snapshot-empty.cc",
   ]
 
   configs -= [ "//build/config/compiler:chromium_code" ]
@@ -448,8 +458,8 @@ if (v8_use_external_startup_data) {
     ]
 
     sources = [
-      "src/natives-external.cc",
-      "src/snapshot-external.cc",
+      "src/snapshot/natives-external.cc",
+      "src/snapshot/snapshot-external.cc",
     ]
 
     configs -= [ "//build/config/compiler:chromium_code" ]
@@ -589,6 +599,8 @@ source_set("v8_base") {
     "src/compiler/js-intrinsic-lowering.h",
     "src/compiler/js-operator.cc",
     "src/compiler/js-operator.h",
+    "src/compiler/js-type-feedback.cc",
+    "src/compiler/js-type-feedback.h",
     "src/compiler/js-typed-lowering.cc",
     "src/compiler/js-typed-lowering.h",
     "src/compiler/jump-threading.cc",
@@ -596,6 +608,8 @@ source_set("v8_base") {
     "src/compiler/linkage-impl.h",
     "src/compiler/linkage.cc",
     "src/compiler/linkage.h",
+    "src/compiler/liveness-analyzer.cc",
+    "src/compiler/liveness-analyzer.h",
     "src/compiler/load-elimination.cc",
     "src/compiler/load-elimination.h",
     "src/compiler/loop-peeling.cc",
@@ -655,6 +669,8 @@ source_set("v8_base") {
     "src/compiler/simplified-operator.h",
     "src/compiler/source-position.cc",
     "src/compiler/source-position.h",
+    "src/compiler/state-values-utils.cc",
+    "src/compiler/state-values-utils.h",
     "src/compiler/typer.cc",
     "src/compiler/typer.h",
     "src/compiler/value-numbering-reducer.cc",
@@ -874,7 +890,6 @@ source_set("v8_base") {
     "src/modules.cc",
     "src/modules.h",
     "src/msan.h",
-    "src/natives.h",
     "src/objects-debug.cc",
     "src/objects-inl.h",
     "src/objects-printer.cc",
@@ -957,14 +972,15 @@ source_set("v8_base") {
     "src/scopeinfo.h",
     "src/scopes.cc",
     "src/scopes.h",
-    "src/serialize.cc",
-    "src/serialize.h",
     "src/small-pointer-list.h",
     "src/smart-pointers.h",
-    "src/snapshot-common.cc",
-    "src/snapshot-source-sink.cc",
-    "src/snapshot-source-sink.h",
-    "src/snapshot.h",
+    "src/snapshot/natives.h",
+    "src/snapshot/serialize.cc",
+    "src/snapshot/serialize.h",
+    "src/snapshot/snapshot-common.cc",
+    "src/snapshot/snapshot-source-sink.cc",
+    "src/snapshot/snapshot-source-sink.h",
+    "src/snapshot/snapshot.h",
     "src/string-builder.cc",
     "src/string-builder.h",
     "src/string-search.cc",
@@ -1386,21 +1402,19 @@ source_set("v8_libbase") {
   if (is_linux) {
     sources += [ "src/base/platform/platform-linux.cc" ]
 
-    libs = [ "rt" ]
+    libs = [ "dl", "rt" ]
   } else if (is_android) {
     defines += [ "CAN_USE_VFP_INSTRUCTIONS" ]
 
-    if (build_os == "mac") {
-      if (current_toolchain == host_toolchain) {
+    if (current_toolchain == host_toolchain) {
+      libs = [ "dl", "rt" ]
+      if (host_os == "mac") {
         sources += [ "src/base/platform/platform-macos.cc" ]
       } else {
         sources += [ "src/base/platform/platform-linux.cc" ]
       }
     } else {
       sources += [ "src/base/platform/platform-linux.cc" ]
-      if (current_toolchain == host_toolchain) {
-        defines += [ "V8_LIBRT_NOT_AVAILABLE" ]
-      }
     }
   } else if (is_mac) {
     sources += [ "src/base/platform/platform-macos.cc" ]
@@ -1460,7 +1474,7 @@ if (current_toolchain == snapshot_toolchain) {
     visibility = [ ":*" ]  # Only targets in this file can depend on this.
 
     sources = [
-      "src/mksnapshot.cc",
+      "src/snapshot/mksnapshot.cc",
     ]
 
     configs -= [ "//build/config/compiler:chromium_code" ]
@@ -1516,7 +1530,7 @@ if (component_mode == "shared_library") {
       ":toolchain",
     ]
 
-    direct_dependent_configs = [ ":external_config" ]
+    public_configs = [ ":external_config" ]
 
     libs = []
     if (is_android && current_toolchain != host_toolchain) {
@@ -1543,7 +1557,7 @@ if (component_mode == "shared_library") {
       ]
     }
 
-    direct_dependent_configs = [ ":external_config" ]
+    public_configs = [ ":external_config" ]
   }
 }
 
@@ -1560,7 +1574,10 @@ if ((current_toolchain == host_toolchain && v8_toolset_for_d8 == "host") ||
     configs -= [ "//build/config/compiler:chromium_code" ]
     configs += [ "//build/config/compiler:no_chromium_code" ]
     configs += [
-      ":internal_config",
+      # Note: don't use :internal_config here because this target will get
+      # the :external_config applied to it by virtue of depending on :v8, and
+      # you can't have both applied to the same target.
+      ":internal_config_base",
       ":features",
       ":toolchain",
     ]

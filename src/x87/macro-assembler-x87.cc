@@ -14,7 +14,6 @@
 #include "src/debug.h"
 #include "src/isolate-inl.h"
 #include "src/runtime/runtime.h"
-#include "src/serialize.h"
 
 namespace v8 {
 namespace internal {
@@ -987,44 +986,21 @@ void MacroAssembler::LeaveApiExitFrame(bool restore_context) {
 }
 
 
-void MacroAssembler::PushTryHandler(StackHandler::Kind kind,
-                                    int handler_index) {
+void MacroAssembler::PushStackHandler() {
   // Adjust this code if not the case.
-  STATIC_ASSERT(StackHandlerConstants::kSize == 5 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kSize == 1 * kPointerSize);
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0);
-  STATIC_ASSERT(StackHandlerConstants::kCodeOffset == 1 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kStateOffset == 2 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kContextOffset == 3 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kFPOffset == 4 * kPointerSize);
-
-  // We will build up the handler from the bottom by pushing on the stack.
-  // First push the frame pointer and context.
-  if (kind == StackHandler::JS_ENTRY) {
-    // The frame pointer does not point to a JS frame so we save NULL for
-    // ebp. We expect the code throwing an exception to check ebp before
-    // dereferencing it to restore the context.
-    push(Immediate(0));  // NULL frame pointer.
-    push(Immediate(Smi::FromInt(0)));  // No context.
-  } else {
-    push(ebp);
-    push(esi);
-  }
-  // Push the state and the code object.
-  unsigned state =
-      StackHandler::IndexField::encode(handler_index) |
-      StackHandler::KindField::encode(kind);
-  push(Immediate(state));
-  Push(CodeObject());
 
   // Link the current handler as the next handler.
   ExternalReference handler_address(Isolate::kHandlerAddress, isolate());
   push(Operand::StaticVariable(handler_address));
+
   // Set this new handler as the current one.
   mov(Operand::StaticVariable(handler_address), esp);
 }
 
 
-void MacroAssembler::PopTryHandler() {
+void MacroAssembler::PopStackHandler() {
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0);
   ExternalReference handler_address(Isolate::kHandlerAddress, isolate());
   pop(Operand::StaticVariable(handler_address));
@@ -1298,12 +1274,11 @@ void MacroAssembler::Allocate(int object_size,
   // Align the next allocation. Storing the filler map without checking top is
   // safe in new-space because the limit of the heap is aligned there.
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
-    DCHECK((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     DCHECK(kPointerAlignment * 2 == kDoubleAlignment);
     Label aligned;
     test(result, Immediate(kDoubleAlignmentMask));
     j(zero, &aligned, Label::kNear);
-    if ((flags & PRETENURE_OLD_DATA_SPACE) != 0) {
+    if ((flags & PRETENURE) != 0) {
       cmp(result, Operand::StaticVariable(allocation_limit));
       j(above_equal, gc_required);
     }
@@ -1375,12 +1350,11 @@ void MacroAssembler::Allocate(int header_size,
   // Align the next allocation. Storing the filler map without checking top is
   // safe in new-space because the limit of the heap is aligned there.
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
-    DCHECK((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     DCHECK(kPointerAlignment * 2 == kDoubleAlignment);
     Label aligned;
     test(result, Immediate(kDoubleAlignmentMask));
     j(zero, &aligned, Label::kNear);
-    if ((flags & PRETENURE_OLD_DATA_SPACE) != 0) {
+    if ((flags & PRETENURE) != 0) {
       cmp(result, Operand::StaticVariable(allocation_limit));
       j(above_equal, gc_required);
     }
@@ -1450,12 +1424,11 @@ void MacroAssembler::Allocate(Register object_size,
   // Align the next allocation. Storing the filler map without checking top is
   // safe in new-space because the limit of the heap is aligned there.
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
-    DCHECK((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     DCHECK(kPointerAlignment * 2 == kDoubleAlignment);
     Label aligned;
     test(result, Immediate(kDoubleAlignmentMask));
     j(zero, &aligned, Label::kNear);
-    if ((flags & PRETENURE_OLD_DATA_SPACE) != 0) {
+    if ((flags & PRETENURE) != 0) {
       cmp(result, Operand::StaticVariable(allocation_limit));
       j(above_equal, gc_required);
     }
@@ -2362,6 +2335,17 @@ void MacroAssembler::Move(Register dst, const Immediate& x) {
 
 void MacroAssembler::Move(const Operand& dst, const Immediate& x) {
   mov(dst, x);
+}
+
+
+void MacroAssembler::Lzcnt(Register dst, const Operand& src) {
+  // TODO(intel): Add support for LZCNT (with ABM/BMI1).
+  Label not_zero_src;
+  bsr(dst, src);
+  j(not_zero, &not_zero_src, Label::kNear);
+  Move(dst, Immediate(63));  // 63^31 == 32
+  bind(&not_zero_src);
+  xor_(dst, Immediate(31));  // for x in [0..31], 31^x == 31-x.
 }
 
 
