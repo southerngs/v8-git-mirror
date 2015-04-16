@@ -42,6 +42,7 @@
     'msvs_multi_core_compile%': '1',
     'mac_deployment_target%': '10.5',
     'd8_static_link%' : 0,
+    'release_extra_cflags%': '',
     'variables': {
       'variables': {
         'variables': {
@@ -197,7 +198,7 @@
         # Xcode insists on this empty entry.
       },
       'Release': {
-        # Xcode insists on this empty entry.
+        'cflags+': ['<@(release_extra_cflags)'],
       },
     },
     'conditions':[

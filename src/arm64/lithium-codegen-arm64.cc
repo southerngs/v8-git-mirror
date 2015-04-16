@@ -460,7 +460,15 @@ void LCodeGen::DoCallNewArray(LCallNewArray* instr) {
   DCHECK(ToRegister(instr->constructor()).is(x1));
 
   __ Mov(x0, Operand(instr->arity()));
-  __ LoadRoot(x2, Heap::kUndefinedValueRootIndex);
+  if (instr->arity() == 1) {
+    // We only need the allocation site for the case we have a length argument.
+    // The case may bail out to the runtime, which will determine the correct
+    // elements kind with the site.
+    __ Mov(x2, instr->hydrogen()->site());
+  } else {
+    __ LoadRoot(x2, Heap::kUndefinedValueRootIndex);
+  }
+
 
   ElementsKind kind = instr->hydrogen()->elements_kind();
   AllocationSiteOverrideMode override_mode =
@@ -2024,29 +2032,14 @@ void LCodeGen::DoTailCallThroughMegamorphicCache(
   Register extra = x5;
   Register extra2 = x6;
   Register extra3 = x7;
-  DCHECK(!FLAG_vector_ics ||
-         !AreAliased(ToRegister(instr->slot()), ToRegister(instr->vector()),
-                     scratch, extra, extra2, extra3));
 
-  // Important for the tail-call.
-  bool must_teardown_frame = NeedsEagerFrame();
-
-  if (!instr->hydrogen()->is_just_miss()) {
-    DCHECK(!instr->hydrogen()->is_keyed_load());
-
-    // The probe will tail call to a handler if found.
-    isolate()->stub_cache()->GenerateProbe(
-        masm(), Code::LOAD_IC, instr->hydrogen()->flags(), must_teardown_frame,
-        receiver, name, scratch, extra, extra2, extra3);
-  }
+  // The probe will tail call to a handler if found.
+  isolate()->stub_cache()->GenerateProbe(
+      masm(), Code::LOAD_IC, instr->hydrogen()->flags(), false, receiver, name,
+      scratch, extra, extra2, extra3);
 
   // Tail call to miss if we ended up here.
-  if (must_teardown_frame) __ LeaveFrame(StackFrame::INTERNAL);
-  if (instr->hydrogen()->is_keyed_load()) {
-    KeyedLoadIC::GenerateMiss(masm());
-  } else {
-    LoadIC::GenerateMiss(masm());
-  }
+  LoadIC::GenerateMiss(masm());
 }
 
 
@@ -4332,7 +4325,7 @@ void LCodeGen::DoMulConstIS(LMulConstIS* instr) {
   Register left =
       is_smi ? ToRegister(instr->left()) : ToRegister32(instr->left()) ;
   int32_t right = ToInteger32(instr->right());
-  DCHECK((right > -kMaxInt) || (right < kMaxInt));
+  DCHECK((right > -kMaxInt) && (right < kMaxInt));
 
   bool can_overflow = instr->hydrogen()->CheckFlag(HValue::kCanOverflow);
   bool bailout_on_minus_zero =

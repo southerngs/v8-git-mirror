@@ -365,8 +365,8 @@ ExternalReferenceEncoder::ExternalReferenceEncoder(Isolate* isolate) {
     Address addr = table->address(i);
     if (addr == ExternalReferenceTable::NotAvailable()) continue;
     // We expect no duplicate external references entries in the table.
-    DCHECK_NULL(map_->Lookup(addr, Hash(addr), false));
-    map_->Lookup(addr, Hash(addr), true)->value = reinterpret_cast<void*>(i);
+    DCHECK_NULL(map_->Lookup(addr, Hash(addr)));
+    map_->LookupOrInsert(addr, Hash(addr))->value = reinterpret_cast<void*>(i);
   }
   isolate->set_external_reference_map(map_);
 }
@@ -375,7 +375,7 @@ ExternalReferenceEncoder::ExternalReferenceEncoder(Isolate* isolate) {
 uint32_t ExternalReferenceEncoder::Encode(Address address) const {
   DCHECK_NOT_NULL(address);
   HashMap::Entry* entry =
-      const_cast<HashMap*>(map_)->Lookup(address, Hash(address), false);
+      const_cast<HashMap*>(map_)->Lookup(address, Hash(address));
   DCHECK_NOT_NULL(entry);
   return static_cast<uint32_t>(reinterpret_cast<intptr_t>(entry->value));
 }
@@ -384,7 +384,7 @@ uint32_t ExternalReferenceEncoder::Encode(Address address) const {
 const char* ExternalReferenceEncoder::NameOfAddress(Isolate* isolate,
                                                     Address address) const {
   HashMap::Entry* entry =
-      const_cast<HashMap*>(map_)->Lookup(address, Hash(address), false);
+      const_cast<HashMap*>(map_)->Lookup(address, Hash(address));
   if (entry == NULL) return "<unknown>";
   uint32_t i = static_cast<uint32_t>(reinterpret_cast<intptr_t>(entry->value));
   return ExternalReferenceTable::instance(isolate)->name(i);
@@ -498,13 +498,12 @@ class CodeAddressMap: public CodeEventLogger {
     }
 
     HashMap::Entry* FindOrCreateEntry(Address code_address) {
-      return impl_.Lookup(code_address, ComputePointerHash(code_address), true);
+      return impl_.LookupOrInsert(code_address,
+                                  ComputePointerHash(code_address));
     }
 
     HashMap::Entry* FindEntry(Address code_address) {
-      return impl_.Lookup(code_address,
-                          ComputePointerHash(code_address),
-                          false);
+      return impl_.Lookup(code_address, ComputePointerHash(code_address));
     }
 
     void RemoveEntry(HashMap::Entry* entry) {
@@ -591,6 +590,8 @@ void Deserializer::Deserialize(Isolate* isolate) {
   isolate_->heap()->set_native_contexts_list(
       isolate_->heap()->undefined_value());
   isolate_->heap()->set_array_buffers_list(
+      isolate_->heap()->undefined_value());
+  isolate_->heap()->set_last_array_buffer_in_list(
       isolate_->heap()->undefined_value());
   isolate->heap()->set_new_array_buffer_views_list(
       isolate_->heap()->undefined_value());
@@ -1242,11 +1243,68 @@ Serializer::Serializer(Isolate* isolate, SnapshotByteSink* sink)
     max_chunk_size_[i] = static_cast<uint32_t>(
         MemoryAllocator::PageAreaSize(static_cast<AllocationSpace>(i)));
   }
+
+#ifdef OBJECT_PRINT
+  if (FLAG_serialization_statistics) {
+    instance_type_count_ = NewArray<int>(kInstanceTypes);
+    instance_type_size_ = NewArray<size_t>(kInstanceTypes);
+    for (int i = 0; i < kInstanceTypes; i++) {
+      instance_type_count_[i] = 0;
+      instance_type_size_[i] = 0;
+    }
+  } else {
+    instance_type_count_ = NULL;
+    instance_type_size_ = NULL;
+  }
+#endif  // OBJECT_PRINT
 }
 
 
 Serializer::~Serializer() {
   if (code_address_map_ != NULL) delete code_address_map_;
+#ifdef OBJECT_PRINT
+  if (instance_type_count_ != NULL) {
+    DeleteArray(instance_type_count_);
+    DeleteArray(instance_type_size_);
+  }
+#endif  // OBJECT_PRINT
+}
+
+
+#ifdef OBJECT_PRINT
+void Serializer::CountInstanceType(HeapObject* obj) {
+  int instance_type = obj->map()->instance_type();
+  instance_type_count_[instance_type]++;
+  instance_type_size_[instance_type] += obj->Size();
+}
+#endif  // OBJECT_PRINT
+
+
+void Serializer::OutputStatistics(const char* name) {
+  if (!FLAG_serialization_statistics) return;
+  PrintF("%s:\n", name);
+  PrintF("  Spaces (bytes):\n");
+  for (int space = 0; space < kNumberOfSpaces; space++) {
+    PrintF("%16s", AllocationSpaceName(static_cast<AllocationSpace>(space)));
+  }
+  PrintF("\n");
+  for (int space = 0; space < kNumberOfPreallocatedSpaces; space++) {
+    size_t s = pending_chunk_[space];
+    for (uint32_t chunk_size : completed_chunks_[space]) s += chunk_size;
+    PrintF("%16" V8_PTR_PREFIX "d", s);
+  }
+  PrintF("%16d\n", large_objects_total_size_);
+#ifdef OBJECT_PRINT
+  PrintF("  Instance types (count and bytes):\n");
+#define PRINT_INSTANCE_TYPE(Name)                                          \
+  if (instance_type_count_[Name]) {                                        \
+    PrintF("%10d %10" V8_PTR_PREFIX "d  %s\n", instance_type_count_[Name], \
+           instance_type_size_[Name], #Name);                              \
+  }
+  INSTANCE_TYPE_LIST(PRINT_INSTANCE_TYPE)
+#undef PRINT_INSTANCE_TYPE
+  PrintF("\n");
+#endif  // OBJECT_PRINT
 }
 
 
@@ -1661,6 +1719,12 @@ void Serializer::ObjectSerializer::SerializePrologue(AllocationSpace space,
     DCHECK_NE(kDoubleAlignmentSentinel, encoded_size);
     sink_->PutInt(encoded_size, "ObjectSizeInWords");
   }
+
+#ifdef OBJECT_PRINT
+  if (FLAG_serialization_statistics) {
+    serializer_->CountInstanceType(object_);
+  }
+#endif  // OBJECT_PRINT
 
   // Mark this object as already serialized.
   serializer_->back_reference_map()->Add(object_, back_reference);

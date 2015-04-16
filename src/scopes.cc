@@ -36,8 +36,9 @@ Variable* VariableMap::Declare(Scope* scope, const AstRawString* name,
   // AstRawStrings are unambiguous, i.e., the same string is always represented
   // by the same AstRawString*.
   // FIXME(marja): fix the type of Lookup.
-  Entry* p = ZoneHashMap::Lookup(const_cast<AstRawString*>(name), name->hash(),
-                                 true, ZoneAllocationPolicy(zone()));
+  Entry* p =
+      ZoneHashMap::LookupOrInsert(const_cast<AstRawString*>(name), name->hash(),
+                                  ZoneAllocationPolicy(zone()));
   if (p->value == NULL) {
     // The variable has not been declared yet -> insert it.
     DCHECK(p->key == name);
@@ -49,8 +50,7 @@ Variable* VariableMap::Declare(Scope* scope, const AstRawString* name,
 
 
 Variable* VariableMap::Lookup(const AstRawString* name) {
-  Entry* p = ZoneHashMap::Lookup(const_cast<AstRawString*>(name), name->hash(),
-                                 false, ZoneAllocationPolicy(NULL));
+  Entry* p = ZoneHashMap::Lookup(const_cast<AstRawString*>(name), name->hash());
   if (p != NULL) {
     DCHECK(reinterpret_cast<const AstRawString*>(p->key) == name);
     DCHECK(p->value != NULL);
@@ -1136,6 +1136,30 @@ bool Scope::CheckStrongModeDeclaration(VariableProxy* proxy, Variable* var) {
   while (scope) {
     if (scope->ClassVariableForMethod() == var) return true;
     scope = scope->outer_scope();
+  }
+
+  // Allow references from methods to classes declared later, if we detect no
+  // problematic dependency cycles.
+
+  if (ClassVariableForMethod() && var->is_class()) {
+    // A method is referring to some other class, possibly declared
+    // later. Referring to a class declared earlier is always OK and covered by
+    // the code outside this if. Here we only need to allow special cases for
+    // referring to a class which is declared later.
+
+    // Referring to a class C declared later is OK under the following
+    // circumstances:
+
+    // 1. The class declarations are in a consecutive group with no other
+    // declarations or statements in between, and
+
+    // 2. There is no dependency cycle where the first edge is an initialization
+    // time dependency (computed property name or extends clause) from C to
+    // something that depends on this class directly or transitively.
+
+    // TODO(marja,rossberg): implement these checks. Here we undershoot the
+    // target and allow referring to any class.
+    return true;
   }
 
   // If both the use and the declaration are inside an eval scope (possibly

@@ -156,6 +156,7 @@ Heap::Heap()
   memset(roots_, 0, sizeof(roots_[0]) * kRootListLength);
   set_native_contexts_list(NULL);
   set_array_buffers_list(Smi::FromInt(0));
+  set_last_array_buffer_in_list(Smi::FromInt(0));
   set_allocation_sites_list(Smi::FromInt(0));
   set_encountered_weak_collections(Smi::FromInt(0));
   set_encountered_weak_cells(Smi::FromInt(0));
@@ -429,7 +430,7 @@ void Heap::GarbageCollectionPrologue() {
   store_buffer()->GCPrologue();
 
   if (isolate()->concurrent_osr_enabled()) {
-    isolate()->optimizing_compiler_thread()->AgeBufferedOsrJobs();
+    isolate()->optimizing_compile_dispatcher()->AgeBufferedOsrJobs();
   }
 
   if (new_space_.IsAtMaximumCapacity()) {
@@ -766,7 +767,7 @@ void Heap::CollectAllAvailableGarbage(const char* gc_reason) {
   if (isolate()->concurrent_recompilation_enabled()) {
     // The optimizing compiler may be unnecessarily holding on to memory.
     DisallowHeapAllocation no_recursive_gc;
-    isolate()->optimizing_compiler_thread()->Flush();
+    isolate()->optimizing_compile_dispatcher()->Flush();
   }
   isolate()->ClearSerializerData();
   mark_compact_collector()->SetFlags(kMakeHeapIterableMask |
@@ -793,10 +794,14 @@ void Heap::EnsureFillerObjectAtTop() {
   // pointer of the new space page. We store a filler object there to
   // identify the unused space.
   Address from_top = new_space_.top();
-  Address from_limit = new_space_.limit();
-  if (from_top < from_limit) {
-    int remaining_in_page = static_cast<int>(from_limit - from_top);
-    CreateFillerObjectAt(from_top, remaining_in_page);
+  // Check that from_top is inside its page (i.e., not at the end).
+  Address space_end = new_space_.ToSpaceEnd();
+  if (from_top < space_end) {
+    Page* page = Page::FromAddress(from_top);
+    if (page->Contains(from_top)) {
+      int remaining_in_page = static_cast<int>(page->area_end() - from_top);
+      CreateFillerObjectAt(from_top, remaining_in_page);
+    }
   }
 }
 
@@ -884,7 +889,7 @@ int Heap::NotifyContextDisposed(bool dependant_context) {
   }
   if (isolate()->concurrent_recompilation_enabled()) {
     // Flush the queued recompilation tasks.
-    isolate()->optimizing_compiler_thread()->Flush();
+    isolate()->optimizing_compile_dispatcher()->Flush();
   }
   AgeInlineCaches();
   set_retained_maps(ArrayList::cast(empty_fixed_array()));
@@ -1674,8 +1679,8 @@ void Heap::ProcessYoungWeakReferences(WeakObjectRetainer* retainer) {
 
 
 void Heap::ProcessNativeContexts(WeakObjectRetainer* retainer) {
-  Object* head =
-      VisitWeakList<Context>(this, native_contexts_list(), retainer, false);
+  Object* head = VisitWeakList<Context>(this, native_contexts_list(), retainer,
+                                        false, NULL);
   // Update the head of the list of contexts.
   set_native_contexts_list(head);
 }
@@ -1683,9 +1688,12 @@ void Heap::ProcessNativeContexts(WeakObjectRetainer* retainer) {
 
 void Heap::ProcessArrayBuffers(WeakObjectRetainer* retainer,
                                bool stop_after_young) {
-  Object* array_buffer_obj = VisitWeakList<JSArrayBuffer>(
-      this, array_buffers_list(), retainer, stop_after_young);
+  Object* last_array_buffer = undefined_value();
+  Object* array_buffer_obj =
+      VisitWeakList<JSArrayBuffer>(this, array_buffers_list(), retainer,
+                                   stop_after_young, &last_array_buffer);
   set_array_buffers_list(array_buffer_obj);
+  set_last_array_buffer_in_list(last_array_buffer);
 
   // Verify invariant that young array buffers come before old array buffers
   // in array buffers list if there was no promotion failure.
@@ -1706,7 +1714,7 @@ void Heap::ProcessArrayBuffers(WeakObjectRetainer* retainer,
 void Heap::ProcessNewArrayBufferViews(WeakObjectRetainer* retainer) {
   // Retain the list of new space views.
   Object* typed_array_obj = VisitWeakList<JSArrayBufferView>(
-      this, new_array_buffer_views_list_, retainer, false);
+      this, new_array_buffer_views_list_, retainer, false, NULL);
   set_new_array_buffer_views_list(typed_array_obj);
 
   // Some objects in the list may be in old space now. Find them
@@ -1730,7 +1738,7 @@ void Heap::TearDownArrayBuffers() {
 
 void Heap::ProcessAllocationSites(WeakObjectRetainer* retainer) {
   Object* allocation_site_obj = VisitWeakList<AllocationSite>(
-      this, allocation_sites_list(), retainer, false);
+      this, allocation_sites_list(), retainer, false, NULL);
   set_allocation_sites_list(allocation_site_obj);
 }
 
@@ -3444,7 +3452,7 @@ bool Heap::CanMoveObjectStart(HeapObject* object) {
 void Heap::AdjustLiveBytes(Address address, int by, InvocationMode mode) {
   if (incremental_marking()->IsMarking() &&
       Marking::IsBlack(Marking::MarkBitFrom(address))) {
-    if (mode == FROM_GC) {
+    if (mode == SEQUENTIAL_TO_SWEEPER) {
       MemoryChunk::IncrementLiveBytesFromGC(address, by);
     } else {
       MemoryChunk::IncrementLiveBytesFromMutator(address, by);
@@ -3494,7 +3502,7 @@ FixedArrayBase* Heap::LeftTrimFixedArray(FixedArrayBase* object,
 
   // Maintain consistency of live bytes during incremental marking
   marking()->TransferMark(object->address(), new_start);
-  AdjustLiveBytes(new_start, -bytes_to_trim, Heap::FROM_MUTATOR);
+  AdjustLiveBytes(new_start, -bytes_to_trim, Heap::CONCURRENT_TO_SWEEPER);
 
   // Notify the heap profiler of change in object layout.
   OnMoveEvent(new_object, object, new_object->Size());
@@ -3503,10 +3511,10 @@ FixedArrayBase* Heap::LeftTrimFixedArray(FixedArrayBase* object,
 
 
 // Force instantiation of templatized method.
-template
-void Heap::RightTrimFixedArray<Heap::FROM_GC>(FixedArrayBase*, int);
-template
-void Heap::RightTrimFixedArray<Heap::FROM_MUTATOR>(FixedArrayBase*, int);
+template void Heap::RightTrimFixedArray<Heap::SEQUENTIAL_TO_SWEEPER>(
+    FixedArrayBase*, int);
+template void Heap::RightTrimFixedArray<Heap::CONCURRENT_TO_SWEEPER>(
+    FixedArrayBase*, int);
 
 
 template<Heap::InvocationMode mode>
@@ -5262,8 +5270,7 @@ bool Heap::SetUp() {
     if (!ConfigureHeapDefault()) return false;
   }
 
-  concurrent_sweeping_enabled_ =
-      FLAG_concurrent_sweeping && isolate_->max_available_threads() > 1;
+  concurrent_sweeping_enabled_ = FLAG_concurrent_sweeping;
 
   base::CallOnce(&initialize_gc_once, &InitializeGCOnce);
 
@@ -5339,6 +5346,7 @@ bool Heap::CreateHeapObjects() {
 
   set_native_contexts_list(undefined_value());
   set_array_buffers_list(undefined_value());
+  set_last_array_buffer_in_list(undefined_value());
   set_new_array_buffer_views_list(undefined_value());
   set_allocation_sites_list(undefined_value());
   return true;
@@ -6245,12 +6253,57 @@ void Heap::ClearObjectStats(bool clear_last_time_stats) {
 }
 
 
-static base::LazyMutex checkpoint_object_stats_mutex = LAZY_MUTEX_INITIALIZER;
+static base::LazyMutex object_stats_mutex = LAZY_MUTEX_INITIALIZER;
+
+
+static void TraceObjectStat(const char* name, int count, int size) {
+  if (size > 0) {
+    PrintF("%40s\tcount= %6d\t size= %6d kb\n", name, count, size);
+  }
+}
+
+
+void Heap::TraceObjectStats() {
+  base::LockGuard<base::Mutex> lock_guard(object_stats_mutex.Pointer());
+  int index;
+  int count;
+  int size;
+  int total_size = 0;
+#define TRACE_OBJECT_COUNT(name)                     \
+  count = static_cast<int>(object_counts_[name]);    \
+  size = static_cast<int>(object_sizes_[name]) / KB; \
+  total_size += size;                                \
+  TraceObjectStat(#name, count, size);
+  INSTANCE_TYPE_LIST(TRACE_OBJECT_COUNT)
+#undef TRACE_OBJECT_COUNT
+#define TRACE_OBJECT_COUNT(name)                      \
+  index = FIRST_CODE_KIND_SUB_TYPE + Code::name;      \
+  count = static_cast<int>(object_counts_[index]);    \
+  size = static_cast<int>(object_sizes_[index]) / KB; \
+  TraceObjectStat("CODE_" #name, count, size);
+  CODE_KIND_LIST(TRACE_OBJECT_COUNT)
+#undef TRACE_OBJECT_COUNT
+#define TRACE_OBJECT_COUNT(name)                      \
+  index = FIRST_FIXED_ARRAY_SUB_TYPE + name;          \
+  count = static_cast<int>(object_counts_[index]);    \
+  size = static_cast<int>(object_sizes_[index]) / KB; \
+  TraceObjectStat("FIXED_ARRAY_" #name, count, size);
+  FIXED_ARRAY_SUB_INSTANCE_TYPE_LIST(TRACE_OBJECT_COUNT)
+#undef TRACE_OBJECT_COUNT
+#define TRACE_OBJECT_COUNT(name)                                              \
+  index =                                                                     \
+      FIRST_CODE_AGE_SUB_TYPE + Code::k##name##CodeAge - Code::kFirstCodeAge; \
+  count = static_cast<int>(object_counts_[index]);                            \
+  size = static_cast<int>(object_sizes_[index]) / KB;                         \
+  TraceObjectStat("CODE_AGE_" #name, count, size);
+  CODE_AGE_LIST_COMPLETE(TRACE_OBJECT_COUNT)
+#undef TRACE_OBJECT_COUNT
+  PrintF("Total size= %d kb\n", total_size);
+}
 
 
 void Heap::CheckpointObjectStats() {
-  base::LockGuard<base::Mutex> lock_guard(
-      checkpoint_object_stats_mutex.Pointer());
+  base::LockGuard<base::Mutex> lock_guard(object_stats_mutex.Pointer());
   Counters* counters = isolate()->counters();
 #define ADJUST_LAST_TIME_OBJECT_COUNT(name)              \
   counters->count_of_##name()->Increment(                \

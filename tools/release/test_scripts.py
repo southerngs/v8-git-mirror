@@ -1419,8 +1419,25 @@ Cr-Commit-Position: refs/heads/4.2.71@{#1}
       Cmd("git branch -r", " weird/123\n  branch-heads/7\n", cwd=chrome_dir),
       Cmd("git show refs/branch-heads/7:DEPS", c_deps % "hash_345",
           cwd=chrome_dir),
+      URL("http://omahaproxy.appspot.com/all.json", """[{
+        "os": "win",
+        "versions": [{
+          "version": "2.2.2.2",
+          "v8_version": "22.2.2.2",
+          "current_reldate": "04/09/15",
+          "os": "win",
+          "channel": "canary",
+          "previous_version": "1.1.1.0"
+          }]
+        }]"""),
+      URL("http://omahaproxy.appspot.com/v8.json?version=1.1.1.0", """{
+        "chromium_version": "1.1.1.0",
+        "v8_version": "11.1.1.0"
+        }"""),
+      Cmd("git rev-list -1 11.1.1", "v8_previous_version_hash"),
+      Cmd("git rev-list -1 22.2.2.2", "v8_version_hash"),
       Cmd("git checkout -f origin/master", ""),
-      Cmd("git branch -D %s" % TEST_CONFIG["BRANCHNAME"], ""),
+      Cmd("git branch -D %s" % TEST_CONFIG["BRANCHNAME"], "")
     ])
 
     args = ["-c", TEST_CONFIG["CHROMIUM"],
@@ -1436,7 +1453,18 @@ Cr-Commit-Position: refs/heads/4.2.71@{#1}
            "3.3.1.1,3.3,234,,abc12\r\n")
     self.assertEquals(csv, FileToText(csv_output))
 
-    expected_json = [
+    expected_json = {"chrome_releases":{
+                                        "canaries": [
+                                                     {
+                           "chrome_version": "2.2.2.2",
+                           "os": "win",
+                           "release_date": "04/09/15",
+                           "v8_version": "22.2.2.2",
+                           "v8_version_hash": "v8_version_hash",
+                           "v8_previous_version": "11.1.1.0",
+                           "v8_previous_version_hash": "v8_previous_version_hash"
+                           }]},
+                     "releases":[
       {
         "revision": "1",
         "revision_git": "hash_456",
@@ -1493,8 +1521,8 @@ Cr-Commit-Position: refs/heads/4.2.71@{#1}
         "date": "18:15",
         "chromium_branch": "",
         "revision_link": "https://code.google.com/p/v8/source/detail?r=234",
-      },
-    ]
+      },],
+    }
     self.assertEquals(expected_json, json.loads(FileToText(json_output)))
 
 

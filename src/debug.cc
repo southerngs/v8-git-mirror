@@ -519,7 +519,7 @@ void ScriptCache::Add(Handle<Script> script) {
   // Create an entry in the hash map for the script.
   int id = script->id()->value();
   HashMap::Entry* entry =
-      HashMap::Lookup(reinterpret_cast<void*>(id), Hash(id), true);
+      HashMap::LookupOrInsert(reinterpret_cast<void*>(id), Hash(id));
   if (entry->value != NULL) {
 #ifdef DEBUG
     // The code deserializer may introduce duplicate Script objects.
@@ -582,7 +582,8 @@ void ScriptCache::HandleWeakScript(
   // Remove the corresponding entry from the cache.
   ScriptCache* script_cache =
       reinterpret_cast<ScriptCache*>(data.GetParameter());
-  HashMap::Entry* entry = script_cache->Lookup(key, hash, false);
+  HashMap::Entry* entry = script_cache->Lookup(key, hash);
+  DCHECK_NOT_NULL(entry);
   Object** location = reinterpret_cast<Object**>(entry->value);
   script_cache->Remove(key, hash);
 
@@ -1842,7 +1843,7 @@ void Debug::PrepareForBreakPoints() {
   // functions as debugging does not work with optimized code.
   if (!has_break_points_) {
     if (isolate_->concurrent_recompilation_enabled()) {
-      isolate_->optimizing_compiler_thread()->Flush();
+      isolate_->optimizing_compile_dispatcher()->Flush();
     }
 
     Deoptimizer::DeoptimizeAll(isolate_);

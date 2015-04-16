@@ -39,7 +39,6 @@ var kMessages = {
   stack_trace:                   ["Stack Trace:\n", "%0"],
   called_non_callable:           ["%0", " is not a function"],
   undefined_method:              ["Object ", "%1", " has no method '", "%0", "'"],
-  property_not_function:         ["Property '", "%0", "' of object ", "%1", " is not a function"],
   cannot_convert_to_primitive:   ["Cannot convert object to primitive value"],
   not_constructor:               ["%0", " is not a constructor"],
   not_defined:                   ["%0", " is not defined"],
@@ -47,7 +46,6 @@ var kMessages = {
   unsupported_super:             ["Unsupported reference to 'super'"],
   non_object_property_load:      ["Cannot read property '", "%0", "' of ", "%1"],
   non_object_property_store:     ["Cannot set property '", "%0", "' of ", "%1"],
-  with_expression:               ["%0", " has no properties"],
   illegal_invocation:            ["Illegal invocation"],
   no_setter_in_callback:         ["Cannot set property ", "%0", " of ", "%1", " which has only a getter"],
   apply_non_function:            ["Function.prototype.apply was called on ", "%0", ", which is a ", "%1", " and not a function"],
@@ -168,6 +166,8 @@ var kMessages = {
   strong_ellision:               ["In strong mode, arrays with holes are deprecated, use maps instead"],
   strong_arguments:              ["In strong mode, 'arguments' is deprecated, use '...args' instead"],
   strong_undefined:              ["In strong mode, binding or assigning to 'undefined' is deprecated"],
+  strong_direct_eval:            ["In strong mode, direct calls to eval are deprecated"],
+  strong_switch_fallthrough :    ["In strong mode, switch fall-through is deprecated, terminate each case with 'break', 'continue', 'return' or 'throw'"],
   strong_equal:                  ["In strong mode, '==' and '!=' are deprecated, use '===' and '!==' instead"],
   strong_delete:                 ["In strong mode, 'delete' is deprecated, use maps or sets instead"],
   strong_var:                    ["In strong mode, 'var' is deprecated, use 'let' or 'const' instead"],
@@ -203,7 +203,9 @@ var kMessages = {
   for_of_loop_initializer:       ["for-of loop variable declaration may not have an initializer."],
   for_inof_loop_multi_bindings:  ["Invalid left-hand side in ", "%0", " loop: Must have a single binding."],
   bad_getter_arity:              ["Getter must not have any formal parameters."],
-  bad_setter_arity:              ["Setter must have exactly one formal parameter."]
+  bad_setter_arity:              ["Setter must have exactly one formal parameter."],
+  this_formal_parameter:         ["'this' is not a valid formal parameter name"],
+  duplicate_arrow_function_formal_parameter: ["Arrow function may not have duplicate parameter names"]
 };
 
 
@@ -322,6 +324,11 @@ function MakeGenericError(constructor, type, args) {
 }
 
 
+function MakeGenericError2(constructor, type, arg0, arg1, arg2) {
+  return new constructor(FormatMessage(type, arg0, arg1, arg2));
+}
+
+
 /**
  * Set up the Script function and constructor.
  */
@@ -335,10 +342,21 @@ function MakeGenericError(constructor, type, args) {
 
 
 // Helper functions; called from the runtime system.
-function FormatMessage(type, args) {
+function FormatMessage(type, arg0, arg1, arg2) {
+  if (IS_NUMBER(type)) {
+    var arg0 = NoSideEffectToString(arg0);
+    var arg1 = NoSideEffectToString(arg1);
+    var arg2 = NoSideEffectToString(arg2);
+    try {
+      return %FormatMessageString(type, arg0, arg1, arg2);
+    } catch (e) {
+      return "";
+    }
+  }
+  // TODO(yangguo): remove this code path once we migrated all messages.
   var format = kMessages[type];
   if (!format) return "<unknown message " + type + ">";
-  return FormatString(format, args);
+  return FormatString(format, arg0);
 }
 
 
@@ -365,6 +383,12 @@ function GetSourceLine(message) {
 
 function MakeTypeError(type, args) {
   return MakeGenericError($TypeError, type, args);
+}
+
+
+// TODO(yangguo): rename this once we migrated all messages.
+function MakeTypeError2(type, arg0, arg1, arg2) {
+  return MakeGenericError2($TypeError, type, arg0, arg1, arg2);
 }
 
 

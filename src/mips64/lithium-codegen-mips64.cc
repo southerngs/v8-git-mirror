@@ -3156,7 +3156,6 @@ void LCodeGen::DoLoadKeyedExternalArray(LLoadKeyed* instr) {
       elements_kind == FLOAT32_ELEMENTS ||
       elements_kind == EXTERNAL_FLOAT64_ELEMENTS ||
       elements_kind == FLOAT64_ELEMENTS) {
-    int base_offset = instr->base_offset();
     FPURegister result = ToDoubleRegister(instr->result());
     if (key_is_constant) {
       __ Daddu(scratch0(), external_pointer,
@@ -4010,32 +4009,14 @@ void LCodeGen::DoTailCallThroughMegamorphicCache(
   Register extra = a5;
   Register extra2 = a6;
   Register extra3 = t1;
-#ifdef DEBUG
-  Register slot = FLAG_vector_ics ? ToRegister(instr->slot()) : no_reg;
-  Register vector = FLAG_vector_ics ? ToRegister(instr->vector()) : no_reg;
-  DCHECK(!FLAG_vector_ics ||
-         !AreAliased(slot, vector, scratch, extra, extra2, extra3));
-#endif
 
-  // Important for the tail-call.
-  bool must_teardown_frame = NeedsEagerFrame();
-
-  if (!instr->hydrogen()->is_just_miss()) {
-    DCHECK(!instr->hydrogen()->is_keyed_load());
-
-    // The probe will tail call to a handler if found.
-    isolate()->stub_cache()->GenerateProbe(
-        masm(), Code::LOAD_IC, instr->hydrogen()->flags(), must_teardown_frame,
-        receiver, name, scratch, extra, extra2, extra3);
-  }
+  // The probe will tail call to a handler if found.
+  isolate()->stub_cache()->GenerateProbe(
+      masm(), Code::LOAD_IC, instr->hydrogen()->flags(), false, receiver, name,
+      scratch, extra, extra2, extra3);
 
   // Tail call to miss if we ended up here.
-  if (must_teardown_frame) __ LeaveFrame(StackFrame::INTERNAL);
-  if (instr->hydrogen()->is_keyed_load()) {
-    KeyedLoadIC::GenerateMiss(masm());
-  } else {
-    LoadIC::GenerateMiss(masm());
-  }
+  LoadIC::GenerateMiss(masm());
 }
 
 
@@ -4147,7 +4128,14 @@ void LCodeGen::DoCallNewArray(LCallNewArray* instr) {
   DCHECK(ToRegister(instr->result()).is(v0));
 
   __ li(a0, Operand(instr->arity()));
-  __ LoadRoot(a2, Heap::kUndefinedValueRootIndex);
+  if (instr->arity() == 1) {
+    // We only need the allocation site for the case we have a length argument.
+    // The case may bail out to the runtime, which will determine the correct
+    // elements kind with the site.
+    __ li(a2, instr->hydrogen()->site());
+  } else {
+    __ LoadRoot(a2, Heap::kUndefinedValueRootIndex);
+  }
   ElementsKind kind = instr->hydrogen()->elements_kind();
   AllocationSiteOverrideMode override_mode =
       (AllocationSite::GetMode(kind) == TRACK_ALLOCATION_SITE)

@@ -729,9 +729,11 @@ class Heap {
 
   bool CanMoveObjectStart(HeapObject* object);
 
-  // Indicates whether live bytes adjustment is triggered from within the GC
-  // code or from mutator code.
-  enum InvocationMode { FROM_GC, FROM_MUTATOR };
+  // Indicates whether live bytes adjustment is triggered
+  // - from within the GC code before sweeping started (SEQUENTIAL_TO_SWEEPER),
+  // - or from within GC (CONCURRENT_TO_SWEEPER),
+  // - or mutator code (CONCURRENT_TO_SWEEPER).
+  enum InvocationMode { SEQUENTIAL_TO_SWEEPER, CONCURRENT_TO_SWEEPER };
 
   // Maintain consistency of live bytes during incremental marking.
   void AdjustLiveBytes(Address address, int by, InvocationMode mode);
@@ -854,6 +856,13 @@ class Heap {
 
   void set_array_buffers_list(Object* object) { array_buffers_list_ = object; }
   Object* array_buffers_list() const { return array_buffers_list_; }
+
+  void set_last_array_buffer_in_list(Object* object) {
+    last_array_buffer_in_list_ = object;
+  }
+  Object* last_array_buffer_in_list() const {
+    return last_array_buffer_in_list_;
+  }
 
   void set_new_array_buffer_views_list(Object* object) {
     new_array_buffer_views_list_ = object;
@@ -1420,6 +1429,7 @@ class Heap {
     object_sizes_[FIRST_FIXED_ARRAY_SUB_TYPE + array_sub_type] += size;
   }
 
+  void TraceObjectStats();
   void CheckpointObjectStats();
 
   // We don't use a LockGuard here since we want to lock the heap
@@ -1638,6 +1648,7 @@ class Heap {
   // List heads are initialized lazily and contain the undefined_value at start.
   Object* native_contexts_list_;
   Object* array_buffers_list_;
+  Object* last_array_buffer_in_list_;
   Object* allocation_sites_list_;
 
   // This is a global list of array buffer views in new space. When the views

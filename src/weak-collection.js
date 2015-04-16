@@ -2,15 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+(function() {
+
 "use strict";
 
-// This file relies on the fact that the following declaration has been made
-// in runtime.js:
-// var $Array = global.Array;
+%CheckIsBootstrapping();
 
-var $WeakMap = global.WeakMap;
-var $WeakSet = global.WeakSet;
-
+var GlobalObject = global.Object;
+var GlobalWeakMap = global.WeakMap;
+var GlobalWeakSet = global.WeakSet;
 
 // -------------------------------------------------------------------
 // Harmony WeakMap
@@ -25,7 +25,7 @@ function WeakMapConstructor(iterable) {
   if (!IS_NULL_OR_UNDEFINED(iterable)) {
     var adder = this.set;
     if (!IS_SPEC_FUNCTION(adder)) {
-      throw MakeTypeError('property_not_function', ['set', this]);
+      throw MakeTypeError(kPropertyNotFunction, ['set', this]);
     }
     for (var nextItem of iterable) {
       if (!IS_SPEC_OBJECT(nextItem)) {
@@ -81,26 +81,21 @@ function WeakMapDelete(key) {
 
 // -------------------------------------------------------------------
 
-function SetUpWeakMap() {
-  %CheckIsBootstrapping();
+%SetCode(GlobalWeakMap, WeakMapConstructor);
+%FunctionSetLength(GlobalWeakMap, 0);
+%FunctionSetPrototype(GlobalWeakMap, new GlobalObject());
+%AddNamedProperty(GlobalWeakMap.prototype, "constructor", GlobalWeakMap,
+                  DONT_ENUM);
+%AddNamedProperty(GlobalWeakMap.prototype, symbolToStringTag, "WeakMap",
+                  DONT_ENUM | READ_ONLY);
 
-  %SetCode($WeakMap, WeakMapConstructor);
-  %FunctionSetPrototype($WeakMap, new $Object());
-  %AddNamedProperty($WeakMap.prototype, "constructor", $WeakMap, DONT_ENUM);
-  %AddNamedProperty(
-      $WeakMap.prototype, symbolToStringTag, "WeakMap", DONT_ENUM | READ_ONLY);
-
-  // Set up the non-enumerable functions on the WeakMap prototype object.
-  InstallFunctions($WeakMap.prototype, DONT_ENUM, [
-    "get", WeakMapGet,
-    "set", WeakMapSet,
-    "has", WeakMapHas,
-    "delete", WeakMapDelete
-  ]);
-}
-
-SetUpWeakMap();
-
+// Set up the non-enumerable functions on the WeakMap prototype object.
+InstallFunctions(GlobalWeakMap.prototype, DONT_ENUM, [
+  "get", WeakMapGet,
+  "set", WeakMapSet,
+  "has", WeakMapHas,
+  "delete", WeakMapDelete
+]);
 
 // -------------------------------------------------------------------
 // Harmony WeakSet
@@ -115,7 +110,7 @@ function WeakSetConstructor(iterable) {
   if (!IS_NULL_OR_UNDEFINED(iterable)) {
     var adder = this.add;
     if (!IS_SPEC_FUNCTION(adder)) {
-      throw MakeTypeError('property_not_function', ['add', this]);
+      throw MakeTypeError(kPropertyNotFunction, ['add', this]);
     }
     for (var value of iterable) {
       %_CallFunction(this, value, adder);
@@ -158,21 +153,19 @@ function WeakSetDelete(value) {
 
 // -------------------------------------------------------------------
 
-function SetUpWeakSet() {
-  %CheckIsBootstrapping();
+%SetCode(GlobalWeakSet, WeakSetConstructor);
+%FunctionSetLength(GlobalWeakSet, 0);
+%FunctionSetPrototype(GlobalWeakSet, new GlobalObject());
+%AddNamedProperty(GlobalWeakSet.prototype, "constructor", GlobalWeakSet,
+                 DONT_ENUM);
+%AddNamedProperty(GlobalWeakSet.prototype, symbolToStringTag, "WeakSet",
+                  DONT_ENUM | READ_ONLY);
 
-  %SetCode($WeakSet, WeakSetConstructor);
-  %FunctionSetPrototype($WeakSet, new $Object());
-  %AddNamedProperty($WeakSet.prototype, "constructor", $WeakSet, DONT_ENUM);
-  %AddNamedProperty(
-      $WeakSet.prototype, symbolToStringTag, "WeakSet", DONT_ENUM | READ_ONLY);
+// Set up the non-enumerable functions on the WeakSet prototype object.
+InstallFunctions(GlobalWeakSet.prototype, DONT_ENUM, [
+  "add", WeakSetAdd,
+  "has", WeakSetHas,
+  "delete", WeakSetDelete
+]);
 
-  // Set up the non-enumerable functions on the WeakSet prototype object.
-  InstallFunctions($WeakSet.prototype, DONT_ENUM, [
-    "add", WeakSetAdd,
-    "has", WeakSetHas,
-    "delete", WeakSetDelete
-  ]);
-}
-
-SetUpWeakSet();
+})();

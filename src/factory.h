@@ -6,6 +6,7 @@
 #define V8_FACTORY_H_
 
 #include "src/isolate.h"
+#include "src/messages.h"
 
 namespace v8 {
 namespace internal {
@@ -536,11 +537,20 @@ class Factory FINAL {
   Handle<Object> NewError(const char* maker, const char* message,
                           Vector<Handle<Object> > args);
   Handle<Object> NewError(const char* message, Vector<Handle<Object> > args);
+  Handle<Object> NewError(const char* maker,
+                          MessageTemplate::Template template_index,
+                          Handle<Object> arg0, Handle<Object> arg1,
+                          Handle<Object> arg2);
+
   Handle<Object> NewError(Handle<String> message);
   Handle<Object> NewError(const char* constructor, Handle<String> message);
 
   Handle<Object> NewTypeError(const char* message,
                               Vector<Handle<Object> > args);
+  Handle<Object> NewTypeError(MessageTemplate::Template template_index,
+                              Handle<Object> arg0 = Handle<Object>(),
+                              Handle<Object> arg1 = Handle<Object>(),
+                              Handle<Object> arg2 = Handle<Object>());
   Handle<Object> NewTypeError(Handle<String> message);
 
   Handle<Object> NewRangeError(const char* message,
@@ -668,7 +678,7 @@ class Factory FINAL {
   // Returns the value for a known global constant (a property of the global
   // object which is neither configurable nor writable) like 'undefined'.
   // Returns a null handle when the given name is unknown.
-  Handle<Object> GlobalConstantFor(Handle<String> name);
+  Handle<Object> GlobalConstantFor(Handle<Name> name);
 
   // Converts the given boolean condition to JavaScript boolean value.
   Handle<Object> ToBoolean(bool value);

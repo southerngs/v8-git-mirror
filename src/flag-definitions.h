@@ -390,9 +390,6 @@ DEFINE_BOOL(optimize_for_in, true, "optimize functions containing for-in loops")
 
 DEFINE_BOOL(concurrent_recompilation, true,
             "optimizing hot functions asynchronously on a separate thread")
-DEFINE_BOOL(job_based_recompilation, true,
-            "post tasks to v8::Platform instead of using a thread for "
-            "concurrent recompilation")
 DEFINE_BOOL(trace_concurrent_recompilation, false,
             "track concurrent recompilation")
 DEFINE_INT(concurrent_recompilation_queue_length, 8,
@@ -419,6 +416,7 @@ DEFINE_BOOL(trace_turbo_types, true, "trace TurboFan's types")
 DEFINE_BOOL(trace_turbo_scheduler, false, "trace TurboFan's scheduler")
 DEFINE_BOOL(trace_turbo_reduction, false, "trace TurboFan's various reducers")
 DEFINE_BOOL(trace_turbo_jt, false, "trace TurboFan's jump threading")
+DEFINE_BOOL(trace_turbo_ceq, false, "trace TurboFan's control equivalence")
 DEFINE_BOOL(turbo_asm, true, "enable TurboFan for asm.js code")
 DEFINE_BOOL(turbo_verify, DEBUG_BOOL, "verify TurboFan graphs at each phase")
 DEFINE_BOOL(turbo_stats, false, "print TurboFan statistics")
@@ -654,6 +652,9 @@ DEFINE_BOOL(trace_incremental_marking, false,
             "trace progress of the incremental marking")
 DEFINE_BOOL(track_gc_object_stats, false,
             "track object counts and memory usage")
+DEFINE_BOOL(trace_gc_object_stats, false,
+            "trace object counts and memory usage")
+DEFINE_IMPLICATION(trace_gc_object_stats, track_gc_object_stats)
 DEFINE_BOOL(track_detached_contexts, true,
             "track native contexts that are expected to be garbage collected")
 DEFINE_BOOL(trace_detached_contexts, false,
@@ -704,6 +705,9 @@ DEFINE_INT(random_seed, 0,
 DEFINE_BOOL(trace_weak_arrays, false, "trace WeakFixedArray usage")
 DEFINE_BOOL(track_prototype_users, false,
             "keep track of which maps refer to a given prototype object")
+DEFINE_BOOL(eliminate_prototype_chain_checks, true,
+            "collapse prototype chain checks into single-cell checks")
+DEFINE_IMPLICATION(eliminate_prototype_chain_checks, track_prototype_users)
 DEFINE_BOOL(use_verbose_printer, true, "allows verbose printing")
 #if TRACE_MAPS
 DEFINE_BOOL(trace_maps, false, "trace map creation")
@@ -754,6 +758,8 @@ DEFINE_INT(hash_seed, 0,
 // snapshot-common.cc
 DEFINE_BOOL(profile_deserialization, false,
             "Print the time it takes to deserialize the snapshot.")
+DEFINE_BOOL(serialization_statistics, false,
+            "Collect statistics on serialized objects.")
 
 // Regexp
 DEFINE_BOOL(regexp_optimization, true, "generate optimized regexp code")

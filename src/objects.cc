@@ -1030,7 +1030,8 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
   self->set_resource(resource);
   if (is_internalized) self->Hash();  // Force regeneration of the hash value.
 
-  heap->AdjustLiveBytes(this->address(), new_size - size, Heap::FROM_MUTATOR);
+  heap->AdjustLiveBytes(this->address(), new_size - size,
+                        Heap::CONCURRENT_TO_SWEEPER);
   return true;
 }
 
@@ -1090,7 +1091,8 @@ bool String::MakeExternal(v8::String::ExternalOneByteStringResource* resource) {
   self->set_resource(resource);
   if (is_internalized) self->Hash();  // Force regeneration of the hash value.
 
-  heap->AdjustLiveBytes(this->address(), new_size - size, Heap::FROM_MUTATOR);
+  heap->AdjustLiveBytes(this->address(), new_size - size,
+                        Heap::CONCURRENT_TO_SWEEPER);
   return true;
 }
 
@@ -1905,6 +1907,9 @@ void Map::ConnectElementsTransition(Handle<Map> parent, Handle<Map> child) {
 void JSObject::MigrateToMap(Handle<JSObject> object, Handle<Map> new_map,
                             int expected_additional_properties) {
   if (object->map() == *new_map) return;
+  // If this object is a prototype (the callee will check), invalidate any
+  // prototype chains involving it.
+  InvalidatePrototypeChains(object->map());
   Handle<Map> old_map(object->map());
   if (object->HasFastProperties()) {
     if (!new_map->is_dictionary_map()) {
@@ -1932,6 +1937,8 @@ void JSObject::MigrateToMap(Handle<JSObject> object, Handle<Map> new_map,
     object->set_map(*new_map);
   }
   if (old_map->is_prototype_map()) {
+    DCHECK(new_map->is_prototype_map());
+    DCHECK(object->map() == *new_map);
     new_map->set_prototype_info(old_map->prototype_info());
     old_map->set_prototype_info(Smi::FromInt(0));
   }
@@ -2113,7 +2120,7 @@ void JSObject::MigrateFastToFast(Handle<JSObject> object, Handle<Map> new_map) {
   // If there are properties in the new backing store, trim it to the correct
   // size and install the backing store into the object.
   if (external > 0) {
-    heap->RightTrimFixedArray<Heap::FROM_MUTATOR>(*array, inobject);
+    heap->RightTrimFixedArray<Heap::CONCURRENT_TO_SWEEPER>(*array, inobject);
     object->set_properties(*array);
   }
 
@@ -2126,7 +2133,8 @@ void JSObject::MigrateFastToFast(Handle<JSObject> object, Handle<Map> new_map) {
     Address address = object->address();
     heap->CreateFillerObjectAt(
         address + new_instance_size, instance_size_delta);
-    heap->AdjustLiveBytes(address, -instance_size_delta, Heap::FROM_MUTATOR);
+    heap->AdjustLiveBytes(address, -instance_size_delta,
+                          Heap::CONCURRENT_TO_SWEEPER);
   }
 
   // We are storing the new map using release store after creating a filler for
@@ -2389,10 +2397,17 @@ void Map::GeneralizeFieldType(Handle<Map> map, int modify_index,
   Handle<DescriptorArray> descriptors(
       field_owner->instance_descriptors(), isolate);
   DCHECK_EQ(*old_field_type, descriptors->GetFieldType(modify_index));
+  bool old_field_type_was_cleared =
+      old_field_type->Is(HeapType::None()) && old_representation.IsHeapObject();
 
-  // Determine the generalized new field type.
-  new_field_type = Map::GeneralizeFieldType(
-      old_field_type, new_field_type, isolate);
+  // Determine the generalized new field type. Conservatively assume type Any
+  // for cleared field types because the cleared type could have been a
+  // deprecated map and there still could be live instances with a non-
+  // deprecated version of the map.
+  new_field_type =
+      old_field_type_was_cleared
+          ? HeapType::Any(isolate)
+          : Map::GeneralizeFieldType(old_field_type, new_field_type, isolate);
 
   PropertyDetails details = descriptors->GetDetails(modify_index);
   Handle<Name> name(descriptors->GetKey(modify_index));
@@ -4631,7 +4646,7 @@ void JSObject::MigrateFastToSlow(Handle<JSObject> object,
     heap->CreateFillerObjectAt(object->address() + new_instance_size,
                                instance_size_delta);
     heap->AdjustLiveBytes(object->address(), -instance_size_delta,
-                          Heap::FROM_MUTATOR);
+                          Heap::CONCURRENT_TO_SWEEPER);
   }
 
   // We are storing the new map using release store after creating a filler for
@@ -4702,6 +4717,12 @@ void JSObject::MigrateSlowToFast(Handle<JSObject> object,
   // Allocate new map.
   Handle<Map> new_map = Map::CopyDropDescriptors(handle(object->map()));
   new_map->set_dictionary_map(false);
+
+  if (object->map()->is_prototype_map()) {
+    DCHECK(new_map->is_prototype_map());
+    new_map->set_prototype_info(object->map()->prototype_info());
+    object->map()->set_prototype_info(Smi::FromInt(0));
+  }
 
 #if TRACE_MAPS
   if (FLAG_trace_maps) {
@@ -6888,9 +6909,20 @@ Handle<Map> Map::Normalize(Handle<Map> fast_map, PropertyNormalizationMode mode,
       // applied to the shared map, dependent code and weak cell cache.
       Handle<Map> fresh = Map::CopyNormalized(fast_map, mode);
 
-      DCHECK(memcmp(fresh->address(),
-                    new_map->address(),
-                    Map::kCodeCacheOffset) == 0);
+      if (new_map->is_prototype_map()) {
+        // For prototype maps, the PrototypeInfo is not copied.
+        DCHECK(memcmp(fresh->address(), new_map->address(),
+                      kTransitionsOrPrototypeInfoOffset) == 0);
+        DCHECK(fresh->raw_transitions() == Smi::FromInt(0));
+        STATIC_ASSERT(kDescriptorsOffset ==
+                      kTransitionsOrPrototypeInfoOffset + kPointerSize);
+        DCHECK(memcmp(HeapObject::RawField(*fresh, kDescriptorsOffset),
+                      HeapObject::RawField(*new_map, kDescriptorsOffset),
+                      kCodeCacheOffset - kDescriptorsOffset) == 0);
+      } else {
+        DCHECK(memcmp(fresh->address(), new_map->address(),
+                      Map::kCodeCacheOffset) == 0);
+      }
       STATIC_ASSERT(Map::kDependentCodeOffset ==
                     Map::kCodeCacheOffset + kPointerSize);
       STATIC_ASSERT(Map::kWeakCellCacheOffset ==
@@ -8098,7 +8130,7 @@ Handle<PolymorphicCodeCacheHashTable> PolymorphicCodeCacheHashTable::Put(
 void FixedArray::Shrink(int new_length) {
   DCHECK(0 <= new_length && new_length <= length());
   if (new_length < length()) {
-    GetHeap()->RightTrimFixedArray<Heap::FROM_MUTATOR>(
+    GetHeap()->RightTrimFixedArray<Heap::CONCURRENT_TO_SWEEPER>(
         this, length() - new_length);
   }
 }
@@ -8221,8 +8253,8 @@ Handle<WeakFixedArray> WeakFixedArray::Add(
     for (int i = 0; i < array->Length(); ++i) {
       if (array->Get(i) == *value) return array;
     }
+#if 0  // Enable this if you want to check your search_for_duplicates flags.
   } else {
-#ifdef DEBUG
     for (int i = 0; i < array->Length(); ++i) {
       DCHECK_NE(*value, array->Get(i));
     }
@@ -9461,7 +9493,7 @@ Handle<String> SeqString::Truncate(Handle<SeqString> string, int new_length) {
     // that are a multiple of pointer size.
     heap->CreateFillerObjectAt(start_of_string + new_size, delta);
   }
-  heap->AdjustLiveBytes(start_of_string, -delta, Heap::FROM_MUTATOR);
+  heap->AdjustLiveBytes(start_of_string, -delta, Heap::CONCURRENT_TO_SWEEPER);
 
   // We are storing the new length using release store after creating a filler
   // for the left-over space to avoid races with the sweeper thread.
@@ -9708,7 +9740,7 @@ void JSFunction::AttemptConcurrentOptimization() {
     return;
   }
   if (isolate->concurrent_osr_enabled() &&
-      isolate->optimizing_compiler_thread()->IsQueuedForOSR(this)) {
+      isolate->optimizing_compile_dispatcher()->IsQueuedForOSR(this)) {
     // Do not attempt regular recompilation if we already queued this for OSR.
     // TODO(yangguo): This is necessary so that we don't install optimized
     // code on a function that is already optimized, since OSR and regular
@@ -9881,7 +9913,8 @@ void SharedFunctionInfo::EvictFromOptimizedCodeMap(Code* optimized_code,
   }
   if (dst != length) {
     // Always trim even when array is cleared because of heap verifier.
-    GetHeap()->RightTrimFixedArray<Heap::FROM_MUTATOR>(code_map, length - dst);
+    GetHeap()->RightTrimFixedArray<Heap::CONCURRENT_TO_SWEEPER>(code_map,
+                                                                length - dst);
     if (code_map->length() == kEntriesStart) ClearOptimizedCodeMap();
   }
 }
@@ -9892,7 +9925,8 @@ void SharedFunctionInfo::TrimOptimizedCodeMap(int shrink_by) {
   DCHECK(shrink_by % kEntryLength == 0);
   DCHECK(shrink_by <= code_map->length() - kEntriesStart);
   // Always trim even when array is cleared because of heap verifier.
-  GetHeap()->RightTrimFixedArray<Heap::FROM_GC>(code_map, shrink_by);
+  GetHeap()->RightTrimFixedArray<Heap::SEQUENTIAL_TO_SWEEPER>(code_map,
+                                                              shrink_by);
   if (code_map->length() == kEntriesStart) {
     ClearOptimizedCodeMap();
   }
@@ -10042,7 +10076,74 @@ void JSObject::UnregisterPrototypeUser(Handle<JSObject> prototype,
 }
 
 
+static void InvalidatePrototypeChainsInternal(Map* map) {
+  if (!map->is_prototype_map()) return;
+  Object* maybe_proto_info = map->prototype_info();
+  if (!maybe_proto_info->IsPrototypeInfo()) return;
+  PrototypeInfo* proto_info = PrototypeInfo::cast(maybe_proto_info);
+  Object* maybe_cell = proto_info->validity_cell();
+  if (maybe_cell->IsCell()) {
+    // Just set the value; the cell will be replaced lazily.
+    Cell* cell = Cell::cast(maybe_cell);
+    cell->set_value(Smi::FromInt(Map::kPrototypeChainInvalid));
+  }
+
+  Object* maybe_array = proto_info->prototype_users();
+  if (!maybe_array->IsWeakFixedArray()) return;
+
+  WeakFixedArray* users = WeakFixedArray::cast(maybe_array);
+  for (int i = 0; i < users->Length(); ++i) {
+    Object* maybe_user = users->Get(i);
+    if (maybe_user->IsSmi()) continue;
+
+    // For now, only maps register themselves as users.
+    Map* user = Map::cast(maybe_user);
+    // Walk the prototype chain (backwards, towards leaf objects) if necessary.
+    InvalidatePrototypeChainsInternal(user);
+  }
+}
+
+
 // static
+void JSObject::InvalidatePrototypeChains(Map* map) {
+  if (!FLAG_eliminate_prototype_chain_checks) return;
+  DisallowHeapAllocation no_gc;
+  if (map->IsJSGlobalProxyMap()) {
+    PrototypeIterator iter(map);
+    map = JSObject::cast(iter.GetCurrent())->map();
+  }
+  InvalidatePrototypeChainsInternal(map);
+}
+
+
+// static
+Handle<Cell> Map::GetOrCreatePrototypeChainValidityCell(Handle<Map> map,
+                                                        Isolate* isolate) {
+  Handle<Object> maybe_prototype(map->prototype(), isolate);
+  if (!maybe_prototype->IsJSObject()) return Handle<Cell>::null();
+  Handle<JSObject> prototype = Handle<JSObject>::cast(maybe_prototype);
+  if (prototype->IsJSGlobalProxy()) {
+    PrototypeIterator iter(isolate, prototype);
+    prototype = Handle<JSObject>::cast(PrototypeIterator::GetCurrent(iter));
+  }
+  Handle<PrototypeInfo> proto_info(
+      PrototypeInfo::cast(prototype->map()->prototype_info()));
+  Object* maybe_cell = proto_info->validity_cell();
+  // Return existing cell if it's still valid.
+  if (maybe_cell->IsCell()) {
+    Handle<Cell> cell(Cell::cast(maybe_cell), isolate);
+    if (cell->value() == Smi::FromInt(Map::kPrototypeChainValid)) {
+      return handle(Cell::cast(maybe_cell), isolate);
+    }
+  }
+  // Otherwise create a new cell.
+  Handle<Cell> cell = isolate->factory()->NewCell(
+      handle(Smi::FromInt(Map::kPrototypeChainValid), isolate));
+  proto_info->set_validity_cell(*cell);
+  return cell;
+}
+
+
 void Map::SetPrototype(Handle<Map> map, Handle<Object> prototype,
                        PrototypeOptimizationMode proto_mode) {
   if (map->prototype()->IsJSObject() && FLAG_track_prototype_users) {
@@ -10051,10 +10152,10 @@ void Map::SetPrototype(Handle<Map> map, Handle<Object> prototype,
   }
   if (prototype->IsJSObject()) {
     Handle<JSObject> prototype_jsobj = Handle<JSObject>::cast(prototype);
+    JSObject::OptimizeAsPrototype(prototype_jsobj, proto_mode);
     if (ShouldRegisterAsPrototypeUser(map, prototype_jsobj)) {
       JSObject::RegisterPrototypeUser(prototype_jsobj, map);
     }
-    JSObject::OptimizeAsPrototype(prototype_jsobj, proto_mode);
   }
   WriteBarrierMode wb_mode =
       prototype->IsNull() ? SKIP_WRITE_BARRIER : UPDATE_WRITE_BARRIER;
@@ -11936,15 +12037,9 @@ MUST_USE_RESULT static MaybeHandle<Object> EndPerformSplice(
 MaybeHandle<Object> JSArray::SetElementsLength(
     Handle<JSArray> array,
     Handle<Object> new_length_handle) {
-  if (array->HasFastElements()) {
-    // If the new array won't fit in a some non-trivial fraction of the max old
-    // space size, then force it to go dictionary mode.
-    int max_fast_array_size = static_cast<int>(
-        (array->GetHeap()->MaxOldGenerationSize() / kDoubleSize) / 4);
-    if (new_length_handle->IsNumber() &&
-        NumberToInt32(*new_length_handle) >= max_fast_array_size) {
-      NormalizeElements(array);
-    }
+  if (array->HasFastElements() &&
+      SetElementsLengthWouldNormalize(array->GetHeap(), new_length_handle)) {
+    NormalizeElements(array);
   }
 
   // We should never end in here with a pixel or external array.

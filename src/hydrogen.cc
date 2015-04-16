@@ -2389,6 +2389,8 @@ HInstruction* HGraphBuilder::BuildUncheckedMonomorphicElementAccess(
     PropertyAccessType access_type,
     LoadKeyedHoleMode load_mode,
     KeyedAccessStoreMode store_mode) {
+  DCHECK(top_info()->IsStub() || checked_object->IsCompareMap() ||
+         checked_object->IsCheckMaps());
   DCHECK((!IsExternalArrayElementsKind(elements_kind) &&
               !IsFixedTypedArrayElementsKind(elements_kind)) ||
          !is_js_array);
@@ -3474,7 +3476,6 @@ HBasicBlock* HGraph::CreateBasicBlock() {
 
 void HGraph::FinalizeUniqueness() {
   DisallowHeapAllocation no_gc;
-  DCHECK(!OptimizingCompilerThread::IsOptimizerThread(isolate()));
   for (int i = 0; i < blocks()->length(); ++i) {
     for (HInstructionIterator it(blocks()->at(i)); !it.Done(); it.Advance()) {
       it.Current()->FinalizeUniqueness();
@@ -5055,6 +5056,10 @@ void HOptimizedGraphBuilder::VisitForInStatement(ForInStatement* stmt) {
     return Bailout(kForInStatementOptimizationIsDisabled);
   }
 
+  if (stmt->for_in_type() != ForInStatement::FAST_FOR_IN) {
+    return Bailout(kForInStatementIsNotFastCase);
+  }
+
   if (!stmt->each()->IsVariableProxy() ||
       !stmt->each()->AsVariableProxy()->var()->IsStackLocal()) {
     return Bailout(kForInStatementWithNonLocalEachVariable);
@@ -5065,42 +5070,13 @@ void HOptimizedGraphBuilder::VisitForInStatement(ForInStatement* stmt) {
   CHECK_ALIVE(VisitForValue(stmt->enumerable()));
   HValue* enumerable = Top();  // Leave enumerable at the top.
 
-  HInstruction* map;
-  HInstruction* array;
-  HInstruction* enum_length;
-  bool fast = stmt->for_in_type() == ForInStatement::FAST_FOR_IN;
-  if (fast) {
-    map = Add<HForInPrepareMap>(enumerable);
-    Add<HSimulate>(stmt->PrepareId());
+  HInstruction* map = Add<HForInPrepareMap>(enumerable);
+  Add<HSimulate>(stmt->PrepareId());
 
-    array = Add<HForInCacheArray>(enumerable, map,
-                                  DescriptorArray::kEnumCacheBridgeCacheIndex);
-    enum_length = Add<HMapEnumLength>(map);
+  HInstruction* array = Add<HForInCacheArray>(
+      enumerable, map, DescriptorArray::kEnumCacheBridgeCacheIndex);
 
-    HInstruction* index_cache = Add<HForInCacheArray>(
-        enumerable, map, DescriptorArray::kEnumCacheBridgeIndicesCacheIndex);
-    HForInCacheArray::cast(array)
-        ->set_index_cache(HForInCacheArray::cast(index_cache));
-  } else {
-    Add<HSimulate>(stmt->PrepareId());
-    {
-      NoObservableSideEffectsScope no_effects(this);
-      BuildJSObjectCheck(enumerable, 0);
-    }
-    Add<HSimulate>(stmt->ToObjectId());
-
-    map = graph()->GetConstant1();
-    Runtime::FunctionId function_id = Runtime::kGetPropertyNamesFast;
-    Add<HPushArguments>(enumerable);
-    array = Add<HCallRuntime>(isolate()->factory()->empty_string(),
-                              Runtime::FunctionForId(function_id), 1);
-    Push(array);
-    Add<HSimulate>(stmt->EnumId());
-    Drop(1);
-    Handle<Map> array_map = isolate()->factory()->fixed_array_map();
-    HValue* check = Add<HCheckMaps>(array, array_map);
-    enum_length = AddLoadFixedArrayLength(array, check);
-  }
+  HInstruction* enum_length = Add<HMapEnumLength>(map);
 
   HInstruction* start_index = Add<HConstant>(0);
 
@@ -5109,12 +5085,13 @@ void HOptimizedGraphBuilder::VisitForInStatement(ForInStatement* stmt) {
   Push(enum_length);
   Push(start_index);
 
+  HInstruction* index_cache = Add<HForInCacheArray>(
+      enumerable, map, DescriptorArray::kEnumCacheBridgeIndicesCacheIndex);
+  HForInCacheArray::cast(array)
+      ->set_index_cache(HForInCacheArray::cast(index_cache));
+
   HBasicBlock* loop_entry = BuildLoopEntry(stmt);
 
-  // Reload the values to ensure we have up-to-date values inside of the loop.
-  // This is relevant especially for OSR where the values don't come from the
-  // computation above, but from the OSR entry block.
-  enumerable = environment()->ExpressionStackAt(4);
   HValue* index = environment()->ExpressionStackAt(0);
   HValue* limit = environment()->ExpressionStackAt(1);
 
@@ -5138,21 +5115,15 @@ void HOptimizedGraphBuilder::VisitForInStatement(ForInStatement* stmt) {
 
   HValue* key =
       Add<HLoadKeyed>(environment()->ExpressionStackAt(2),  // Enum cache.
-                      index, index, FAST_ELEMENTS);
+                      environment()->ExpressionStackAt(0),  // Iteration index.
+                      environment()->ExpressionStackAt(0), FAST_ELEMENTS);
 
-  if (fast) {
-    // Check if the expected map still matches that of the enumerable.
-    // If not just deoptimize.
-    Add<HCheckMapValue>(enumerable, environment()->ExpressionStackAt(3));
-    Bind(each_var, key);
-  } else {
-    HValue* function = AddLoadJSBuiltin(Builtins::FILTER_KEY);
-    Add<HPushArguments>(enumerable, key);
-    key = Add<HInvokeFunction>(function, 2);
-    Bind(each_var, key);
-    Add<HSimulate>(stmt->AssignmentId());
-    Add<HCheckHeapObject>(key);
-  }
+  // Check if the expected map still matches that of the enumerable.
+  // If not just deoptimize.
+  Add<HCheckMapValue>(environment()->ExpressionStackAt(4),
+                      environment()->ExpressionStackAt(3));
+
+  Bind(each_var, key);
 
   BreakAndContinueInfo break_info(stmt, scope(), 5);
   {
@@ -6924,10 +6895,20 @@ HInstruction* HOptimizedGraphBuilder::BuildKeyedGeneric(
     HValue* key,
     HValue* value) {
   if (access_type == LOAD) {
+    InlineCacheState initial_state =
+        FLAG_vector_ics ? expr->AsProperty()->GetInlineCacheState()
+                        : PREMONOMORPHIC;
+    HLoadKeyedGeneric* result =
+        New<HLoadKeyedGeneric>(object, key, initial_state);
     // HLoadKeyedGeneric with vector ics benefits from being encoded as
     // MEGAMORPHIC because the vector/slot combo becomes unnecessary.
-    HLoadKeyedGeneric* result = New<HLoadKeyedGeneric>(
-        object, key, FLAG_vector_ics ? MEGAMORPHIC : PREMONOMORPHIC);
+    if (FLAG_vector_ics && initial_state != MEGAMORPHIC) {
+      // We need to pass vector information.
+      Handle<TypeFeedbackVector> vector =
+          handle(current_feedback_vector(), isolate());
+      FeedbackVectorICSlot slot = expr->AsProperty()->PropertyFeedbackSlot();
+      result->SetVectorAndSlot(vector, slot);
+    }
     return result;
   } else {
     return New<HStoreKeyedGeneric>(object, key, value, function_language_mode(),
@@ -8448,11 +8429,10 @@ bool HOptimizedGraphBuilder::TryInlineBuiltinMethodCall(
         new_size = AddUncasted<HAdd>(length, graph()->GetConstant1());
 
         bool is_array = receiver_map->instance_type() == JS_ARRAY_TYPE;
-        BuildUncheckedMonomorphicElementAccess(array, length,
-                                               value_to_push, is_array,
-                                               elements_kind, STORE,
-                                               NEVER_RETURN_HOLE,
-                                               STORE_AND_GROW_NO_TRANSITION);
+        HValue* checked_array = Add<HCheckMaps>(array, receiver_map);
+        BuildUncheckedMonomorphicElementAccess(
+            checked_array, length, value_to_push, is_array, elements_kind,
+            STORE, NEVER_RETURN_HOLE, STORE_AND_GROW_NO_TRANSITION);
 
         if (!ast_context()->IsEffect()) Push(new_size);
         Add<HSimulate>(expr->id(), REMOVABLE_SIMULATE);
@@ -8819,18 +8799,9 @@ void HOptimizedGraphBuilder::HandleIndirectCall(Call* expr, HValue* function,
   int args_count_no_receiver = arguments_count - 1;
   if (function->IsConstant() &&
       HConstant::cast(function)->handle(isolate())->IsJSFunction()) {
-    HValue* receiver = environment()->ExpressionStackAt(args_count_no_receiver);
-    Handle<Map> receiver_map;
-    if (receiver->IsConstant() &&
-        HConstant::cast(receiver)->handle(isolate())->IsHeapObject()) {
-      receiver_map =
-          handle(Handle<HeapObject>::cast(
-                     HConstant::cast(receiver)->handle(isolate()))->map());
-    }
-
     known_function =
         Handle<JSFunction>::cast(HConstant::cast(function)->handle(isolate()));
-    if (TryInlineBuiltinMethodCall(expr, known_function, receiver_map,
+    if (TryInlineBuiltinMethodCall(expr, known_function, Handle<Map>(),
                                    args_count_no_receiver)) {
       if (FLAG_trace_inlining) {
         PrintF("Inlining builtin ");
@@ -8975,7 +8946,7 @@ void HOptimizedGraphBuilder::BuildArrayCall(Expression* expression,
   }
 
   HInstruction* call = PreProcessCall(New<HCallNewArray>(
-      function, arguments_count + 1, site->GetElementsKind()));
+      function, arguments_count + 1, site->GetElementsKind(), site));
   if (expression->IsCall()) {
     Drop(1);
   }
@@ -9175,6 +9146,7 @@ void HOptimizedGraphBuilder::VisitCall(Call* expr) {
   DCHECK(!HasStackOverflow());
   DCHECK(current_block() != NULL);
   DCHECK(current_block()->HasPredecessor());
+  if (!top_info()->is_tracking_positions()) SetSourcePosition(expr->position());
   Expression* callee = expr->expression();
   int argument_count = expr->arguments()->length() + 1;  // Plus receiver.
   HInstruction* call = NULL;

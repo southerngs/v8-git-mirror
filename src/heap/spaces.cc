@@ -875,30 +875,28 @@ bool MemoryAllocator::CommitExecutableMemory(base::VirtualMemory* vm,
                                              Address start, size_t commit_size,
                                              size_t reserved_size) {
   // Commit page header (not executable).
-  if (!vm->Commit(start, CodePageGuardStartOffset(), false)) {
-    return false;
+  Address header = start;
+  size_t header_size = CodePageGuardStartOffset();
+  if (vm->Commit(header, header_size, false)) {
+    // Create guard page after the header.
+    if (vm->Guard(start + CodePageGuardStartOffset())) {
+      // Commit page body (executable).
+      Address body = start + CodePageAreaStartOffset();
+      size_t body_size = commit_size - CodePageGuardStartOffset();
+      if (vm->Commit(body, body_size, true)) {
+        // Create guard page before the end.
+        if (vm->Guard(start + reserved_size - CodePageGuardSize())) {
+          UpdateAllocatedSpaceLimits(start, start + CodePageAreaStartOffset() +
+                                                commit_size -
+                                                CodePageGuardStartOffset());
+          return true;
+        }
+        vm->Uncommit(body, body_size);
+      }
+    }
+    vm->Uncommit(header, header_size);
   }
-
-  // Create guard page after the header.
-  if (!vm->Guard(start + CodePageGuardStartOffset())) {
-    return false;
-  }
-
-  // Commit page body (executable).
-  if (!vm->Commit(start + CodePageAreaStartOffset(),
-                  commit_size - CodePageGuardStartOffset(), true)) {
-    return false;
-  }
-
-  // Create guard page before the end.
-  if (!vm->Guard(start + reserved_size - CodePageGuardSize())) {
-    return false;
-  }
-
-  UpdateAllocatedSpaceLimits(start, start + CodePageAreaStartOffset() +
-                                        commit_size -
-                                        CodePageGuardStartOffset());
-  return true;
+  return false;
 }
 
 
@@ -2202,6 +2200,7 @@ void FreeList::Reset() {
   medium_list_.Reset();
   large_list_.Reset();
   huge_list_.Reset();
+  unreported_allocation_ = 0;
 }
 
 
@@ -2349,6 +2348,15 @@ FreeSpace* FreeList::FindNodeFor(int size_in_bytes, int* node_size) {
 }
 
 
+void PagedSpace::SetTopAndLimit(Address top, Address limit) {
+  DCHECK(top == limit ||
+         Page::FromAddress(top) == Page::FromAddress(limit - 1));
+  MemoryChunk::UpdateHighWaterMark(allocation_info_.top());
+  allocation_info_.set_top(top);
+  allocation_info_.set_limit(limit);
+}
+
+
 // Allocation on the old space free list.  If it succeeds then a new linear
 // allocation space has been set up with the top and limit of the space.  If
 // the allocation fails then NULL is returned, and the caller can perform a GC
@@ -2365,9 +2373,6 @@ HeapObject* FreeList::Allocate(int size_in_bytes) {
   // skipped when scanning the heap.  This also puts it back in the free list
   // if it is big enough.
   owner_->Free(owner_->top(), old_linear_size);
-
-  owner_->heap()->incremental_marking()->OldSpaceStep(size_in_bytes -
-                                                      old_linear_size);
 
   int new_node_size = 0;
   FreeSpace* new_node = FindNodeFor(size_in_bytes, &new_node_size);
@@ -2391,11 +2396,17 @@ HeapObject* FreeList::Allocate(int size_in_bytes) {
   // candidate.
   DCHECK(!MarkCompactCollector::IsOnEvacuationCandidate(new_node));
 
-  const int kThreshold = IncrementalMarking::kAllocatedThreshold;
+  // An old-space step will mark more data per byte allocated, because old space
+  // allocation is more serious.  We don't want the pause to be bigger, so we
+  // do marking after a smaller amount of allocation.
+  const int kThreshold = IncrementalMarking::kAllocatedThreshold *
+                         IncrementalMarking::kOldSpaceAllocationMarkingFactor;
 
   // Memory in the linear allocation area is counted as allocated.  We may free
   // a little of this again immediately - see below.
   owner_->Allocate(new_node_size);
+
+  unreported_allocation_ += new_node_size;
 
   if (owner_->heap()->inline_allocation_disabled()) {
     // Keep the linear allocation area empty if requested to do so, just
@@ -2403,9 +2414,9 @@ HeapObject* FreeList::Allocate(int size_in_bytes) {
     owner_->Free(new_node->address() + size_in_bytes, bytes_left);
     DCHECK(owner_->top() == NULL && owner_->limit() == NULL);
   } else if (bytes_left > kThreshold &&
-             owner_->heap()->incremental_marking()->IsMarkingIncomplete() &&
-             FLAG_incremental_marking_steps) {
+             owner_->heap()->incremental_marking()->CanDoSteps()) {
     int linear_size = owner_->RoundSizeDownToObjectAlignment(kThreshold);
+
     // We don't want to give too large linear areas to the allocator while
     // incremental marking is going on, because we won't check again whether
     // we want to do another increment until the linear area is used up.
@@ -2413,15 +2424,27 @@ HeapObject* FreeList::Allocate(int size_in_bytes) {
                  new_node_size - size_in_bytes - linear_size);
     owner_->SetTopAndLimit(new_node->address() + size_in_bytes,
                            new_node->address() + size_in_bytes + linear_size);
-  } else if (bytes_left > 0) {
-    // Normally we give the rest of the node to the allocator as its new
-    // linear allocation area.
-    owner_->SetTopAndLimit(new_node->address() + size_in_bytes,
-                           new_node->address() + new_node_size);
+    owner_->heap()->incremental_marking()->OldSpaceStep(size_in_bytes +
+                                                        linear_size);
+    unreported_allocation_ = 0;
   } else {
-    // TODO(gc) Try not freeing linear allocation region when bytes_left
-    // are zero.
-    owner_->SetTopAndLimit(NULL, NULL);
+    if (unreported_allocation_ > kThreshold) {
+      // This may start the incremental marker, or do a little work if it's
+      // already started.
+      owner_->heap()->incremental_marking()->OldSpaceStep(
+          Min(kThreshold, unreported_allocation_));
+      unreported_allocation_ = 0;
+    }
+    if (bytes_left > 0) {
+      // Normally we give the rest of the node to the allocator as its new
+      // linear allocation area.
+      owner_->SetTopAndLimit(new_node->address() + size_in_bytes,
+                             new_node->address() + new_node_size);
+    } else {
+      // TODO(gc) Try not freeing linear allocation region when bytes_left
+      // are zero.
+      owner_->SetTopAndLimit(NULL, NULL);
+    }
   }
 
   return new_node;
@@ -2890,8 +2913,8 @@ AllocationResult LargeObjectSpace::AllocateRaw(int object_size,
   uintptr_t base = reinterpret_cast<uintptr_t>(page) / MemoryChunk::kAlignment;
   uintptr_t limit = base + (page->size() - 1) / MemoryChunk::kAlignment;
   for (uintptr_t key = base; key <= limit; key++) {
-    HashMap::Entry* entry = chunk_map_.Lookup(reinterpret_cast<void*>(key),
-                                              static_cast<uint32_t>(key), true);
+    HashMap::Entry* entry = chunk_map_.LookupOrInsert(
+        reinterpret_cast<void*>(key), static_cast<uint32_t>(key));
     DCHECK(entry != NULL);
     entry->value = page;
   }
@@ -2908,7 +2931,16 @@ AllocationResult LargeObjectSpace::AllocateRaw(int object_size,
     reinterpret_cast<Object**>(object->address())[1] = Smi::FromInt(0);
   }
 
-  heap()->incremental_marking()->OldSpaceStep(object_size);
+  // We would like to tell the incremental marker to do a lot of work, since
+  // we just made a large allocation in old space, but that might cause a huge
+  // pause. Underreporting here may cause the marker to speed up because it
+  // will perceive that it is not keeping up with allocation. Although this
+  // causes some big incremental marking steps they are not as big as this one
+  // might have been. In testing, a very large pause was divided up into about
+  // 12 parts.
+  const int kThreshold = IncrementalMarking::kAllocatedThreshold *
+                         IncrementalMarking::kOldSpaceAllocationMarkingFactor;
+  heap()->incremental_marking()->OldSpaceStep(kThreshold);
   return object;
 }
 
@@ -2938,7 +2970,7 @@ Object* LargeObjectSpace::FindObject(Address a) {
 LargePage* LargeObjectSpace::FindPage(Address a) {
   uintptr_t key = reinterpret_cast<uintptr_t>(a) / MemoryChunk::kAlignment;
   HashMap::Entry* e = chunk_map_.Lookup(reinterpret_cast<void*>(key),
-                                        static_cast<uint32_t>(key), false);
+                                        static_cast<uint32_t>(key));
   if (e != NULL) {
     DCHECK(e->value != NULL);
     LargePage* page = reinterpret_cast<LargePage*>(e->value);

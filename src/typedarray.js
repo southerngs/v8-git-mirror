@@ -302,7 +302,6 @@ function TypedArrayGetToStringTag() {
 // -------------------------------------------------------------------
 
 macro SETUP_TYPED_ARRAY(ARRAY_ID, NAME, ELEMENT_SIZE)
-  %CheckIsBootstrapping();
   %SetCode(global.NAME, NAMEConstructor);
   %FunctionSetPrototype(global.NAME, new $Object());
 

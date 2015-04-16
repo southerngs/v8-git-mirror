@@ -4864,7 +4864,7 @@ TEST(WeakCellsWithIncrementalMarking) {
     CHECK(weak_cell->value()->IsFixedArray());
     weak_cells[i] = inner_scope.CloseAndEscape(weak_cell);
   }
-  heap->CollectAllGarbage(Heap::kNoGCFlags);
+  heap->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
   CHECK_EQ(*survivor, weak_cells[0]->value());
   for (int i = 1; i < N; i++) {
     CHECK(weak_cells[i]->cleared());
@@ -5328,7 +5328,8 @@ static void TestRightTrimFixedTypedArray(v8::ExternalArrayType type,
   Handle<FixedTypedArrayBase> array =
       factory->NewFixedTypedArray(initial_length, type);
   int old_size = array->size();
-  heap->RightTrimFixedArray<Heap::FROM_MUTATOR>(*array, elements_to_trim);
+  heap->RightTrimFixedArray<Heap::CONCURRENT_TO_SWEEPER>(*array,
+                                                         elements_to_trim);
 
   // Check that free space filler is at the right place and did not smash the
   // array header.

@@ -1832,6 +1832,7 @@ class JSObject: public JSReceiver {
                                     Handle<HeapObject> user);
   static void UnregisterPrototypeUser(Handle<JSObject> prototype,
                                       Handle<HeapObject> user);
+  static void InvalidatePrototypeChains(Map* map);
 
   // Retrieve interceptors.
   InterceptorInfo* GetNamedInterceptor();
@@ -2530,7 +2531,8 @@ class FixedArray: public FixedArrayBase {
   class BodyDescriptor : public FlexibleBodyDescriptor<kHeaderSize> {
    public:
     static inline int SizeOf(Map* map, HeapObject* object) {
-      return SizeFor(reinterpret_cast<FixedArray*>(object)->length());
+      return SizeFor(
+          reinterpret_cast<FixedArray*>(object)->synchronized_length());
     }
   };
 
@@ -6027,6 +6029,15 @@ class Map: public HeapObject {
   // [prototype_info]: Per-prototype metadata. Aliased with transitions
   // (which prototype maps don't have).
   DECL_ACCESSORS(prototype_info, Object)
+
+  // [prototype chain validity cell]: Associated with a prototype object,
+  // stored in that object's map's PrototypeInfo, indicates that prototype
+  // chains through this object are currently valid. The cell will be
+  // invalidated and replaced when the prototype chain changes.
+  static Handle<Cell> GetOrCreatePrototypeChainValidityCell(Handle<Map> map,
+                                                            Isolate* isolate);
+  static const int kPrototypeChainValid = 0;
+  static const int kPrototypeChainInvalid = 1;
 
   Map* FindRootMap();
   Map* FindFieldOwner(int descriptor);
@@ -10405,6 +10416,11 @@ class JSArray: public JSObject {
   // fail due to out-of-memory situations, but only if the requested
   // capacity is non-zero.
   static void Initialize(Handle<JSArray> array, int capacity, int length = 0);
+
+  // If the JSArray has fast elements, and new_length would result in
+  // normalization, returns true.
+  static inline bool SetElementsLengthWouldNormalize(
+      Heap* heap, Handle<Object> new_length_handle);
 
   // Initializes the array to a certain length.
   inline bool AllowsSetElementsLength();

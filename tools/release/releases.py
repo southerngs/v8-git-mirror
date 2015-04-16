@@ -60,6 +60,7 @@ DEPS_RE = re.compile(r"""^\s*(?:["']v8_revision["']: ["']"""
 BLEEDING_EDGE_TAGS_RE = re.compile(
     r"A \/tags\/([^\s]+) \(from \/branches\/bleeding_edge\:(\d+)\)")
 
+OMAHA_PROXY_URL = "http://omahaproxy.appspot.com/"
 
 def SortBranches(branches):
   """Sort branches with version number names."""
@@ -381,7 +382,7 @@ class RetrieveChromiumV8Releases(Step):
 
 
 # TODO(machenbach): Unify common code with method above.
-class RietrieveChromiumBranches(Step):
+class RetrieveChromiumBranches(Step):
   MESSAGE = "Retrieve Chromium branch information."
 
   def RunStep(self):
@@ -433,6 +434,65 @@ class RietrieveChromiumBranches(Step):
       releases_dict.get(revision, {})["chromium_branch"] = ranges
 
 
+class RetrieveInformationOnChromeReleases(Step):
+  MESSAGE = 'Retrieves relevant information on the latest Chrome releases'
+
+  def Run(self):
+
+    params = None
+    result_raw = self.ReadURL(
+                             OMAHA_PROXY_URL + "all.json",
+                             params,
+                             wait_plan=[5, 20]
+                             )
+    recent_releases = json.loads(result_raw)
+
+    canaries = []
+
+    for current_os in recent_releases:
+      for current_version in current_os["versions"]:
+        if current_version["channel"] != "canary":
+          continue
+
+        current_candidate = self._CreateCandidate(current_version)
+        canaries.append(current_candidate)
+
+    chrome_releases = {"canaries": canaries}
+    self["chrome_releases"] = chrome_releases
+
+  def _GetGitHashForV8Version(self, v8_version):
+    if v8_version.split(".")[3]== "0":
+      return self.GitGetHashOfTag(v8_version[:-2])
+
+    return self.GitGetHashOfTag(v8_version)
+
+  def _CreateCandidate(self, current_version):
+    params = None
+    url_to_call = (OMAHA_PROXY_URL + "v8.json?version="
+                   + current_version["previous_version"])
+    result_raw = self.ReadURL(
+                         url_to_call,
+                         params,
+                         wait_plan=[5, 20]
+                         )
+    previous_v8_version = json.loads(result_raw)["v8_version"]
+    v8_previous_version_hash = self._GetGitHashForV8Version(previous_v8_version)
+
+    current_v8_version = current_version["v8_version"]
+    v8_version_hash = self._GetGitHashForV8Version(current_v8_version)
+
+    current_candidate = {
+                        "chrome_version": current_version["version"],
+                        "os": current_version["os"],
+                        "release_date": current_version["current_reldate"],
+                        "v8_version": current_v8_version,
+                        "v8_version_hash": v8_version_hash,
+                        "v8_previous_version": previous_v8_version,
+                        "v8_previous_version_hash": v8_previous_version_hash,
+                       }
+    return current_candidate
+
+
 class CleanUp(Step):
   MESSAGE = "Clean up."
 
@@ -444,6 +504,12 @@ class WriteOutput(Step):
   MESSAGE = "Print output."
 
   def Run(self):
+
+    output = {
+              "releases": self["releases"],
+              "chrome_releases": self["chrome_releases"],
+              }
+
     if self._options.csv:
       with open(self._options.csv, "w") as f:
         writer = csv.DictWriter(f,
@@ -455,9 +521,9 @@ class WriteOutput(Step):
           writer.writerow(release)
     if self._options.json:
       with open(self._options.json, "w") as f:
-        f.write(json.dumps(self["releases"]))
+        f.write(json.dumps(output))
     if not self._options.csv and not self._options.json:
-      print self["releases"]  # pragma: no cover
+      print output  # pragma: no cover
 
 
 class Releases(ScriptsBase):
@@ -486,12 +552,14 @@ class Releases(ScriptsBase):
     }
 
   def _Steps(self):
+
     return [
       Preparation,
       RetrieveV8Releases,
       UpdateChromiumCheckout,
       RetrieveChromiumV8Releases,
-      RietrieveChromiumBranches,
+      RetrieveChromiumBranches,
+      RetrieveInformationOnChromeReleases,
       CleanUp,
       WriteOutput,
     ]

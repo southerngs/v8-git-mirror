@@ -6,10 +6,16 @@
 #define V8_COMPILER_JS_TYPED_LOWERING_H_
 
 #include "src/compiler/graph-reducer.h"
+#include "src/compiler/opcodes.h"
 #include "src/compiler/simplified-operator.h"
 
 namespace v8 {
 namespace internal {
+
+// Forward declarations.
+class Factory;
+
+
 namespace compiler {
 
 // Forward declarations.
@@ -35,6 +41,7 @@ class JSTypedLowering FINAL : public Reducer {
   Reduction ReduceJSBitwiseOr(Node* node);
   Reduction ReduceJSMultiply(Node* node);
   Reduction ReduceJSComparison(Node* node);
+  Reduction ReduceJSLoadNamed(Node* node);
   Reduction ReduceJSLoadProperty(Node* node);
   Reduction ReduceJSStoreProperty(Node* node);
   Reduction ReduceJSLoadContext(Node* node);

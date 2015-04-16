@@ -1080,6 +1080,13 @@ Handle<Object> Factory::NewTypeError(const char* message,
 }
 
 
+Handle<Object> Factory::NewTypeError(MessageTemplate::Template template_index,
+                                     Handle<Object> arg0, Handle<Object> arg1,
+                                     Handle<Object> arg2) {
+  return NewError("MakeTypeError2", template_index, arg0, arg1, arg2);
+}
+
+
 Handle<Object> Factory::NewTypeError(Handle<String> message) {
   return NewError("$TypeError", message);
 }
@@ -1135,6 +1142,39 @@ Handle<Object> Factory::NewError(const char* maker, const char* message,
   Handle<JSArray> object = NewJSArrayWithElements(array);
   Handle<Object> result = NewError(maker, message, object);
   return result.EscapeFrom(&scope);
+}
+
+
+Handle<Object> Factory::NewError(const char* maker,
+                                 MessageTemplate::Template template_index,
+                                 Handle<Object> arg0, Handle<Object> arg1,
+                                 Handle<Object> arg2) {
+  HandleScope scope(isolate());
+  Handle<String> error_maker = InternalizeUtf8String(maker);
+  Handle<Object> fun_obj = Object::GetProperty(isolate()->js_builtins_object(),
+                                               error_maker).ToHandleChecked();
+
+  Handle<JSFunction> fun = Handle<JSFunction>::cast(fun_obj);
+  Handle<Object> message_type(Smi::FromInt(template_index), isolate());
+  if (arg0.is_null()) arg0 = undefined_value();
+  if (arg1.is_null()) arg1 = undefined_value();
+  if (arg2.is_null()) arg2 = undefined_value();
+  Handle<Object> argv[] = {message_type, arg0, arg1, arg2};
+
+  // Invoke the JavaScript factory method. If an exception is thrown while
+  // running the factory method, use the exception as the result.
+  Handle<Object> result;
+  MaybeHandle<Object> exception;
+  if (!Execution::TryCall(fun, isolate()->js_builtins_object(), arraysize(argv),
+                          argv, &exception).ToHandle(&result)) {
+    Handle<Object> exception_obj;
+    if (exception.ToHandle(&exception_obj)) {
+      result = exception_obj;
+    } else {
+      result = undefined_value();
+    }
+  }
+  return scope.CloseAndEscape(result);
 }
 
 
@@ -1954,7 +1994,8 @@ void Factory::ReinitializeJSProxy(Handle<JSProxy> proxy, InstanceType type,
   if (size_difference > 0) {
     Address address = proxy->address();
     heap->CreateFillerObjectAt(address + map->instance_size(), size_difference);
-    heap->AdjustLiveBytes(address, -size_difference, Heap::FROM_MUTATOR);
+    heap->AdjustLiveBytes(address, -size_difference,
+                          Heap::CONCURRENT_TO_SWEEPER);
   }
 
   // Reset the map for the object.
@@ -2342,10 +2383,10 @@ void Factory::SetRegExpIrregexpData(Handle<JSRegExp> regexp,
 }
 
 
-Handle<Object> Factory::GlobalConstantFor(Handle<String> name) {
-  if (String::Equals(name, undefined_string())) return undefined_value();
-  if (String::Equals(name, nan_string())) return nan_value();
-  if (String::Equals(name, infinity_string())) return infinity_value();
+Handle<Object> Factory::GlobalConstantFor(Handle<Name> name) {
+  if (Name::Equals(name, undefined_string())) return undefined_value();
+  if (Name::Equals(name, nan_string())) return nan_value();
+  if (Name::Equals(name, infinity_string())) return infinity_value();
   return Handle<Object>::null();
 }
 
