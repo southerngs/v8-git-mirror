@@ -3502,23 +3502,20 @@ TEST(ErrorsArrowFunctions) {
     "(x, (y, z)) => 0",
     "((x, y), z) => 0",
 
-    // Arrow function formal parameters are parsed as StrictFormalParameters,
-    // which confusingly only implies that there are no duplicates.  Words
-    // reserved in strict mode, and eval or arguments, are indeed valid in
-    // sloppy mode.
-    "eval => { 'use strict'; 0 }",
-    "arguments => { 'use strict'; 0 }",
-    "yield => { 'use strict'; 0 }",
-    "interface => { 'use strict'; 0 }",
-    "(eval) => { 'use strict'; 0 }",
-    "(arguments) => { 'use strict'; 0 }",
-    "(yield) => { 'use strict'; 0 }",
-    "(interface) => { 'use strict'; 0 }",
-    "(eval, bar) => { 'use strict'; 0 }",
-    "(bar, eval) => { 'use strict'; 0 }",
-    "(bar, arguments) => { 'use strict'; 0 }",
-    "(bar, yield) => { 'use strict'; 0 }",
-    "(bar, interface) => { 'use strict'; 0 }",
+    // Parameter lists are always validated as strict, so those are errors.
+    "eval => {}",
+    "arguments => {}",
+    "yield => {}",
+    "interface => {}",
+    "(eval) => {}",
+    "(arguments) => {}",
+    "(yield) => {}",
+    "(interface) => {}",
+    "(eval, bar) => {}",
+    "(bar, eval) => {}",
+    "(bar, arguments) => {}",
+    "(bar, yield) => {}",
+    "(bar, interface) => {}",
     // TODO(aperez): Detecting duplicates does not work in PreParser.
     // "(bar, bar) => {}",
 
@@ -3621,66 +3618,6 @@ TEST(NoErrorsArrowFunctions) {
 
   static const ParserFlag always_flags[] = {kAllowHarmonyArrowFunctions};
   RunParserSyncTest(context_data, statement_data, kSuccess, NULL, 0,
-                    always_flags, arraysize(always_flags));
-}
-
-
-TEST(ArrowFunctionsSloppyParameterNames) {
-  const char* strong_context_data[][2] = {
-    {"'use strong'; ", ";"},
-    {"'use strong'; bar ? (", ") : baz;"},
-    {"'use strong'; bar ? baz : (", ");"},
-    {"'use strong'; bar, ", ";"},
-    {"'use strong'; ", ", bar;"},
-    {NULL, NULL}
-  };
-
-  const char* strict_context_data[][2] = {
-    {"'use strict'; ", ";"},
-    {"'use strict'; bar ? (", ") : baz;"},
-    {"'use strict'; bar ? baz : (", ");"},
-    {"'use strict'; bar, ", ";"},
-    {"'use strict'; ", ", bar;"},
-    {NULL, NULL}
-  };
-
-  const char* sloppy_context_data[][2] = {
-    {"", ";"},
-    {"bar ? (", ") : baz;"},
-    {"bar ? baz : (", ");"},
-    {"bar, ", ";"},
-    {"", ", bar;"},
-    {NULL, NULL}
-  };
-
-  const char* statement_data[] = {
-    "eval => {}",
-    "arguments => {}",
-    "yield => {}",
-    "interface => {}",
-    "(eval) => {}",
-    "(arguments) => {}",
-    "(yield) => {}",
-    "(interface) => {}",
-    "(eval, bar) => {}",
-    "(bar, eval) => {}",
-    "(bar, arguments) => {}",
-    "(bar, yield) => {}",
-    "(bar, interface) => {}",
-    "(interface, eval) => {}",
-    "(interface, arguments) => {}",
-    "(eval, interface) => {}",
-    "(arguments, interface) => {}",
-    NULL
-  };
-
-  static const ParserFlag always_flags[] = { kAllowHarmonyArrowFunctions,
-                                             kAllowStrongMode};
-  RunParserSyncTest(strong_context_data, statement_data, kError, NULL, 0,
-                    always_flags, arraysize(always_flags));
-  RunParserSyncTest(strict_context_data, statement_data, kError, NULL, 0,
-                    always_flags, arraysize(always_flags));
-  RunParserSyncTest(sloppy_context_data, statement_data, kSuccess, NULL, 0,
                     always_flags, arraysize(always_flags));
 }
 
@@ -5509,7 +5446,9 @@ TEST(ModuleParsingInternals) {
       "export { x as y };"
       "import { q as z } from 'm.js';"
       "import n from 'n.js';"
-      "export { a as b } from 'm.js';";
+      "export { a as b } from 'm.js';"
+      "export * from 'p.js';"
+      "import 'q.js'";
   i::Handle<i::String> source = factory->NewStringFromAsciiChecked(kSource);
   i::Handle<i::Script> script = factory->NewScript(source);
   i::Zone zone;
@@ -5550,11 +5489,14 @@ TEST(ModuleParsingInternals) {
   CHECK(import_decl->proxy()->raw_name()->IsOneByteEqualTo("n"));
   CHECK(import_decl->module_specifier()->IsOneByteEqualTo("n.js"));
   // TODO(adamk): Add test for indirect exports once they're fully implemented.
+  // TODO(adamk): Add test for star exports once they're fully implemented.
   const i::ZoneList<const i::AstRawString*>& requested_modules =
       descriptor->requested_modules();
-  CHECK_EQ(2, requested_modules.length());
+  CHECK_EQ(4, requested_modules.length());
   CHECK(requested_modules[0]->IsOneByteEqualTo("m.js"));
   CHECK(requested_modules[1]->IsOneByteEqualTo("n.js"));
+  CHECK(requested_modules[2]->IsOneByteEqualTo("p.js"));
+  CHECK(requested_modules[3]->IsOneByteEqualTo("q.js"));
 }
 
 

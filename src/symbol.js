@@ -24,9 +24,7 @@ var GlobalSymbol = global.Symbol;
 // -------------------------------------------------------------------
 
 function SymbolConstructor(x) {
-  if (%_IsConstructCall()) {
-    throw MakeTypeError('not_constructor', ["Symbol"]);
-  }
+  if (%_IsConstructCall()) throw MakeTypeError(kNotConstructor, "Symbol");
   // NOTE: Passing in a Symbol value will throw on ToString().
   return %CreateSymbol(IS_UNDEFINED(x) ? x : ToString(x));
 }
@@ -34,8 +32,8 @@ function SymbolConstructor(x) {
 
 function SymbolToString() {
   if (!(IS_SYMBOL(this) || IS_SYMBOL_WRAPPER(this))) {
-    throw MakeTypeError(
-      'incompatible_method_receiver', ["Symbol.prototype.toString", this]);
+    throw MakeTypeError(kIncompatibleMethodReceiver,
+                        "Symbol.prototype.toString", this);
   }
   var description = %SymbolDescription(%_ValueOf(this));
   return "Symbol(" + (IS_UNDEFINED(description) ? "" : description) + ")";
@@ -44,8 +42,8 @@ function SymbolToString() {
 
 function SymbolValueOf() {
   if (!(IS_SYMBOL(this) || IS_SYMBOL_WRAPPER(this))) {
-    throw MakeTypeError(
-      'incompatible_method_receiver', ["Symbol.prototype.valueOf", this]);
+    throw MakeTypeError(kIncompatibleMethodReceiver,
+                        "Symbol.prototype.valueOf", this);
   }
   return %_ValueOf(this);
 }

@@ -18,7 +18,7 @@ namespace v8 {
 namespace internal {
 
 
-class SafepointGenerator FINAL : public CallWrapper {
+class SafepointGenerator final : public CallWrapper {
  public:
   SafepointGenerator(LCodeGen* codegen,
                      LPointerMap* pointers,
@@ -2897,13 +2897,6 @@ void LCodeGen::DoForInPrepareMap(LForInPrepareMap* instr) {
   DCHECK(instr->IsMarkedAsCall());
   DCHECK(object.Is(x0));
 
-  DeoptimizeIfRoot(object, Heap::kUndefinedValueRootIndex, instr,
-                   Deoptimizer::kUndefined);
-
-  __ LoadRoot(null_value, Heap::kNullValueRootIndex);
-  __ Cmp(object, null_value);
-  DeoptimizeIf(eq, instr, Deoptimizer::kNull);
-
   DeoptimizeIfSmi(object, instr, Deoptimizer::kSmi);
 
   STATIC_ASSERT(FIRST_JS_PROXY_TYPE == FIRST_SPEC_OBJECT_TYPE);
@@ -2911,6 +2904,7 @@ void LCodeGen::DoForInPrepareMap(LForInPrepareMap* instr) {
   DeoptimizeIf(le, instr, Deoptimizer::kNotAJavaScriptObject);
 
   Label use_cache, call_runtime;
+  __ LoadRoot(null_value, Heap::kNullValueRootIndex);
   __ CheckEnumCache(object, null_value, x1, x2, x3, x4, &call_runtime);
 
   __ Ldr(object, FieldMemOperand(object, HeapObject::kMapOffset));
@@ -5947,7 +5941,7 @@ void LCodeGen::DoDeferredLoadMutableDouble(LLoadFieldByIndex* instr,
 
 
 void LCodeGen::DoLoadFieldByIndex(LLoadFieldByIndex* instr) {
-  class DeferredLoadMutableDouble FINAL : public LDeferredCode {
+  class DeferredLoadMutableDouble final : public LDeferredCode {
    public:
     DeferredLoadMutableDouble(LCodeGen* codegen,
                               LLoadFieldByIndex* instr,
@@ -5960,10 +5954,10 @@ void LCodeGen::DoLoadFieldByIndex(LLoadFieldByIndex* instr) {
           object_(object),
           index_(index) {
     }
-    void Generate() OVERRIDE {
+    void Generate() override {
       codegen()->DoDeferredLoadMutableDouble(instr_, result_, object_, index_);
     }
-    LInstruction* instr() OVERRIDE { return instr_; }
+    LInstruction* instr() override { return instr_; }
 
    private:
     LLoadFieldByIndex* instr_;

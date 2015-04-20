@@ -895,6 +895,8 @@ void Genesis::HookUpGlobalObject(Handle<GlobalObject> global_object,
   // Replace outdated global objects in deserialized contexts.
   for (int i = 0; i < outdated_contexts->length(); ++i) {
     Context* context = Context::cast(outdated_contexts->get(i));
+    // Assert that there is only one native context.
+    DCHECK(!context->IsNativeContext() || context == *native_context());
     DCHECK_EQ(context->global_object(), *global_object_from_snapshot);
     context->set_global_object(*global_object);
   }
@@ -1565,17 +1567,18 @@ void Genesis::InstallNativeFunctions() {
   INSTALL_NATIVE(JSFunction, "PromiseCatch", promise_catch);
   INSTALL_NATIVE(JSFunction, "PromiseThen", promise_then);
 
-  INSTALL_NATIVE(JSFunction, "NotifyChange", observers_notify_change);
-  INSTALL_NATIVE(JSFunction, "EnqueueSpliceRecord", observers_enqueue_splice);
-  INSTALL_NATIVE(JSFunction, "BeginPerformSplice",
+  INSTALL_NATIVE(JSFunction, "$observeNotifyChange", observers_notify_change);
+  INSTALL_NATIVE(JSFunction, "$observeEnqueueSpliceRecord",
+                 observers_enqueue_splice);
+  INSTALL_NATIVE(JSFunction, "$observeBeginPerformSplice",
                  observers_begin_perform_splice);
-  INSTALL_NATIVE(JSFunction, "EndPerformSplice",
+  INSTALL_NATIVE(JSFunction, "$observeEndPerformSplice",
                  observers_end_perform_splice);
-  INSTALL_NATIVE(JSFunction, "NativeObjectObserve",
+  INSTALL_NATIVE(JSFunction, "$observeNativeObjectObserve",
                  native_object_observe);
-  INSTALL_NATIVE(JSFunction, "NativeObjectGetNotifier",
+  INSTALL_NATIVE(JSFunction, "$observeNativeObjectGetNotifier",
                  native_object_get_notifier);
-  INSTALL_NATIVE(JSFunction, "NativeObjectNotifierPerformChange",
+  INSTALL_NATIVE(JSFunction, "$observeNativeObjectNotifierPerformChange",
                  native_object_notifier_perform_change);
   INSTALL_NATIVE(JSFunction, "$arrayValues", array_values_iterator);
 }

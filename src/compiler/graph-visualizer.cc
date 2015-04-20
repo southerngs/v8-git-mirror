@@ -129,6 +129,15 @@ class JSONGraphNodeWriter {
     os_ << ",\"opcode\":\"" << IrOpcode::Mnemonic(node->opcode()) << "\"";
     os_ << ",\"control\":" << (NodeProperties::IsControl(node) ? "true"
                                                                : "false");
+    if (NodeProperties::IsTyped(node)) {
+      Bounds bounds = NodeProperties::GetBounds(node);
+      std::ostringstream upper;
+      bounds.upper->PrintTo(upper);
+      std::ostringstream lower;
+      bounds.lower->PrintTo(lower);
+      os_ << ",\"upper_type\":\"" << Escaped(upper, "\"") << "\"";
+      os_ << ",\"lower_type\":\"" << Escaped(lower, "\"") << "\"";
+    }
     os_ << "}";
   }
 
@@ -398,7 +407,7 @@ class GraphC1Visualizer {
   void PrintSchedule(const char* phase, const Schedule* schedule,
                      const SourcePositionTable* positions,
                      const InstructionSequence* instructions);
-  void PrintAllocator(const char* phase, const RegisterAllocator* allocator);
+  void PrintLiveRanges(const char* phase, const RegisterAllocationData* data);
   Zone* zone() const { return zone_; }
 
  private:
@@ -415,7 +424,7 @@ class GraphC1Visualizer {
   void PrintType(Node* node);
 
   void PrintLiveRange(LiveRange* range, const char* type);
-  class Tag FINAL BASE_EMBEDDED {
+  class Tag final BASE_EMBEDDED {
    public:
     Tag(GraphC1Visualizer* visualizer, const char* name) {
       name_ = name;
@@ -684,20 +693,20 @@ void GraphC1Visualizer::PrintSchedule(const char* phase,
 }
 
 
-void GraphC1Visualizer::PrintAllocator(const char* phase,
-                                       const RegisterAllocator* allocator) {
+void GraphC1Visualizer::PrintLiveRanges(const char* phase,
+                                        const RegisterAllocationData* data) {
   Tag tag(this, "intervals");
   PrintStringProperty("name", phase);
 
-  for (auto range : allocator->fixed_double_live_ranges()) {
+  for (auto range : data->fixed_double_live_ranges()) {
     PrintLiveRange(range, "fixed");
   }
 
-  for (auto range : allocator->fixed_live_ranges()) {
+  for (auto range : data->fixed_live_ranges()) {
     PrintLiveRange(range, "fixed");
   }
 
-  for (auto range : allocator->live_ranges()) {
+  for (auto range : data->live_ranges()) {
     PrintLiveRange(range, "object");
   }
 }
@@ -782,9 +791,10 @@ std::ostream& operator<<(std::ostream& os, const AsC1V& ac) {
 }
 
 
-std::ostream& operator<<(std::ostream& os, const AsC1VAllocator& ac) {
+std::ostream& operator<<(std::ostream& os,
+                         const AsC1VRegisterAllocationData& ac) {
   Zone tmp_zone;
-  GraphC1Visualizer(os, &tmp_zone).PrintAllocator(ac.phase_, ac.allocator_);
+  GraphC1Visualizer(os, &tmp_zone).PrintLiveRanges(ac.phase_, ac.data_);
   return os;
 }
 

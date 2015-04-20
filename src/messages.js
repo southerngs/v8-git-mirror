@@ -6,12 +6,9 @@
 
 var kMessages = {
   // Error
-  cyclic_proto:                  ["Cyclic __proto__ value"],
-  code_gen_from_strings:         ["%0"],
   constructor_is_generator:      ["Class constructor may not be a generator"],
   constructor_is_accessor:       ["Class constructor may not be an accessor"],
   // TypeError
-  generator_running:             ["Generator is already running"],
   unexpected_token:              ["Unexpected token ", "%0"],
   unexpected_token_number:       ["Unexpected number"],
   unexpected_token_string:       ["Unexpected string"],
@@ -27,7 +24,6 @@ var kMessages = {
   unterminated_template_expr:    ["Missing } in template expression"],
   unterminated_arg_list:         ["missing ) after argument list"],
   regexp_flags:                  ["Cannot supply flags when constructing one RegExp from another"],
-  incompatible_method_receiver:  ["Method ", "%0", " called on incompatible receiver ", "%1"],
   multiple_defaults_in_switch:   ["More than one default clause in switch statement"],
   newline_after_throw:           ["Illegal newline after throw"],
   label_redeclaration:           ["Label '", "%0", "' has already been declared"],
@@ -36,11 +32,7 @@ var kMessages = {
   no_catch_or_finally:           ["Missing catch or finally after try"],
   unknown_label:                 ["Undefined label '", "%0", "'"],
   uncaught_exception:            ["Uncaught ", "%0"],
-  stack_trace:                   ["Stack Trace:\n", "%0"],
-  called_non_callable:           ["%0", " is not a function"],
   undefined_method:              ["Object ", "%1", " has no method '", "%0", "'"],
-  cannot_convert_to_primitive:   ["Cannot convert object to primitive value"],
-  not_constructor:               ["%0", " is not a constructor"],
   not_defined:                   ["%0", " is not defined"],
   non_method:                    ["'super' is referenced from non-method"],
   unsupported_super:             ["Unsupported reference to 'super'"],
@@ -48,15 +40,7 @@ var kMessages = {
   non_object_property_store:     ["Cannot set property '", "%0", "' of ", "%1"],
   illegal_invocation:            ["Illegal invocation"],
   no_setter_in_callback:         ["Cannot set property ", "%0", " of ", "%1", " which has only a getter"],
-  apply_non_function:            ["Function.prototype.apply was called on ", "%0", ", which is a ", "%1", " and not a function"],
-  apply_wrong_args:              ["Function.prototype.apply: Arguments list has wrong type"],
-  reflect_apply_wrong_args:      ["Reflect.apply: Arguments list has wrong type"],
-  reflect_construct_wrong_args:  ["Reflect.construct: Arguments list has wrong type"],
   flags_getter_non_object:       ["RegExp.prototype.flags getter called on non-object ", "%0"],
-  invalid_in_operator_use:       ["Cannot use 'in' operator to search for '", "%0", "' in ", "%1"],
-  instanceof_function_expected:  ["Expecting a function in instanceof check, but got ", "%0"],
-  instanceof_nonobject_proto:    ["Function has non-object prototype '", "%0", "' in instanceof check"],
-  undefined_or_null_to_object:   ["Cannot convert undefined or null to object"],
   reduce_no_initial:             ["Reduce of empty array with no initial value"],
   getter_must_be_callable:       ["Getter must be a function: ", "%0"],
   setter_must_be_callable:       ["Setter must be a function: ", "%0"],
@@ -119,7 +103,6 @@ var kMessages = {
   invalid_data_view_accessor_offset:
                                  ["Offset is outside the bounds of the DataView"],
 
-  stack_overflow:                ["Maximum call stack size exceeded"],
   invalid_time_value:            ["Invalid time value"],
   invalid_count_value:           ["Invalid count value"],
   invalid_code_point:            ["Invalid code point ", "%0"],
@@ -185,9 +168,6 @@ var kMessages = {
   cant_prevent_ext_external_array_elements: ["Cannot prevent extension of an object with external array elements"],
   redef_external_array_element:  ["Cannot redefine a property of an object with external array elements"],
   const_assign:                  ["Assignment to constant variable."],
-  symbol_to_string:              ["Cannot convert a Symbol value to a string"],
-  symbol_to_primitive:           ["Cannot convert a Symbol wrapper object to a primitive value"],
-  symbol_to_number:              ["Cannot convert a Symbol value to a number"],
   module_export_undefined:       ["Export '", "%0", "' is not defined in module"],
   duplicate_export:              ["Duplicate export of '", "%0", "'"],
   unexpected_super:              ["'super' keyword unexpected here"],
@@ -201,11 +181,7 @@ var kMessages = {
   array_not_subclassable:        ["Subclassing Arrays is not currently supported."],
   for_in_loop_initializer:       ["for-in loop variable declaration may not have an initializer."],
   for_of_loop_initializer:       ["for-of loop variable declaration may not have an initializer."],
-  for_inof_loop_multi_bindings:  ["Invalid left-hand side in ", "%0", " loop: Must have a single binding."],
-  bad_getter_arity:              ["Getter must not have any formal parameters."],
-  bad_setter_arity:              ["Setter must have exactly one formal parameter."],
-  this_formal_parameter:         ["'this' is not a valid formal parameter name"],
-  duplicate_arrow_function_formal_parameter: ["Arrow function may not have duplicate parameter names"]
+  for_inof_loop_multi_bindings:  ["Invalid left-hand side in ", "%0", " loop: Must have a single binding."]
 };
 
 
@@ -318,13 +294,8 @@ function ToDetailString(obj) {
 }
 
 
-function MakeGenericError(constructor, type, args) {
-  if (IS_UNDEFINED(args)) args = [];
-  return new constructor(FormatMessage(type, args));
-}
-
-
-function MakeGenericError2(constructor, type, arg0, arg1, arg2) {
+function MakeGenericError(constructor, type, arg0, arg1, arg2) {
+  if (IS_UNDEFINED(arg0) && IS_STRING(type)) arg0 = [];
   return new constructor(FormatMessage(type, arg0, arg1, arg2));
 }
 
@@ -381,41 +352,34 @@ function GetSourceLine(message) {
 }
 
 
-function MakeTypeError(type, args) {
-  return MakeGenericError($TypeError, type, args);
+function MakeError(type, arg0, arg1, arg2) {
+  return MakeGenericError($Error, type, arg0, arg1, arg2);
 }
 
 
-// TODO(yangguo): rename this once we migrated all messages.
-function MakeTypeError2(type, arg0, arg1, arg2) {
-  return MakeGenericError2($TypeError, type, arg0, arg1, arg2);
+function MakeTypeError(type, arg0, arg1, arg2) {
+  return MakeGenericError($TypeError, type, arg0, arg1, arg2);
 }
 
 
-function MakeRangeError(type, args) {
-  return MakeGenericError($RangeError, type, args);
+function MakeRangeError(type, arg0, arg1, arg2) {
+  return MakeGenericError($RangeError, type, arg0, arg1, arg2);
 }
 
 
-function MakeSyntaxError(type, args) {
-  return MakeGenericError($SyntaxError, type, args);
+function MakeSyntaxError(type, arg0, arg1, arg2) {
+  return MakeGenericError($SyntaxError, type, arg0, arg1, arg2);
 }
 
 
-function MakeReferenceError(type, args) {
-  return MakeGenericError($ReferenceError, type, args);
+function MakeReferenceError(type, arg0, arg1, arg2) {
+  return MakeGenericError($ReferenceError, type, arg0, arg1, arg2);
 }
 
 
-function MakeEvalError(type, args) {
-  return MakeGenericError($EvalError, type, args);
+function MakeEvalError(type, arg0, arg1, arg2) {
+  return MakeGenericError($EvalError, type, arg0, arg1, arg2);
 }
-
-
-function MakeError(type, args) {
-  return MakeGenericError($Error, type, args);
-}
-
 
 // The embedded versions are called from unoptimized code, with embedded
 // arguments. Those arguments cannot be arrays, which are context-dependent.
@@ -1108,7 +1072,7 @@ function FormatStackTrace(obj, raw_stack) {
     }
     lines.push("    at " + line);
   }
-  return %_CallFunction(lines, "\n", ArrayJoin);
+  return %_CallFunction(lines, "\n", $arrayJoin);
 }
 
 
@@ -1309,7 +1273,7 @@ InstallFunctions($Error.prototype, DONT_ENUM, ['toString', ErrorToString]);
 // Boilerplate for exceptions for stack overflows. Used from
 // Isolate::StackOverflow().
 function SetUpStackOverflowBoilerplate() {
-  var boilerplate = MakeRangeError('stack_overflow', []);
+  var boilerplate = MakeRangeError(kStackOverflow);
 
   %DefineAccessorPropertyUnchecked(
       boilerplate, 'stack', StackTraceGetter, StackTraceSetter, DONT_ENUM);

@@ -422,6 +422,8 @@
         '../../src/codegen.h',
         '../../src/compilation-cache.cc',
         '../../src/compilation-cache.h',
+        '../../src/compilation-dependencies.cc',
+        '../../src/compilation-dependencies.h',
         '../../src/compilation-statistics.cc',
         '../../src/compilation-statistics.h',
         '../../src/compiler/access-builder.cc',
@@ -1330,6 +1332,7 @@
         '../..',
       ],
       'sources': [
+        '../../src/base/adapters.h',
         '../../src/base/atomicops.h',
         '../../src/base/atomicops_internals_arm64_gcc.h',
         '../../src/base/atomicops_internals_arm_gcc.h',

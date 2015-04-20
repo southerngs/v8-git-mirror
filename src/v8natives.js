@@ -691,7 +691,7 @@ function GetMethod(obj, p) {
   var func = obj[p];
   if (IS_NULL_OR_UNDEFINED(func)) return UNDEFINED;
   if (IS_SPEC_FUNCTION(func)) return func;
-  throw MakeTypeError('called_non_callable', [typeof func]);
+  throw MakeTypeError(kCalledNonCallable, typeof func);
 }
 
 
@@ -909,7 +909,7 @@ function DefineArrayProperty(obj, p, desc, should_throw) {
     var emit_splice = %IsObserved(obj) && new_length !== old_length;
     var removed;
     if (emit_splice) {
-      BeginPerformSplice(obj);
+      $observeBeginPerformSplice(obj);
       removed = [];
       if (new_length < old_length)
         removed.length = old_length - new_length;
@@ -930,8 +930,8 @@ function DefineArrayProperty(obj, p, desc, should_throw) {
     }
     threw = !DefineObjectProperty(obj, "length", desc, should_throw) || threw;
     if (emit_splice) {
-      EndPerformSplice(obj);
-      EnqueueSpliceRecord(obj,
+      $observeEndPerformSplice(obj);
+      $observeEnqueueSpliceRecord(obj,
           new_length < old_length ? new_length : old_length,
           removed,
           new_length > old_length ? new_length - old_length : 0);
@@ -954,14 +954,14 @@ function DefineArrayProperty(obj, p, desc, should_throw) {
       var length = obj.length;
       if (index >= length && %IsObserved(obj)) {
         emit_splice = true;
-        BeginPerformSplice(obj);
+        $observeBeginPerformSplice(obj);
       }
 
       var length_desc = GetOwnPropertyJS(obj, "length");
       if ((index >= length && !length_desc.isWritable()) ||
           !DefineObjectProperty(obj, p, desc, true)) {
         if (emit_splice)
-          EndPerformSplice(obj);
+          $observeEndPerformSplice(obj);
         if (should_throw) {
           throw MakeTypeError("define_disallowed", [p]);
         } else {
@@ -972,8 +972,8 @@ function DefineArrayProperty(obj, p, desc, should_throw) {
         obj.length = index + 1;
       }
       if (emit_splice) {
-        EndPerformSplice(obj);
-        EnqueueSpliceRecord(obj, length, [], index + 1 - length);
+        $observeEndPerformSplice(obj);
+        $observeEnqueueSpliceRecord(obj, length, [], index + 1 - length);
       }
       return true;
     }
@@ -1587,8 +1587,8 @@ function NumberToFixedJS(fractionDigits) {
   var x = this;
   if (!IS_NUMBER(this)) {
     if (!IS_NUMBER_WRAPPER(this)) {
-      throw MakeTypeError("incompatible_method_receiver",
-                          ["Number.prototype.toFixed", this]);
+      throw MakeTypeError(kIncompatibleMethodReceiver,
+                          "Number.prototype.toFixed", this);
     }
     // Get the value of this number in case it's an object.
     x = %_ValueOf(this);
@@ -1612,8 +1612,8 @@ function NumberToExponentialJS(fractionDigits) {
   var x = this;
   if (!IS_NUMBER(this)) {
     if (!IS_NUMBER_WRAPPER(this)) {
-      throw MakeTypeError("incompatible_method_receiver",
-                          ["Number.prototype.toExponential", this]);
+      throw MakeTypeError(kIncompatibleMethodReceiver,
+                          "Number.prototype.toExponential", this);
     }
     // Get the value of this number in case it's an object.
     x = %_ValueOf(this);
@@ -1638,8 +1638,8 @@ function NumberToPrecisionJS(precision) {
   var x = this;
   if (!IS_NUMBER(this)) {
     if (!IS_NUMBER_WRAPPER(this)) {
-      throw MakeTypeError("incompatible_method_receiver",
-                          ["Number.prototype.toPrecision", this]);
+      throw MakeTypeError(kIncompatibleMethodReceiver,
+                          "Number.prototype.toPrecision", this);
     }
     // Get the value of this number in case it's an object.
     x = %_ValueOf(this);

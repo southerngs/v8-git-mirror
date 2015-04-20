@@ -634,6 +634,10 @@ class Heap {
   // Returns of size of all objects residing in the heap.
   intptr_t SizeOfObjects();
 
+  intptr_t old_generation_allocation_limit() const {
+    return old_generation_allocation_limit_;
+  }
+
   // Return the starting address and a mask for the new space.  And-masking an
   // address with the mask will result in the start address of the new space
   // for all addresses in either semispace.
@@ -660,6 +664,19 @@ class Heap {
     }
     return NULL;
   }
+  Space* space(int idx) {
+    switch (idx) {
+      case NEW_SPACE:
+        return new_space();
+      case LO_SPACE:
+        return lo_space();
+      default:
+        return paged_space(idx);
+    }
+  }
+
+  // Returns name of the space.
+  const char* GetSpaceName(int idx);
 
   bool always_allocate() { return always_allocate_scope_depth_ != 0; }
   Address always_allocate_scope_depth_address() {
@@ -1120,8 +1137,14 @@ class Heap {
   static const int kMaxExecutableSizeHugeMemoryDevice =
       256 * kPointerMultiplier;
 
-  intptr_t OldGenerationAllocationLimit(intptr_t old_gen_size,
-                                        int freed_global_handles);
+  // Calculates the allocation limit based on a given growing factor and a
+  // given old generation size.
+  intptr_t CalculateOldGenerationAllocationLimit(double factor,
+                                                 intptr_t old_gen_size);
+
+  // Sets the allocation limit to trigger the next full garbage collection.
+  void SetOldGenerationAllocationLimit(intptr_t old_gen_size,
+                                       int freed_global_handles);
 
   // Indicates whether inline bump-pointer allocation has been disabled.
   bool inline_allocation_disabled() { return inline_allocation_disabled_; }
@@ -1165,6 +1188,10 @@ class Heap {
     kStrongRootListLength = kStringTableRootIndex,
     kSmiRootsStart = kStringTableRootIndex + 1
   };
+
+  // Get the root list index for {object} if such a root list index exists.
+  bool GetRootListIndex(Handle<HeapObject> object,
+                        Heap::RootListIndex* index_return);
 
   Object* root(RootListIndex index) { return roots_[index]; }
 
@@ -1227,13 +1254,10 @@ class Heap {
     survived_since_last_expansion_ += survived;
   }
 
-  inline bool NextGCIsLikelyToBeFull() {
-    if (FLAG_gc_global) return true;
-
+  inline bool HeapIsFullEnoughToStartIncrementalMarking(intptr_t limit) {
     if (FLAG_stress_compaction && (gc_count_ & 1) != 0) return true;
 
-    intptr_t adjusted_allocation_limit =
-        old_generation_allocation_limit_ - new_space_.Capacity();
+    intptr_t adjusted_allocation_limit = limit - new_space_.Capacity();
 
     if (PromotedTotalSize() >= adjusted_allocation_limit) return true;
 
@@ -1430,6 +1454,7 @@ class Heap {
   }
 
   void TraceObjectStats();
+  void TraceObjectStat(const char* name, int count, int size, double time);
   void CheckpointObjectStats();
 
   // We don't use a LockGuard here since we want to lock the heap
@@ -1635,6 +1660,10 @@ class Heap {
   // which collector to invoke, before expanding a paged space in the old
   // generation and on every allocation in large object space.
   intptr_t old_generation_allocation_limit_;
+
+  // The allocation limit when there is >16.66ms idle time in the idle time
+  // handler.
+  intptr_t idle_old_generation_allocation_limit_;
 
   // Indicates that an allocation has failed in the old generation since the
   // last GC.
@@ -2065,8 +2094,6 @@ class Heap {
   bool TryFinalizeIdleIncrementalMarking(
       double idle_time_in_ms, size_t size_of_objects,
       size_t mark_compact_speed_in_bytes_per_ms);
-
-  bool WorthActivatingIncrementalMarking();
 
   void ClearObjectStats(bool clear_last_time_stats = false);
 

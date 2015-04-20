@@ -2,11 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+var $arrayConcat;
+var $arrayJoin;
+var $arrayPush;
+var $arrayPop;
+var $arrayShift;
+var $arraySlice;
+var $arraySplice;
+var $arrayUnshift;
+
+(function() {
+
 "use strict";
 
-// This file relies on the fact that the following declarations have been made
-// in runtime.js:
-// var $Array = global.Array;
+%CheckIsBootstrapping();
+
+var GlobalArray = global.Array;
 
 // -------------------------------------------------------------------
 
@@ -407,16 +418,17 @@ function ObservedArrayPop(n) {
   var value = this[n];
 
   try {
-    BeginPerformSplice(this);
+    $observeBeginPerformSplice(this);
     delete this[n];
     this.length = n;
   } finally {
-    EndPerformSplice(this);
-    EnqueueSpliceRecord(this, n, [value], 0);
+    $observeEndPerformSplice(this);
+    $observeEnqueueSpliceRecord(this, n, [value], 0);
   }
 
   return value;
 }
+
 
 // Removes the last element from the array and returns it. See
 // ECMA-262, section 15.4.4.6.
@@ -446,19 +458,20 @@ function ObservedArrayPush() {
   var m = %_ArgumentsLength();
 
   try {
-    BeginPerformSplice(this);
+    $observeBeginPerformSplice(this);
     for (var i = 0; i < m; i++) {
       this[i+n] = %_Arguments(i);
     }
     var new_length = n + m;
     this.length = new_length;
   } finally {
-    EndPerformSplice(this);
-    EnqueueSpliceRecord(this, n, [], m);
+    $observeEndPerformSplice(this);
+    $observeEnqueueSpliceRecord(this, n, [], m);
   }
 
   return new_length;
 }
+
 
 // Appends the arguments to the end of the array and returns the new
 // length of the array. See ECMA-262, section 15.4.4.7.
@@ -584,16 +597,17 @@ function ObservedArrayShift(len) {
   var first = this[0];
 
   try {
-    BeginPerformSplice(this);
+    $observeBeginPerformSplice(this);
     SimpleMove(this, 0, 1, len, 0);
     this.length = len - 1;
   } finally {
-    EndPerformSplice(this);
-    EnqueueSpliceRecord(this, 0, [first], 0);
+    $observeEndPerformSplice(this);
+    $observeEnqueueSpliceRecord(this, 0, [first], 0);
   }
 
   return first;
 }
+
 
 function ArrayShift() {
   CHECK_OBJECT_COERCIBLE(this, "Array.prototype.shift");
@@ -627,12 +641,13 @@ function ArrayShift() {
   return first;
 }
 
+
 function ObservedArrayUnshift() {
   var len = TO_UINT32(this.length);
   var num_arguments = %_ArgumentsLength();
 
   try {
-    BeginPerformSplice(this);
+    $observeBeginPerformSplice(this);
     SimpleMove(this, 0, 0, len, num_arguments);
     for (var i = 0; i < num_arguments; i++) {
       this[i] = %_Arguments(i);
@@ -640,12 +655,13 @@ function ObservedArrayUnshift() {
     var new_length = len + num_arguments;
     this.length = new_length;
   } finally {
-    EndPerformSplice(this);
-    EnqueueSpliceRecord(this, 0, [], num_arguments);
+    $observeEndPerformSplice(this);
+    $observeEnqueueSpliceRecord(this, 0, [], num_arguments);
   }
 
   return new_length;
 }
+
 
 function ArrayUnshift(arg1) {  // length == 1
   CHECK_OBJECT_COERCIBLE(this, "Array.prototype.unshift");
@@ -758,7 +774,7 @@ function ObservedArraySplice(start, delete_count) {
   var num_elements_to_add = num_arguments > 2 ? num_arguments - 2 : 0;
 
   try {
-    BeginPerformSplice(this);
+    $observeBeginPerformSplice(this);
 
     SimpleSlice(this, start_i, del_count, len, deleted_elements);
     SimpleMove(this, start_i, del_count, len, num_elements_to_add);
@@ -774,12 +790,12 @@ function ObservedArraySplice(start, delete_count) {
     this.length = len - del_count + num_elements_to_add;
 
   } finally {
-    EndPerformSplice(this);
+    $observeEndPerformSplice(this);
     if (deleted_elements.length || num_elements_to_add) {
-       EnqueueSpliceRecord(this,
-                           start_i,
-                           deleted_elements.slice(),
-                           num_elements_to_add);
+      $observeEnqueueSpliceRecord(this,
+                                  start_i,
+                                  deleted_elements.slice(),
+                                  num_elements_to_add);
     }
   }
 
@@ -1142,9 +1158,7 @@ function ArrayFilter(f, receiver) {
   var array = ToObject(this);
   var length = ToUint32(array.length);
 
-  if (!IS_SPEC_FUNCTION(f)) {
-    throw MakeTypeError('called_non_callable', [ f ]);
-  }
+  if (!IS_SPEC_FUNCTION(f)) throw MakeTypeError(kCalledNonCallable, f);
   var needs_wrapper = false;
   if (IS_NULL_OR_UNDEFINED(receiver)) {
     receiver = %GetDefaultReceiver(f) || receiver;
@@ -1152,7 +1166,7 @@ function ArrayFilter(f, receiver) {
     needs_wrapper = SHOULD_CREATE_WRAPPER(f, receiver);
   }
 
-  var result = new $Array();
+  var result = new GlobalArray();
   var accumulator = new InternalArray();
   var accumulator_length = 0;
   var is_array = IS_ARRAY(array);
@@ -1181,9 +1195,7 @@ function ArrayForEach(f, receiver) {
   var array = ToObject(this);
   var length = TO_UINT32(array.length);
 
-  if (!IS_SPEC_FUNCTION(f)) {
-    throw MakeTypeError('called_non_callable', [ f ]);
-  }
+  if (!IS_SPEC_FUNCTION(f)) throw MakeTypeError(kCalledNonCallable, f);
   var needs_wrapper = false;
   if (IS_NULL_OR_UNDEFINED(receiver)) {
     receiver = %GetDefaultReceiver(f) || receiver;
@@ -1215,9 +1227,7 @@ function ArraySome(f, receiver) {
   var array = ToObject(this);
   var length = TO_UINT32(array.length);
 
-  if (!IS_SPEC_FUNCTION(f)) {
-    throw MakeTypeError('called_non_callable', [ f ]);
-  }
+  if (!IS_SPEC_FUNCTION(f)) throw MakeTypeError(kCalledNonCallable, f);
   var needs_wrapper = false;
   if (IS_NULL_OR_UNDEFINED(receiver)) {
     receiver = %GetDefaultReceiver(f) || receiver;
@@ -1248,9 +1258,7 @@ function ArrayEvery(f, receiver) {
   var array = ToObject(this);
   var length = TO_UINT32(array.length);
 
-  if (!IS_SPEC_FUNCTION(f)) {
-    throw MakeTypeError('called_non_callable', [ f ]);
-  }
+  if (!IS_SPEC_FUNCTION(f)) throw MakeTypeError(kCalledNonCallable, f);
   var needs_wrapper = false;
   if (IS_NULL_OR_UNDEFINED(receiver)) {
     receiver = %GetDefaultReceiver(f) || receiver;
@@ -1272,6 +1280,7 @@ function ArrayEvery(f, receiver) {
   return true;
 }
 
+
 function ArrayMap(f, receiver) {
   CHECK_OBJECT_COERCIBLE(this, "Array.prototype.map");
 
@@ -1280,9 +1289,7 @@ function ArrayMap(f, receiver) {
   var array = ToObject(this);
   var length = TO_UINT32(array.length);
 
-  if (!IS_SPEC_FUNCTION(f)) {
-    throw MakeTypeError('called_non_callable', [ f ]);
-  }
+  if (!IS_SPEC_FUNCTION(f)) throw MakeTypeError(kCalledNonCallable, f);
   var needs_wrapper = false;
   if (IS_NULL_OR_UNDEFINED(receiver)) {
     receiver = %GetDefaultReceiver(f) || receiver;
@@ -1290,7 +1297,7 @@ function ArrayMap(f, receiver) {
     needs_wrapper = SHOULD_CREATE_WRAPPER(f, receiver);
   }
 
-  var result = new $Array();
+  var result = new GlobalArray();
   var accumulator = new InternalArray(length);
   var is_array = IS_ARRAY(array);
   var stepping = DEBUG_IS_ACTIVE && %DebugCallbackSupportsStepping(f);
@@ -1427,7 +1434,7 @@ function ArrayReduce(callback, current) {
   var length = ToUint32(array.length);
 
   if (!IS_SPEC_FUNCTION(callback)) {
-    throw MakeTypeError('called_non_callable', [callback]);
+    throw MakeTypeError(kCalledNonCallable, callback);
   }
 
   var is_array = IS_ARRAY(array);
@@ -1455,6 +1462,7 @@ function ArrayReduce(callback, current) {
   return current;
 }
 
+
 function ArrayReduceRight(callback, current) {
   CHECK_OBJECT_COERCIBLE(this, "Array.prototype.reduceRight");
 
@@ -1464,7 +1472,7 @@ function ArrayReduceRight(callback, current) {
   var length = ToUint32(array.length);
 
   if (!IS_SPEC_FUNCTION(callback)) {
-    throw MakeTypeError('called_non_callable', [callback]);
+    throw MakeTypeError(kCalledNonCallable, callback);
   }
 
   var is_array = IS_ARRAY(array);
@@ -1500,91 +1508,98 @@ function ArrayIsArray(obj) {
 
 // -------------------------------------------------------------------
 
-function SetUpArray() {
-  %CheckIsBootstrapping();
+// Set up non-enumerable constructor property on the Array.prototype
+// object.
+%AddNamedProperty(GlobalArray.prototype, "constructor", GlobalArray,
+                  DONT_ENUM);
 
-  // Set up non-enumerable constructor property on the Array.prototype
-  // object.
-  %AddNamedProperty($Array.prototype, "constructor", $Array, DONT_ENUM);
+// Set up unscopable properties on the Array.prototype object.
+var unscopables = {
+  __proto__: null,
+  copyWithin: true,
+  entries: true,
+  fill: true,
+  find: true,
+  findIndex: true,
+  keys: true,
+};
 
-  // Set up unscopable properties on the Array.prototype object.
-  var unscopables = {
-    __proto__: null,
-    copyWithin: true,
-    entries: true,
-    fill: true,
-    find: true,
-    findIndex: true,
-    keys: true,
-  };
-  %AddNamedProperty($Array.prototype, symbolUnscopables, unscopables,
-      DONT_ENUM | READ_ONLY);
+%AddNamedProperty(GlobalArray.prototype, symbolUnscopables, unscopables,
+                  DONT_ENUM | READ_ONLY);
 
-  // Set up non-enumerable functions on the Array object.
-  InstallFunctions($Array, DONT_ENUM, [
-    "isArray", ArrayIsArray
-  ]);
+// Set up non-enumerable functions on the Array object.
+InstallFunctions(GlobalArray, DONT_ENUM, [
+  "isArray", ArrayIsArray
+]);
 
-  var specialFunctions = %SpecialArrayFunctions();
+var specialFunctions = %SpecialArrayFunctions();
 
-  var getFunction = function(name, jsBuiltin, len) {
-    var f = jsBuiltin;
-    if (specialFunctions.hasOwnProperty(name)) {
-      f = specialFunctions[name];
-    }
-    if (!IS_UNDEFINED(len)) {
-      %FunctionSetLength(f, len);
-    }
-    return f;
-  };
+var getFunction = function(name, jsBuiltin, len) {
+  var f = jsBuiltin;
+  if (specialFunctions.hasOwnProperty(name)) {
+    f = specialFunctions[name];
+  }
+  if (!IS_UNDEFINED(len)) {
+    %FunctionSetLength(f, len);
+  }
+  return f;
+};
 
-  // Set up non-enumerable functions of the Array.prototype object and
-  // set their names.
-  // Manipulate the length of some of the functions to meet
-  // expectations set by ECMA-262 or Mozilla.
-  InstallFunctions($Array.prototype, DONT_ENUM, [
-    "toString", getFunction("toString", ArrayToString),
-    "toLocaleString", getFunction("toLocaleString", ArrayToLocaleString),
-    "join", getFunction("join", ArrayJoin),
-    "pop", getFunction("pop", ArrayPop),
-    "push", getFunction("push", ArrayPush, 1),
-    "concat", getFunction("concat", ArrayConcatJS, 1),
-    "reverse", getFunction("reverse", ArrayReverse),
-    "shift", getFunction("shift", ArrayShift),
-    "unshift", getFunction("unshift", ArrayUnshift, 1),
-    "slice", getFunction("slice", ArraySlice, 2),
-    "splice", getFunction("splice", ArraySplice, 2),
-    "sort", getFunction("sort", ArraySort),
-    "filter", getFunction("filter", ArrayFilter, 1),
-    "forEach", getFunction("forEach", ArrayForEach, 1),
-    "some", getFunction("some", ArraySome, 1),
-    "every", getFunction("every", ArrayEvery, 1),
-    "map", getFunction("map", ArrayMap, 1),
-    "indexOf", getFunction("indexOf", ArrayIndexOf, 1),
-    "lastIndexOf", getFunction("lastIndexOf", ArrayLastIndexOf, 1),
-    "reduce", getFunction("reduce", ArrayReduce, 1),
-    "reduceRight", getFunction("reduceRight", ArrayReduceRight, 1)
-  ]);
+// Set up non-enumerable functions of the Array.prototype object and
+// set their names.
+// Manipulate the length of some of the functions to meet
+// expectations set by ECMA-262 or Mozilla.
+InstallFunctions(GlobalArray.prototype, DONT_ENUM, [
+  "toString", getFunction("toString", ArrayToString),
+  "toLocaleString", getFunction("toLocaleString", ArrayToLocaleString),
+  "join", getFunction("join", ArrayJoin),
+  "pop", getFunction("pop", ArrayPop),
+  "push", getFunction("push", ArrayPush, 1),
+  "concat", getFunction("concat", ArrayConcatJS, 1),
+  "reverse", getFunction("reverse", ArrayReverse),
+  "shift", getFunction("shift", ArrayShift),
+  "unshift", getFunction("unshift", ArrayUnshift, 1),
+  "slice", getFunction("slice", ArraySlice, 2),
+  "splice", getFunction("splice", ArraySplice, 2),
+  "sort", getFunction("sort", ArraySort),
+  "filter", getFunction("filter", ArrayFilter, 1),
+  "forEach", getFunction("forEach", ArrayForEach, 1),
+  "some", getFunction("some", ArraySome, 1),
+  "every", getFunction("every", ArrayEvery, 1),
+  "map", getFunction("map", ArrayMap, 1),
+  "indexOf", getFunction("indexOf", ArrayIndexOf, 1),
+  "lastIndexOf", getFunction("lastIndexOf", ArrayLastIndexOf, 1),
+  "reduce", getFunction("reduce", ArrayReduce, 1),
+  "reduceRight", getFunction("reduceRight", ArrayReduceRight, 1)
+]);
 
-  %FinishArrayPrototypeSetup($Array.prototype);
+%FinishArrayPrototypeSetup(GlobalArray.prototype);
 
-  // The internal Array prototype doesn't need to be fancy, since it's never
-  // exposed to user code.
-  // Adding only the functions that are actually used.
-  SetUpLockedPrototype(InternalArray, $Array(), [
-    "concat", getFunction("concat", ArrayConcatJS),
-    "indexOf", getFunction("indexOf", ArrayIndexOf),
-    "join", getFunction("join", ArrayJoin),
-    "pop", getFunction("pop", ArrayPop),
-    "push", getFunction("push", ArrayPush),
-    "splice", getFunction("splice", ArraySplice)
-  ]);
+// The internal Array prototype doesn't need to be fancy, since it's never
+// exposed to user code.
+// Adding only the functions that are actually used.
+SetUpLockedPrototype(InternalArray, GlobalArray(), [
+  "concat", getFunction("concat", ArrayConcatJS),
+  "indexOf", getFunction("indexOf", ArrayIndexOf),
+  "join", getFunction("join", ArrayJoin),
+  "pop", getFunction("pop", ArrayPop),
+  "push", getFunction("push", ArrayPush),
+  "splice", getFunction("splice", ArraySplice)
+]);
 
-  SetUpLockedPrototype(InternalPackedArray, $Array(), [
-    "join", getFunction("join", ArrayJoin),
-    "pop", getFunction("pop", ArrayPop),
-    "push", getFunction("push", ArrayPush)
-  ]);
-}
+SetUpLockedPrototype(InternalPackedArray, GlobalArray(), [
+  "join", getFunction("join", ArrayJoin),
+  "pop", getFunction("pop", ArrayPop),
+  "push", getFunction("push", ArrayPush)
+]);
 
-SetUpArray();
+$arrayConcat = ArrayConcatJS;
+$arrayJoin = ArrayJoin;
+$arrayPush = ArrayPush;
+$arrayPop = ArrayPop;
+$arrayShift = ArrayShift;
+$arraySlice = ArraySlice;
+$arraySplice = ArraySplice;
+$arrayUnshift = ArrayUnshift;
+
+})();
