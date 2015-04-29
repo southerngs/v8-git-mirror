@@ -589,12 +589,6 @@ void Deserializer::Deserialize(Isolate* isolate) {
 
   isolate_->heap()->set_native_contexts_list(
       isolate_->heap()->undefined_value());
-  isolate_->heap()->set_array_buffers_list(
-      isolate_->heap()->undefined_value());
-  isolate_->heap()->set_last_array_buffer_in_list(
-      isolate_->heap()->undefined_value());
-  isolate->heap()->set_new_array_buffer_views_list(
-      isolate_->heap()->undefined_value());
 
   // The allocation site list is build during root iteration, but if no sites
   // were encountered then it needs to be initialized to undefined.
@@ -1804,6 +1798,13 @@ void Serializer::ObjectSerializer::Serialize() {
 
   // We cannot serialize typed array objects correctly.
   DCHECK(!object_->IsJSTypedArray());
+
+  if (object_->IsPrototypeInfo()) {
+    Object* prototype_users = PrototypeInfo::cast(object_)->prototype_users();
+    if (prototype_users->IsWeakFixedArray()) {
+      WeakFixedArray::cast(prototype_users)->Compact();
+    }
+  }
 
   if (object_->IsScript()) {
     // Clear cached line ends.

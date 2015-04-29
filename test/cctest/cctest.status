@@ -94,6 +94,9 @@
   ##############################################################################
   # TurboFan compiler failures.
 
+  # TODO(mstarzinger): control edges are messed up in exception tests.
+  'test-run-jsexceptions/*': [PASS, NO_VARIANTS],
+
   # Some tests are just too slow to run for now.
   'test-api/Threading*': [PASS, NO_VARIANTS],
   'test-heap/IncrementalMarkingStepMakesBigProgressWithLargeObjects': [PASS, NO_VARIANTS],
@@ -180,6 +183,12 @@
   # Skip tests not suitable for ASAN.
   'test-assembler-x64/AssemblerX64XchglOperations': [SKIP],
 }],  # 'asan == True'
+
+##############################################################################
+['msan == True', {
+  # ICU upstream issues.
+  'test-strings/CountBreakIterator': [SKIP],
+}],  # 'msan == True'
 
 ##############################################################################
 ['no_snap == True', {

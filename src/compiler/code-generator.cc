@@ -84,8 +84,12 @@ Handle<Code> CodeGenerator::GenerateCode() {
       current_block_ = block->rpo_number();
       if (FLAG_code_comments) {
         // TODO(titzer): these code comments are a giant memory leak.
-        Vector<char> buffer = Vector<char>::New(32);
-        SNPrintF(buffer, "-- B%d start --", block->rpo_number().ToInt());
+        Vector<char> buffer = Vector<char>::New(200);
+        SNPrintF(buffer, "-- B%d start%s%s%s%s --", block->rpo_number().ToInt(),
+                 block->IsDeferred() ? " (deferred)" : "",
+                 block->needs_frame() ? "" : " (no frame)",
+                 block->must_construct_frame() ? " (construct frame)" : "",
+                 block->must_deconstruct_frame() ? " (deconstruct frame)" : "");
         masm()->RecordComment(buffer.start());
       }
       masm()->bind(GetLabel(current_block_));
@@ -528,10 +532,9 @@ void CodeGenerator::AddTranslationForOperand(Translation* translation,
                                              InstructionOperand* op,
                                              MachineType type) {
   if (op->IsStackSlot()) {
-    // TODO(jarin) kMachBool and kRepBit should materialize true and false
-    // rather than creating an int value.
-    if (type == kMachBool || type == kRepBit || type == kMachInt32 ||
-        type == kMachInt8 || type == kMachInt16) {
+    if (type == kMachBool || type == kRepBit) {
+      translation->StoreBoolStackSlot(StackSlotOperand::cast(op)->index());
+    } else if (type == kMachInt32 || type == kMachInt8 || type == kMachInt16) {
       translation->StoreInt32StackSlot(StackSlotOperand::cast(op)->index());
     } else if (type == kMachUint32 || type == kMachUint16 ||
                type == kMachUint8) {
@@ -547,10 +550,9 @@ void CodeGenerator::AddTranslationForOperand(Translation* translation,
         DoubleStackSlotOperand::cast(op)->index());
   } else if (op->IsRegister()) {
     InstructionOperandConverter converter(this, instr);
-    // TODO(jarin) kMachBool and kRepBit should materialize true and false
-    // rather than creating an int value.
-    if (type == kMachBool || type == kRepBit || type == kMachInt32 ||
-        type == kMachInt8 || type == kMachInt16) {
+    if (type == kMachBool || type == kRepBit) {
+      translation->StoreBoolRegister(converter.ToRegister(op));
+    } else if (type == kMachInt32 || type == kMachInt8 || type == kMachInt16) {
       translation->StoreInt32Register(converter.ToRegister(op));
     } else if (type == kMachUint32 || type == kMachUint16 ||
                type == kMachUint8) {

@@ -640,7 +640,14 @@ class Collector {
   }
 
   // Resets the collector to be empty.
-  virtual void Reset();
+  virtual void Reset() {
+    for (int i = chunks_.length() - 1; i >= 0; i--) {
+      chunks_.at(i).Dispose();
+    }
+    chunks_.Rewind(0);
+    index_ = 0;
+    size_ = 0;
+  }
 
   // Total number of elements added to collector so far.
   inline int size() { return size_; }
@@ -1132,6 +1139,9 @@ void FPRINTF_CHECKING PrintF(FILE* out, const char* format, ...);
 
 // Prepends the current process ID to the output.
 void PRINTF_CHECKING PrintPID(const char* format, ...);
+
+// Prepends the current process ID and given isolate pointer to the output.
+void PrintIsolate(void* isolate, const char* format, ...);
 
 // Safe formatting print. Ensures that str is always null-terminated.
 // Returns the number of chars written, or -1 if output was truncated.

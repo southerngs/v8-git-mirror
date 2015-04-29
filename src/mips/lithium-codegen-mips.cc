@@ -2059,7 +2059,8 @@ void LCodeGen::DoArithmeticT(LArithmeticT* instr) {
   DCHECK(ToRegister(instr->right()).is(a0));
   DCHECK(ToRegister(instr->result()).is(v0));
 
-  Handle<Code> code = CodeFactory::BinaryOpIC(isolate(), instr->op()).code();
+  Handle<Code> code = CodeFactory::BinaryOpIC(
+      isolate(), instr->op(), language_mode()).code();
   CallCode(code, RelocInfo::CODE_TARGET, instr);
   // Other arch use a nop here, to signal that there is no inlined
   // patchable code. Mips does not need the nop, since our marker
@@ -3284,6 +3285,22 @@ void LCodeGen::DoLoadKeyedFixedArray(LLoadKeyed* instr) {
       __ LoadRoot(scratch, Heap::kTheHoleValueRootIndex);
       DeoptimizeIf(eq, instr, Deoptimizer::kHole, result, Operand(scratch));
     }
+  } else if (instr->hydrogen()->hole_mode() == CONVERT_HOLE_TO_UNDEFINED) {
+    DCHECK(instr->hydrogen()->elements_kind() == FAST_HOLEY_ELEMENTS);
+    Label done;
+    __ LoadRoot(scratch, Heap::kTheHoleValueRootIndex);
+    __ Branch(&done, ne, result, Operand(scratch));
+    if (info()->IsStub()) {
+      // A stub can safely convert the hole to undefined only if the array
+      // protector cell contains (Smi) Isolate::kArrayProtectorValid. Otherwise
+      // it needs to bail out.
+      __ LoadRoot(result, Heap::kArrayProtectorRootIndex);
+      __ lw(result, FieldMemOperand(result, Cell::kValueOffset));
+      DeoptimizeIf(ne, instr, Deoptimizer::kHole, result,
+                   Operand(Smi::FromInt(Isolate::kArrayProtectorValid)));
+    }
+    __ LoadRoot(result, Heap::kUndefinedValueRootIndex);
+    __ bind(&done);
   }
 }
 
@@ -5148,6 +5165,22 @@ void LCodeGen::DoCheckNonSmi(LCheckNonSmi* instr) {
     __ SmiTst(ToRegister(input), at);
     DeoptimizeIf(eq, instr, Deoptimizer::kSmi, at, Operand(zero_reg));
   }
+}
+
+
+void LCodeGen::DoCheckArrayBufferNotNeutered(
+    LCheckArrayBufferNotNeutered* instr) {
+  Register view = ToRegister(instr->view());
+  Register scratch = scratch0();
+
+  Label has_no_buffer;
+  __ lw(scratch, FieldMemOperand(view, JSArrayBufferView::kBufferOffset));
+  __ JumpIfSmi(scratch, &has_no_buffer);
+  __ lw(scratch, FieldMemOperand(scratch, JSArrayBuffer::kBitFieldOffset));
+  __ And(at, scratch, 1 << JSArrayBuffer::WasNeutered::kShift);
+  DeoptimizeIf(ne, instr, Deoptimizer::kOutOfBounds, at, Operand(zero_reg));
+
+  __ bind(&has_no_buffer);
 }
 
 

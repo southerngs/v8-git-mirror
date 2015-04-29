@@ -70,6 +70,7 @@ class LChunkBuilder;
   V(CallStub)                                 \
   V(CapturedObject)                           \
   V(Change)                                   \
+  V(CheckArrayBufferNotNeutered)              \
   V(CheckHeapObject)                          \
   V(CheckInstanceType)                        \
   V(CheckMaps)                                \
@@ -2948,6 +2949,36 @@ class HCheckSmi final : public HUnaryOperation {
   explicit HCheckSmi(HValue* value) : HUnaryOperation(value, HType::Smi()) {
     set_representation(Representation::Smi());
     SetFlag(kUseGVN);
+  }
+};
+
+
+class HCheckArrayBufferNotNeutered final : public HUnaryOperation {
+ public:
+  DECLARE_INSTRUCTION_FACTORY_P1(HCheckArrayBufferNotNeutered, HValue*);
+
+  bool HasEscapingOperandAt(int index) override { return false; }
+  Representation RequiredInputRepresentation(int index) override {
+    return Representation::Tagged();
+  }
+
+  HType CalculateInferredType() override {
+    if (value()->type().IsHeapObject()) return value()->type();
+    return HType::HeapObject();
+  }
+
+  DECLARE_CONCRETE_INSTRUCTION(CheckArrayBufferNotNeutered)
+
+ protected:
+  bool DataEquals(HValue* other) override { return true; }
+  int RedefinedOperandIndex() override { return 0; }
+
+ private:
+  explicit HCheckArrayBufferNotNeutered(HValue* value)
+      : HUnaryOperation(value) {
+    set_representation(Representation::Tagged());
+    SetFlag(kUseGVN);
+    SetDependsOnFlag(kCalls);
   }
 };
 
@@ -6097,19 +6128,14 @@ class HObjectAccess final {
         JSArrayBuffer::kByteLengthOffset, Representation::Tagged());
   }
 
+  static HObjectAccess ForJSArrayBufferBitField() {
+    return HObjectAccess::ForObservableJSObjectOffset(
+        JSArrayBuffer::kBitFieldOffset, Representation::Integer32());
+  }
+
   static HObjectAccess ForExternalArrayExternalPointer() {
     return HObjectAccess::ForObservableJSObjectOffset(
         ExternalArray::kExternalPointerOffset, Representation::External());
-  }
-
-  static HObjectAccess ForJSArrayBufferViewWeakNext() {
-    return HObjectAccess::ForObservableJSObjectOffset(
-        JSArrayBufferView::kWeakNextOffset);
-  }
-
-  static HObjectAccess ForJSArrayBufferWeakFirstView() {
-    return HObjectAccess::ForObservableJSObjectOffset(
-        JSArrayBuffer::kWeakFirstViewOffset);
   }
 
   static HObjectAccess ForJSArrayBufferViewBuffer() {
@@ -6461,7 +6487,8 @@ static const int kDefaultKeyedHeaderOffsetSentinel = -1;
 
 enum LoadKeyedHoleMode {
   NEVER_RETURN_HOLE,
-  ALLOW_RETURN_HOLE
+  ALLOW_RETURN_HOLE,
+  CONVERT_HOLE_TO_UNDEFINED
 };
 
 
@@ -6548,9 +6575,7 @@ class HLoadKeyed final : public HTemplateInstruction<3>,
   }
 
  private:
-  HLoadKeyed(HValue* obj,
-             HValue* key,
-             HValue* dependency,
+  HLoadKeyed(HValue* obj, HValue* key, HValue* dependency,
              ElementsKind elements_kind,
              LoadKeyedHoleMode mode = NEVER_RETURN_HOLE,
              int offset = kDefaultKeyedHeaderOffsetSentinel)
@@ -6620,8 +6645,8 @@ class HLoadKeyed final : public HTemplateInstruction<3>,
   // Establish some checks around our packed fields
   enum LoadKeyedBits {
     kBitsForElementsKind = 5,
-    kBitsForHoleMode = 1,
-    kBitsForBaseOffset = 25,
+    kBitsForHoleMode = 2,
+    kBitsForBaseOffset = 24,
     kBitsForIsDehoisted = 1,
 
     kStartElementsKind = 0,

@@ -6,6 +6,7 @@
 #define V8_HEAP_HEAP_H_
 
 #include <cmath>
+#include <map>
 
 #include "src/allocation.h"
 #include "src/assert-scope.h"
@@ -185,7 +186,9 @@ namespace internal {
   V(FixedArray, keyed_load_dummy_vector, KeyedLoadDummyVector)                 \
   V(FixedArray, detached_contexts, DetachedContexts)                           \
   V(ArrayList, retained_maps, RetainedMaps)                                    \
-  V(WeakHashTable, weak_object_to_code_table, WeakObjectToCodeTable)
+  V(WeakHashTable, weak_object_to_code_table, WeakObjectToCodeTable)           \
+  V(PropertyCell, array_protector, ArrayProtector)                             \
+  V(Object, weak_stack_trace_list, WeakStackTraceList)
 
 // Entries in this list are limited to Smis and are not visited during GC.
 #define SMI_ROOT_LIST(V)                                                   \
@@ -260,7 +263,7 @@ namespace internal {
   V(toJSON_string, "toJSON")                                   \
   V(KeyedLoadMonomorphic_string, "KeyedLoadMonomorphic")       \
   V(KeyedStoreMonomorphic_string, "KeyedStoreMonomorphic")     \
-  V(stack_overflow_string, "kStackOverflowBoilerplate")        \
+  V(stack_overflow_string, "$stackOverflowBoilerplate")        \
   V(illegal_access_string, "illegal access")                   \
   V(cell_value_string, "%cell_value")                          \
   V(illegal_argument_string, "illegal argument")               \
@@ -776,6 +779,7 @@ class Heap {
   static const int kNoGCFlags = 0;
   static const int kReduceMemoryFootprintMask = 1;
   static const int kAbortIncrementalMarkingMask = 2;
+  static const int kFinalizeIncrementalMarkingMask = 4;
 
   // Making the heap iterable requires us to abort incremental marking.
   static const int kMakeHeapIterableMask = kAbortIncrementalMarkingMask;
@@ -793,7 +797,7 @@ class Heap {
   // non-zero, then the slower precise sweeper is used, which leaves the heap
   // in a state where we can iterate over the heap visiting all objects.
   void CollectAllGarbage(
-      int flags, const char* gc_reason = NULL,
+      int flags = kFinalizeIncrementalMarkingMask, const char* gc_reason = NULL,
       const GCCallbackFlags gc_callback_flags = kNoGCCallbackFlags);
 
   // Last hope GC, should try to squeeze as much as possible.
@@ -870,23 +874,6 @@ class Heap {
     native_contexts_list_ = object;
   }
   Object* native_contexts_list() const { return native_contexts_list_; }
-
-  void set_array_buffers_list(Object* object) { array_buffers_list_ = object; }
-  Object* array_buffers_list() const { return array_buffers_list_; }
-
-  void set_last_array_buffer_in_list(Object* object) {
-    last_array_buffer_in_list_ = object;
-  }
-  Object* last_array_buffer_in_list() const {
-    return last_array_buffer_in_list_;
-  }
-
-  void set_new_array_buffer_views_list(Object* object) {
-    new_array_buffer_views_list_ = object;
-  }
-  Object* new_array_buffer_views_list() const {
-    return new_array_buffer_views_list_;
-  }
 
   void set_allocation_sites_list(Object* object) {
     allocation_sites_list_ = object;
@@ -1494,17 +1481,10 @@ class Heap {
 
   bool deserialization_complete() const { return deserialization_complete_; }
 
-  bool migration_failure() const { return migration_failure_; }
-  void set_migration_failure(bool migration_failure) {
-    migration_failure_ = migration_failure;
-  }
-
-  bool previous_migration_failure() const {
-    return previous_migration_failure_;
-  }
-  void set_previous_migration_failure(bool previous_migration_failure) {
-    previous_migration_failure_ = previous_migration_failure;
-  }
+  void RegisterNewArrayBuffer(void* data, size_t length);
+  void UnregisterArrayBuffer(void* data);
+  void RegisterLiveArrayBuffer(void* data);
+  void FreeDeadArrayBuffers();
 
  protected:
   // Methods made available to tests.
@@ -1676,14 +1656,7 @@ class Heap {
   // Weak list heads, threaded through the objects.
   // List heads are initialized lazily and contain the undefined_value at start.
   Object* native_contexts_list_;
-  Object* array_buffers_list_;
-  Object* last_array_buffer_in_list_;
   Object* allocation_sites_list_;
-
-  // This is a global list of array buffer views in new space. When the views
-  // get promoted, they are removed form the list and added to the corresponding
-  // array buffer.
-  Object* new_array_buffer_views_list_;
 
   // List of encountered weak collections (JSWeakMap and JSWeakSet) during
   // marking. It is initialized during marking, destroyed after marking and
@@ -1763,6 +1736,8 @@ class Heap {
   // reporting/verification activities when compiled with DEBUG set.
   void GarbageCollectionPrologue();
   void GarbageCollectionEpilogue();
+
+  void PreprocessStackTraces();
 
   // Pretenuring decisions are made based on feedback collected during new
   // space evacuation. Note that between feedback collection and calling this
@@ -2014,8 +1989,6 @@ class Heap {
   void MarkCompactEpilogue();
 
   void ProcessNativeContexts(WeakObjectRetainer* retainer);
-  void ProcessArrayBuffers(WeakObjectRetainer* retainer, bool stop_after_young);
-  void ProcessNewArrayBufferViews(WeakObjectRetainer* retainer);
   void ProcessAllocationSites(WeakObjectRetainer* retainer);
 
   // Deopts all code that contains allocation instruction which are tenured or
@@ -2089,11 +2062,11 @@ class Heap {
 
   void SelectScavengingVisitorsTable();
 
-  void IdleMarkCompact(const char* message);
+  void ReduceNewSpaceSize(bool is_long_idle_notification);
 
   bool TryFinalizeIdleIncrementalMarking(
-      double idle_time_in_ms, size_t size_of_objects,
-      size_t mark_compact_speed_in_bytes_per_ms);
+      bool is_long_idle_notification, double idle_time_in_ms,
+      size_t size_of_objects, size_t mark_compact_speed_in_bytes_per_ms);
 
   void ClearObjectStats(bool clear_last_time_stats = false);
 
@@ -2137,6 +2110,7 @@ class Heap {
   IncrementalMarking incremental_marking_;
 
   GCIdleTimeHandler gc_idle_time_handler_;
+
   unsigned int gc_count_at_last_idle_gc_;
 
   // These two counters are monotomically increasing and never reset.
@@ -2175,12 +2149,8 @@ class Heap {
 
   bool concurrent_sweeping_enabled_;
 
-  // A migration failure indicates that a semi-space copy of an object during
-  // a scavenge failed and the object got promoted instead.
-  bool migration_failure_;
-
-  // A migration failure happened in the previous scavenge.
-  bool previous_migration_failure_;
+  std::map<void*, size_t> live_array_buffers_;
+  std::map<void*, size_t> not_yet_discovered_array_buffers_;
 
   friend class AlwaysAllocateScope;
   friend class Deserializer;

@@ -24,7 +24,6 @@
 #include "src/heap/objects-visiting.h"
 #include "src/heap/store-buffer.h"
 #include "src/heap-profiler.h"
-#include "src/isolate-inl.h"
 #include "src/runtime-profiler.h"
 #include "src/scopeinfo.h"
 #include "src/snapshot/natives.h"
@@ -142,9 +141,7 @@ Heap::Heap()
       chunks_queued_for_free_(NULL),
       gc_callbacks_depth_(0),
       deserialization_complete_(false),
-      concurrent_sweeping_enabled_(false),
-      migration_failure_(false),
-      previous_migration_failure_(false) {
+      concurrent_sweeping_enabled_(false) {
 // Allow build-time customization of the max semispace size. Building
 // V8 with snapshots and a non-default max semispace size is much
 // easier if you can define it as part of the build environment.
@@ -157,8 +154,6 @@ Heap::Heap()
 
   memset(roots_, 0, sizeof(roots_[0]) * kRootListLength);
   set_native_contexts_list(NULL);
-  set_array_buffers_list(Smi::FromInt(0));
-  set_last_array_buffer_in_list(Smi::FromInt(0));
   set_allocation_sites_list(Smi::FromInt(0));
   set_encountered_weak_collections(Smi::FromInt(0));
   set_encountered_weak_cells(Smi::FromInt(0));
@@ -322,56 +317,58 @@ void Heap::ReportStatisticsBeforeGC() {
 
 void Heap::PrintShortHeapStatistics() {
   if (!FLAG_trace_gc_verbose) return;
-  PrintPID("Memory allocator,   used: %6" V8_PTR_PREFIX
-           "d KB"
-           ", available: %6" V8_PTR_PREFIX "d KB\n",
-           isolate_->memory_allocator()->Size() / KB,
-           isolate_->memory_allocator()->Available() / KB);
-  PrintPID("New space,          used: %6" V8_PTR_PREFIX
-           "d KB"
-           ", available: %6" V8_PTR_PREFIX
-           "d KB"
-           ", committed: %6" V8_PTR_PREFIX "d KB\n",
-           new_space_.Size() / KB, new_space_.Available() / KB,
-           new_space_.CommittedMemory() / KB);
-  PrintPID("Old space,       used: %6" V8_PTR_PREFIX
-           "d KB"
-           ", available: %6" V8_PTR_PREFIX
-           "d KB"
-           ", committed: %6" V8_PTR_PREFIX "d KB\n",
-           old_space_->SizeOfObjects() / KB, old_space_->Available() / KB,
-           old_space_->CommittedMemory() / KB);
-  PrintPID("Code space,         used: %6" V8_PTR_PREFIX
-           "d KB"
-           ", available: %6" V8_PTR_PREFIX
-           "d KB"
-           ", committed: %6" V8_PTR_PREFIX "d KB\n",
-           code_space_->SizeOfObjects() / KB, code_space_->Available() / KB,
-           code_space_->CommittedMemory() / KB);
-  PrintPID("Map space,          used: %6" V8_PTR_PREFIX
-           "d KB"
-           ", available: %6" V8_PTR_PREFIX
-           "d KB"
-           ", committed: %6" V8_PTR_PREFIX "d KB\n",
-           map_space_->SizeOfObjects() / KB, map_space_->Available() / KB,
-           map_space_->CommittedMemory() / KB);
-  PrintPID("Large object space, used: %6" V8_PTR_PREFIX
-           "d KB"
-           ", available: %6" V8_PTR_PREFIX
-           "d KB"
-           ", committed: %6" V8_PTR_PREFIX "d KB\n",
-           lo_space_->SizeOfObjects() / KB, lo_space_->Available() / KB,
-           lo_space_->CommittedMemory() / KB);
-  PrintPID("All spaces,         used: %6" V8_PTR_PREFIX
-           "d KB"
-           ", available: %6" V8_PTR_PREFIX
-           "d KB"
-           ", committed: %6" V8_PTR_PREFIX "d KB\n",
-           this->SizeOfObjects() / KB, this->Available() / KB,
-           this->CommittedMemory() / KB);
-  PrintPID("External memory reported: %6" V8_PTR_PREFIX "d KB\n",
-           static_cast<intptr_t>(amount_of_external_allocated_memory_ / KB));
-  PrintPID("Total time spent in GC  : %.1f ms\n", total_gc_time_ms_);
+  PrintIsolate(isolate_, "Memory allocator,   used: %6" V8_PTR_PREFIX
+                         "d KB"
+                         ", available: %6" V8_PTR_PREFIX "d KB\n",
+               isolate_->memory_allocator()->Size() / KB,
+               isolate_->memory_allocator()->Available() / KB);
+  PrintIsolate(isolate_, "New space,          used: %6" V8_PTR_PREFIX
+                         "d KB"
+                         ", available: %6" V8_PTR_PREFIX
+                         "d KB"
+                         ", committed: %6" V8_PTR_PREFIX "d KB\n",
+               new_space_.Size() / KB, new_space_.Available() / KB,
+               new_space_.CommittedMemory() / KB);
+  PrintIsolate(isolate_, "Old space,       used: %6" V8_PTR_PREFIX
+                         "d KB"
+                         ", available: %6" V8_PTR_PREFIX
+                         "d KB"
+                         ", committed: %6" V8_PTR_PREFIX "d KB\n",
+               old_space_->SizeOfObjects() / KB, old_space_->Available() / KB,
+               old_space_->CommittedMemory() / KB);
+  PrintIsolate(isolate_, "Code space,         used: %6" V8_PTR_PREFIX
+                         "d KB"
+                         ", available: %6" V8_PTR_PREFIX
+                         "d KB"
+                         ", committed: %6" V8_PTR_PREFIX "d KB\n",
+               code_space_->SizeOfObjects() / KB, code_space_->Available() / KB,
+               code_space_->CommittedMemory() / KB);
+  PrintIsolate(isolate_, "Map space,          used: %6" V8_PTR_PREFIX
+                         "d KB"
+                         ", available: %6" V8_PTR_PREFIX
+                         "d KB"
+                         ", committed: %6" V8_PTR_PREFIX "d KB\n",
+               map_space_->SizeOfObjects() / KB, map_space_->Available() / KB,
+               map_space_->CommittedMemory() / KB);
+  PrintIsolate(isolate_, "Large object space, used: %6" V8_PTR_PREFIX
+                         "d KB"
+                         ", available: %6" V8_PTR_PREFIX
+                         "d KB"
+                         ", committed: %6" V8_PTR_PREFIX "d KB\n",
+               lo_space_->SizeOfObjects() / KB, lo_space_->Available() / KB,
+               lo_space_->CommittedMemory() / KB);
+  PrintIsolate(isolate_, "All spaces,         used: %6" V8_PTR_PREFIX
+                         "d KB"
+                         ", available: %6" V8_PTR_PREFIX
+                         "d KB"
+                         ", committed: %6" V8_PTR_PREFIX "d KB\n",
+               this->SizeOfObjects() / KB, this->Available() / KB,
+               this->CommittedMemory() / KB);
+  PrintIsolate(
+      isolate_, "External memory reported: %6" V8_PTR_PREFIX "d KB\n",
+      static_cast<intptr_t>(amount_of_external_allocated_memory_ / KB));
+  PrintIsolate(isolate_, "Total time spent in GC  : %.1f ms\n",
+               total_gc_time_ms_);
 }
 
 
@@ -706,13 +703,32 @@ void Heap::GarbageCollectionEpilogue() {
   // Remember the last top pointer so that we can later find out
   // whether we allocated in new space since the last GC.
   new_space_top_after_last_gc_ = new_space()->top();
+}
 
-  if (migration_failure_) {
-    set_previous_migration_failure(true);
-  } else {
-    set_previous_migration_failure(false);
+
+void Heap::PreprocessStackTraces() {
+  if (!weak_stack_trace_list()->IsWeakFixedArray()) return;
+  WeakFixedArray* array = WeakFixedArray::cast(weak_stack_trace_list());
+  int length = array->Length();
+  for (int i = 0; i < length; i++) {
+    if (array->IsEmptySlot(i)) continue;
+    FixedArray* elements = FixedArray::cast(array->Get(i));
+    for (int j = 1; j < elements->length(); j += 4) {
+      Object* maybe_code = elements->get(j + 2);
+      // If GC happens while adding a stack trace to the weak fixed array,
+      // which has been copied into a larger backing store, we may run into
+      // a stack trace that has already been preprocessed. Guard against this.
+      if (!maybe_code->IsCode()) break;
+      Code* code = Code::cast(maybe_code);
+      int offset = Smi::cast(elements->get(j + 3))->value();
+      Address pc = code->address() + offset;
+      int pos = code->SourcePosition(pc);
+      elements->set(j + 2, Smi::FromInt(pos));
+    }
   }
-  set_migration_failure(false);
+  // We must not compact the weak fixed list here, as we may be in the middle
+  // of writing to it, when the GC triggered. Instead, we reset the root value.
+  set_weak_stack_trace_list(Smi::FromInt(0));
 }
 
 
@@ -852,6 +868,7 @@ bool Heap::CollectGarbage(GarbageCollector collector, const char* gc_reason,
   }
 
   if (collector == MARK_COMPACTOR &&
+      !mark_compact_collector()->finalize_incremental_marking() &&
       !mark_compact_collector()->abort_incremental_marking() &&
       !incremental_marking()->IsStopped() &&
       !incremental_marking()->should_hurry() &&
@@ -1281,6 +1298,8 @@ void Heap::MarkCompactEpilogue() {
   isolate_->counters()->objs_since_last_full()->Set(0);
 
   incremental_marking()->Epilogue();
+
+  PreprocessStackTraces();
 }
 
 
@@ -1686,81 +1705,67 @@ void Heap::UpdateReferencesInExternalStringTable(
 
 
 void Heap::ProcessAllWeakReferences(WeakObjectRetainer* retainer) {
-  ProcessArrayBuffers(retainer, false);
-  ProcessNewArrayBufferViews(retainer);
   ProcessNativeContexts(retainer);
   ProcessAllocationSites(retainer);
 }
 
 
 void Heap::ProcessYoungWeakReferences(WeakObjectRetainer* retainer) {
-  ProcessArrayBuffers(retainer, true);
-  ProcessNewArrayBufferViews(retainer);
   ProcessNativeContexts(retainer);
 }
 
 
 void Heap::ProcessNativeContexts(WeakObjectRetainer* retainer) {
-  Object* head = VisitWeakList<Context>(this, native_contexts_list(), retainer,
-                                        false, NULL);
+  Object* head = VisitWeakList<Context>(this, native_contexts_list(), retainer);
   // Update the head of the list of contexts.
   set_native_contexts_list(head);
 }
 
 
-void Heap::ProcessArrayBuffers(WeakObjectRetainer* retainer,
-                               bool stop_after_young) {
-  Object* last_array_buffer = undefined_value();
-  Object* array_buffer_obj =
-      VisitWeakList<JSArrayBuffer>(this, array_buffers_list(), retainer,
-                                   stop_after_young, &last_array_buffer);
-  set_array_buffers_list(array_buffer_obj);
-  set_last_array_buffer_in_list(last_array_buffer);
-
-  // Verify invariant that young array buffers come before old array buffers
-  // in array buffers list if there was no promotion failure.
-  Object* undefined = undefined_value();
-  Object* next = array_buffers_list();
-  bool old_objects_recorded = false;
-  if (migration_failure()) return;
-  while (next != undefined) {
-    if (!old_objects_recorded) {
-      old_objects_recorded = !InNewSpace(next);
-    }
-    CHECK((InNewSpace(next) && !old_objects_recorded) || !InNewSpace(next));
-    next = JSArrayBuffer::cast(next)->weak_next();
-  }
+void Heap::RegisterNewArrayBuffer(void* data, size_t length) {
+  live_array_buffers_[data] = length;
+  reinterpret_cast<v8::Isolate*>(isolate_)
+      ->AdjustAmountOfExternalAllocatedMemory(length);
 }
 
 
-void Heap::ProcessNewArrayBufferViews(WeakObjectRetainer* retainer) {
-  // Retain the list of new space views.
-  Object* typed_array_obj = VisitWeakList<JSArrayBufferView>(
-      this, new_array_buffer_views_list_, retainer, false, NULL);
-  set_new_array_buffer_views_list(typed_array_obj);
+void Heap::UnregisterArrayBuffer(void* data) {
+  DCHECK(live_array_buffers_.count(data) > 0);
+  live_array_buffers_.erase(data);
+  not_yet_discovered_array_buffers_.erase(data);
+}
 
-  // Some objects in the list may be in old space now. Find them
-  // and move them to the corresponding array buffer.
-  Object* view = VisitNewArrayBufferViewsWeakList(
-      this, new_array_buffer_views_list_, retainer);
-  set_new_array_buffer_views_list(view);
+
+void Heap::RegisterLiveArrayBuffer(void* data) {
+  not_yet_discovered_array_buffers_.erase(data);
+}
+
+
+void Heap::FreeDeadArrayBuffers() {
+  for (auto buffer = not_yet_discovered_array_buffers_.begin();
+       buffer != not_yet_discovered_array_buffers_.end(); ++buffer) {
+    isolate_->array_buffer_allocator()->Free(buffer->first, buffer->second);
+    // Don't use the API method here since this could trigger another GC.
+    amount_of_external_allocated_memory_ -= buffer->second;
+    live_array_buffers_.erase(buffer->first);
+  }
+  not_yet_discovered_array_buffers_ = live_array_buffers_;
 }
 
 
 void Heap::TearDownArrayBuffers() {
-  Object* undefined = undefined_value();
-  for (Object* o = array_buffers_list(); o != undefined;) {
-    JSArrayBuffer* buffer = JSArrayBuffer::cast(o);
-    Runtime::FreeArrayBuffer(isolate(), buffer);
-    o = buffer->weak_next();
+  for (auto buffer = live_array_buffers_.begin();
+       buffer != live_array_buffers_.end(); ++buffer) {
+    isolate_->array_buffer_allocator()->Free(buffer->first, buffer->second);
   }
-  set_array_buffers_list(undefined);
+  live_array_buffers_.clear();
+  not_yet_discovered_array_buffers_.clear();
 }
 
 
 void Heap::ProcessAllocationSites(WeakObjectRetainer* retainer) {
-  Object* allocation_site_obj = VisitWeakList<AllocationSite>(
-      this, allocation_sites_list(), retainer, false, NULL);
+  Object* allocation_site_obj =
+      VisitWeakList<AllocationSite>(this, allocation_sites_list(), retainer);
   set_allocation_sites_list(allocation_site_obj);
 }
 
@@ -2178,7 +2183,6 @@ class ScavengingVisitor : public StaticVisitorBase {
       if (SemiSpaceCopyObject<alignment>(map, slot, object, object_size)) {
         return;
       }
-      heap->set_migration_failure(true);
     }
 
     if (PromoteObject<object_contents, alignment>(map, slot, object,
@@ -3096,7 +3100,7 @@ void Heap::CreateInitialObjects() {
                           TENURED));
 
   Handle<SeededNumberDictionary> slow_element_dictionary =
-      SeededNumberDictionary::New(isolate(), 0, TENURED);
+      SeededNumberDictionary::New(isolate(), 1, TENURED);
   slow_element_dictionary->set_requires_slow_elements();
   set_empty_slow_element_dictionary(*slow_element_dictionary);
 
@@ -3104,6 +3108,12 @@ void Heap::CreateInitialObjects() {
 
   // Handling of script id generation is in Factory::NewScript.
   set_last_script_id(Smi::FromInt(v8::UnboundScript::kNoScriptId));
+
+  Handle<PropertyCell> cell = factory->NewPropertyCell();
+  cell->set_value(Smi::FromInt(Isolate::kArrayProtectorValid));
+  set_array_protector(*cell);
+
+  set_weak_stack_trace_list(Smi::FromInt(0));
 
   set_allocation_sites_scratchpad(
       *factory->NewFixedArray(kAllocationSiteScratchpadSize, TENURED));
@@ -3141,6 +3151,7 @@ bool Heap::RootCanBeWrittenAfterInitialization(Heap::RootListIndex root_index) {
     case kDetachedContextsRootIndex:
     case kWeakObjectToCodeTableRootIndex:
     case kRetainedMapsRootIndex:
+    case kWeakStackTraceListRootIndex:
 // Smi values
 #define SMI_ENTRY(type, name, Name) case k##Name##RootIndex:
       SMI_ROOT_LIST(SMI_ENTRY)
@@ -4527,17 +4538,8 @@ void Heap::MakeHeapIterable() {
 }
 
 
-void Heap::IdleMarkCompact(const char* message) {
-  bool uncommit = false;
-  if (gc_count_at_last_idle_gc_ == gc_count_) {
-    // No GC since the last full GC, the mutator is probably not active.
-    isolate_->compilation_cache()->Clear();
-    uncommit = true;
-  }
-  CollectAllGarbage(kReduceMemoryFootprintMask, message);
-  gc_idle_time_handler_.NotifyIdleMarkCompact();
-  gc_count_at_last_idle_gc_ = gc_count_;
-  if (uncommit) {
+void Heap::ReduceNewSpaceSize(bool is_long_idle_notification) {
+  if (is_long_idle_notification) {
     new_space_.Shrink();
     UncommitFromSpace();
   }
@@ -4545,7 +4547,8 @@ void Heap::IdleMarkCompact(const char* message) {
 
 
 bool Heap::TryFinalizeIdleIncrementalMarking(
-    double idle_time_in_ms, size_t size_of_objects,
+    bool is_long_idle_notification, double idle_time_in_ms,
+    size_t size_of_objects,
     size_t final_incremental_mark_compact_speed_in_bytes_per_ms) {
   if (FLAG_overapproximate_weak_closure &&
       (incremental_marking()->IsReadyToOverApproximateWeakClosure() ||
@@ -4562,6 +4565,7 @@ bool Heap::TryFinalizeIdleIncrementalMarking(
                   static_cast<size_t>(idle_time_in_ms), size_of_objects,
                   final_incremental_mark_compact_speed_in_bytes_per_ms))) {
     CollectAllGarbage(kNoGCFlags, "idle notification: finalize incremental");
+    ReduceNewSpaceSize(is_long_idle_notification);
     return true;
   }
   return false;
@@ -4590,6 +4594,9 @@ bool Heap::IdleNotification(double deadline_in_seconds) {
   HistogramTimerScope idle_notification_scope(
       isolate_->counters()->gc_idle_notification());
   double idle_time_in_ms = deadline_in_ms - MonotonicallyIncreasingTimeInMs();
+  bool is_long_idle_notification =
+      static_cast<size_t>(idle_time_in_ms) >
+      GCIdleTimeHandler::kMaxFrameRenderingIdleTime;
 
   GCIdleTimeHandler::HeapState heap_state;
   heap_state.contexts_disposed = contexts_disposed_;
@@ -4599,8 +4606,7 @@ bool Heap::IdleNotification(double deadline_in_seconds) {
   heap_state.incremental_marking_stopped = incremental_marking()->IsStopped();
   // TODO(ulan): Start incremental marking only for large heaps.
   intptr_t limit = old_generation_allocation_limit_;
-  if (static_cast<size_t>(idle_time_in_ms) >
-      GCIdleTimeHandler::kMaxFrameRenderingIdleTime) {
+  if (is_long_idle_notification) {
     limit = idle_old_generation_allocation_limit_;
   }
 
@@ -4655,24 +4661,31 @@ bool Heap::IdleNotification(double deadline_in_seconds) {
                !mark_compact_collector_.marking_deque()->IsEmpty());
       if (remaining_idle_time_in_ms > 0.0) {
         action.additional_work = TryFinalizeIdleIncrementalMarking(
-            remaining_idle_time_in_ms, heap_state.size_of_objects,
+            is_long_idle_notification, remaining_idle_time_in_ms,
+            heap_state.size_of_objects,
             heap_state.final_incremental_mark_compact_speed_in_bytes_per_ms);
       }
       break;
     }
     case DO_FULL_GC: {
+      if (is_long_idle_notification && gc_count_at_last_idle_gc_ == gc_count_) {
+        isolate_->compilation_cache()->Clear();
+      }
       if (contexts_disposed_) {
         HistogramTimerScope scope(isolate_->counters()->gc_context());
         CollectAllGarbage(kNoGCFlags, "idle notification: contexts disposed");
-        gc_idle_time_handler_.NotifyIdleMarkCompact();
-        gc_count_at_last_idle_gc_ = gc_count_;
       } else {
-        IdleMarkCompact("idle notification: finalize idle round");
+        CollectAllGarbage(kReduceMemoryFootprintMask,
+                          "idle notification: finalize idle round");
       }
+      gc_count_at_last_idle_gc_ = gc_count_;
+      ReduceNewSpaceSize(is_long_idle_notification);
+      gc_idle_time_handler_.NotifyIdleMarkCompact();
       break;
     }
     case DO_SCAVENGE:
       CollectGarbage(NEW_SPACE, "idle notification: scavenge");
+      ReduceNewSpaceSize(is_long_idle_notification);
       break;
     case DO_FINALIZE_SWEEPING:
       mark_compact_collector()->EnsureSweepingCompleted();
@@ -4697,7 +4710,7 @@ bool Heap::IdleNotification(double deadline_in_seconds) {
 
   if ((FLAG_trace_idle_notification && action.type > DO_NOTHING) ||
       FLAG_trace_idle_notification_verbose) {
-    PrintPID("%8.0f ms: ", isolate()->time_millis_since_init());
+    PrintIsolate(isolate_, "%8.0f ms: ", isolate()->time_millis_since_init());
     PrintF(
         "Idle notification: requested idle time %.2f ms, used idle time %.2f "
         "ms, deadline usage %.2f ms [",
@@ -5069,8 +5082,9 @@ bool Heap::ConfigureHeap(int max_semi_space_size, int max_old_space_size,
     if (max_semi_space_size_ > reserved_semispace_size_) {
       max_semi_space_size_ = reserved_semispace_size_;
       if (FLAG_trace_gc) {
-        PrintPID("Max semi-space size cannot be more than %d kbytes\n",
-                 reserved_semispace_size_ >> 10);
+        PrintIsolate(isolate_,
+                     "Max semi-space size cannot be more than %d kbytes\n",
+                     reserved_semispace_size_ >> 10);
       }
     }
   } else {
@@ -5097,10 +5111,10 @@ bool Heap::ConfigureHeap(int max_semi_space_size, int max_old_space_size,
     if (initial_semispace_size > max_semi_space_size_) {
       initial_semispace_size_ = max_semi_space_size_;
       if (FLAG_trace_gc) {
-        PrintPID(
-            "Min semi-space size cannot be more than the maximum "
-            "semi-space size of %d MB\n",
-            max_semi_space_size_ / MB);
+        PrintIsolate(isolate_,
+                     "Min semi-space size cannot be more than the maximum "
+                     "semi-space size of %d MB\n",
+                     max_semi_space_size_ / MB);
       }
     } else {
       initial_semispace_size_ = initial_semispace_size;
@@ -5114,18 +5128,18 @@ bool Heap::ConfigureHeap(int max_semi_space_size, int max_old_space_size,
     if (target_semispace_size < initial_semispace_size_) {
       target_semispace_size_ = initial_semispace_size_;
       if (FLAG_trace_gc) {
-        PrintPID(
-            "Target semi-space size cannot be less than the minimum "
-            "semi-space size of %d MB\n",
-            initial_semispace_size_ / MB);
+        PrintIsolate(isolate_,
+                     "Target semi-space size cannot be less than the minimum "
+                     "semi-space size of %d MB\n",
+                     initial_semispace_size_ / MB);
       }
     } else if (target_semispace_size > max_semi_space_size_) {
       target_semispace_size_ = max_semi_space_size_;
       if (FLAG_trace_gc) {
-        PrintPID(
-            "Target semi-space size cannot be less than the maximum "
-            "semi-space size of %d MB\n",
-            max_semi_space_size_ / MB);
+        PrintIsolate(isolate_,
+                     "Target semi-space size cannot be less than the maximum "
+                     "semi-space size of %d MB\n",
+                     max_semi_space_size_ / MB);
       }
     } else {
       target_semispace_size_ = target_semispace_size;
@@ -5397,9 +5411,6 @@ bool Heap::CreateHeapObjects() {
   CHECK_EQ(0u, gc_count_);
 
   set_native_contexts_list(undefined_value());
-  set_array_buffers_list(undefined_value());
-  set_last_array_buffer_in_list(undefined_value());
-  set_new_array_buffer_views_list(undefined_value());
   set_allocation_sites_list(undefined_value());
   return true;
 }
@@ -6309,8 +6320,9 @@ static base::LazyMutex object_stats_mutex = LAZY_MUTEX_INITIALIZER;
 
 
 void Heap::TraceObjectStat(const char* name, int count, int size, double time) {
-  PrintPID("heap:%p, time:%f, gc:%d, type:%s, count:%d, size:%d\n",
-           static_cast<void*>(this), time, ms_count_, name, count, size);
+  PrintIsolate(isolate_,
+               "heap:%p, time:%f, gc:%d, type:%s, count:%d, size:%d\n",
+               static_cast<void*>(this), time, ms_count_, name, count, size);
 }
 
 

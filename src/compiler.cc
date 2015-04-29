@@ -17,7 +17,6 @@
 #include "src/full-codegen.h"
 #include "src/gdb-jit.h"
 #include "src/hydrogen.h"
-#include "src/isolate-inl.h"
 #include "src/lithium.h"
 #include "src/liveedit.h"
 #include "src/messages.h"
@@ -116,6 +115,7 @@ CompilationInfo::CompilationInfo(ParseInfo* parse_info)
   if (isolate_->debug()->is_active()) MarkAsDebug();
   if (FLAG_context_specialization) MarkAsContextSpecializing();
   if (FLAG_turbo_builtin_inlining) MarkAsBuiltinInliningEnabled();
+  if (FLAG_turbo_deoptimization) MarkAsDeoptimizationEnabled();
   if (FLAG_turbo_inlining) MarkAsInliningEnabled();
   if (FLAG_turbo_splitting) MarkAsSplittingEnabled();
   if (FLAG_turbo_types) MarkAsTypingEnabled();
@@ -348,16 +348,12 @@ OptimizedCompileJob::Status OptimizedCompileJob::CreateGraph() {
     return AbortOptimization(kTooManyParametersLocals);
   }
 
-  if (scope->HasIllegalRedeclaration()) {
-    return AbortOptimization(kFunctionWithIllegalRedeclaration);
-  }
-
   // Check the whitelist for Crankshaft.
   if (!info()->closure()->PassesFilter(FLAG_hydrogen_filter)) {
     return AbortOptimization(kHydrogenFilter);
   }
 
-  // Crankshaft requires a version of fullcode with deoptimization support.
+  // Optimization requires a version of fullcode with deoptimization support.
   // Recompile the unoptimized version of the code if the current version
   // doesn't have deoptimization support already.
   // Otherwise, if we are gathering compilation time and space statistics
@@ -378,9 +374,10 @@ OptimizedCompileJob::Status OptimizedCompileJob::CreateGraph() {
 
   DCHECK(info()->shared_info()->has_deoptimization_support());
 
-  // Check the whitelist for TurboFan.
-  if ((FLAG_turbo_asm && info()->shared_info()->asm_function()) ||
-      info()->closure()->PassesFilter(FLAG_turbo_filter)) {
+  // Check the enabling conditions for TurboFan.
+  if (((FLAG_turbo_asm && info()->shared_info()->asm_function()) ||
+       info()->closure()->PassesFilter(FLAG_turbo_filter)) &&
+      (FLAG_turbo_osr || !info()->is_osr())) {
     if (FLAG_trace_opt) {
       OFStream os(stdout);
       os << "[compiling method " << Brief(*info()->closure())
@@ -393,18 +390,25 @@ OptimizedCompileJob::Status OptimizedCompileJob::CreateGraph() {
       info()->MarkAsContextSpecializing();
     } else if (FLAG_turbo_type_feedback) {
       info()->MarkAsTypeFeedbackEnabled();
+      info()->EnsureFeedbackVector();
     }
 
     Timer t(this, &time_taken_to_create_graph_);
     compiler::Pipeline pipeline(info());
     pipeline.GenerateCode();
     if (!info()->code().is_null()) {
+      info()->dependencies()->Commit(info()->code());
       return SetLastStatus(SUCCEEDED);
     }
   }
 
   // Do not use Crankshaft if the code is intended to be serialized.
   if (!isolate()->use_crankshaft()) return SetLastStatus(FAILED);
+
+  if (scope->HasIllegalRedeclaration()) {
+    // Crankshaft cannot handle illegal redeclarations.
+    return AbortOptimization(kFunctionWithIllegalRedeclaration);
+  }
 
   if (FLAG_trace_opt) {
     OFStream os(stdout);
@@ -1347,7 +1351,7 @@ Handle<SharedFunctionInfo> Compiler::BuildFunctionInfo(
 
   // Generate code
   Handle<ScopeInfo> scope_info;
-  if (FLAG_lazy && allow_lazy && !literal->is_parenthesized()) {
+  if (FLAG_lazy && allow_lazy && !literal->should_eager_compile()) {
     Handle<Code> code = isolate->builtins()->CompileLazy();
     info.SetCode(code);
     // There's no need in theory for a lazy-compiled function to have a type

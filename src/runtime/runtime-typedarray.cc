@@ -12,26 +12,6 @@
 namespace v8 {
 namespace internal {
 
-void Runtime::FreeArrayBuffer(Isolate* isolate,
-                              JSArrayBuffer* phantom_array_buffer) {
-  if (phantom_array_buffer->should_be_freed()) {
-    DCHECK(phantom_array_buffer->is_external());
-    free(phantom_array_buffer->backing_store());
-  }
-  if (phantom_array_buffer->is_external()) return;
-
-  size_t allocated_length =
-      NumberToSize(isolate, phantom_array_buffer->byte_length());
-
-  reinterpret_cast<v8::Isolate*>(isolate)
-      ->AdjustAmountOfExternalAllocatedMemory(
-          -static_cast<int64_t>(allocated_length));
-  CHECK(V8::ArrayBufferAllocator() != NULL);
-  V8::ArrayBufferAllocator()->Free(phantom_array_buffer->backing_store(),
-                                   allocated_length);
-}
-
-
 void Runtime::SetupArrayBuffer(Isolate* isolate,
                                Handle<JSArrayBuffer> array_buffer,
                                bool is_external, void* data,
@@ -42,7 +22,7 @@ void Runtime::SetupArrayBuffer(Isolate* isolate,
     array_buffer->SetInternalField(i, Smi::FromInt(0));
   }
   array_buffer->set_backing_store(data);
-  array_buffer->set_flag(Smi::FromInt(0));
+  array_buffer->set_bit_field(0);
   array_buffer->set_is_external(is_external);
   array_buffer->set_is_neuterable(true);
 
@@ -51,19 +31,9 @@ void Runtime::SetupArrayBuffer(Isolate* isolate,
   CHECK(byte_length->IsSmi() || byte_length->IsHeapNumber());
   array_buffer->set_byte_length(*byte_length);
 
-  if (isolate->heap()->InNewSpace(*array_buffer) ||
-      isolate->heap()->array_buffers_list()->IsUndefined()) {
-    array_buffer->set_weak_next(isolate->heap()->array_buffers_list());
-    isolate->heap()->set_array_buffers_list(*array_buffer);
-    if (isolate->heap()->last_array_buffer_in_list()->IsUndefined()) {
-      isolate->heap()->set_last_array_buffer_in_list(*array_buffer);
-    }
-  } else {
-    JSArrayBuffer::cast(isolate->heap()->last_array_buffer_in_list())
-        ->set_weak_next(*array_buffer);
-    isolate->heap()->set_last_array_buffer_in_list(*array_buffer);
+  if (data && !is_external) {
+    isolate->heap()->RegisterNewArrayBuffer(data, allocated_length);
   }
-  array_buffer->set_weak_first_view(isolate->heap()->undefined_value());
 }
 
 
@@ -72,15 +42,15 @@ bool Runtime::SetupArrayBufferAllocatingData(Isolate* isolate,
                                              size_t allocated_length,
                                              bool initialize) {
   void* data;
-  CHECK(V8::ArrayBufferAllocator() != NULL);
+  CHECK(isolate->array_buffer_allocator() != NULL);
   // Prevent creating array buffers when serializing.
   DCHECK(!isolate->serializer_enabled());
   if (allocated_length != 0) {
     if (initialize) {
-      data = V8::ArrayBufferAllocator()->Allocate(allocated_length);
+      data = isolate->array_buffer_allocator()->Allocate(allocated_length);
     } else {
-      data =
-          V8::ArrayBufferAllocator()->AllocateUninitialized(allocated_length);
+      data = isolate->array_buffer_allocator()->AllocateUninitialized(
+          allocated_length);
     }
     if (data == NULL) return false;
   } else {
@@ -88,48 +58,11 @@ bool Runtime::SetupArrayBufferAllocatingData(Isolate* isolate,
   }
 
   SetupArrayBuffer(isolate, array_buffer, false, data, allocated_length);
-
-  reinterpret_cast<v8::Isolate*>(isolate)
-      ->AdjustAmountOfExternalAllocatedMemory(allocated_length);
-
   return true;
 }
 
 
 void Runtime::NeuterArrayBuffer(Handle<JSArrayBuffer> array_buffer) {
-  Isolate* isolate = array_buffer->GetIsolate();
-  // Firstly, iterate over the views which are referenced directly by the array
-  // buffer.
-  for (Handle<Object> view_obj(array_buffer->weak_first_view(), isolate);
-       !view_obj->IsUndefined();) {
-    Handle<JSArrayBufferView> view(JSArrayBufferView::cast(*view_obj));
-    if (view->IsJSTypedArray()) {
-      JSTypedArray::cast(*view)->Neuter();
-    } else if (view->IsJSDataView()) {
-      JSDataView::cast(*view)->Neuter();
-    } else {
-      UNREACHABLE();
-    }
-    view_obj = handle(view->weak_next(), isolate);
-  }
-
-  // Secondly, iterate over the global list of new space views to find views
-  // that belong to the neutered array buffer.
-  Heap* heap = isolate->heap();
-  for (Handle<Object> view_obj(heap->new_array_buffer_views_list(), isolate);
-       !view_obj->IsUndefined();) {
-    Handle<JSArrayBufferView> view(JSArrayBufferView::cast(*view_obj));
-    if (view->buffer() == *array_buffer) {
-      if (view->IsJSTypedArray()) {
-        JSTypedArray::cast(*view)->Neuter();
-      } else if (view->IsJSDataView()) {
-        JSDataView::cast(*view)->Neuter();
-      } else {
-        UNREACHABLE();
-      }
-    }
-    view_obj = handle(view->weak_next(), isolate);
-  }
   array_buffer->Neuter();
 }
 
@@ -211,7 +144,8 @@ RUNTIME_FUNCTION(Runtime_ArrayBufferNeuter) {
   size_t byte_length = NumberToSize(isolate, array_buffer->byte_length());
   array_buffer->set_is_external(true);
   Runtime::NeuterArrayBuffer(array_buffer);
-  V8::ArrayBufferAllocator()->Free(backing_store, byte_length);
+  isolate->heap()->UnregisterArrayBuffer(backing_store);
+  isolate->array_buffer_allocator()->Free(backing_store, byte_length);
   return isolate->heap()->undefined_value();
 }
 
@@ -295,18 +229,9 @@ RUNTIME_FUNCTION(Runtime_TypedArrayInitialize) {
   holder->set_byte_offset(*byte_offset_object);
   holder->set_byte_length(*byte_length_object);
 
-  Heap* heap = isolate->heap();
   if (!maybe_buffer->IsNull()) {
     Handle<JSArrayBuffer> buffer = Handle<JSArrayBuffer>::cast(maybe_buffer);
     holder->set_buffer(*buffer);
-
-    if (heap->InNewSpace(*holder)) {
-      holder->set_weak_next(heap->new_array_buffer_views_list());
-      heap->set_new_array_buffer_views_list(*holder);
-    } else {
-      holder->set_weak_next(buffer->weak_first_view());
-      buffer->set_weak_first_view(*holder);
-    }
 
     Handle<ExternalArray> elements = isolate->factory()->NewExternalArray(
         static_cast<int>(length), array_type,
@@ -317,7 +242,6 @@ RUNTIME_FUNCTION(Runtime_TypedArrayInitialize) {
     DCHECK(IsExternalArrayElementsKind(holder->map()->elements_kind()));
   } else {
     holder->set_buffer(Smi::FromInt(0));
-    holder->set_weak_next(isolate->heap()->undefined_value());
     Handle<FixedTypedArrayBase> elements =
         isolate->factory()->NewFixedTypedArray(static_cast<int>(length),
                                                array_type);
@@ -404,15 +328,6 @@ RUNTIME_FUNCTION(Runtime_TypedArrayInitializeFromArrayLike) {
       isolate->factory()->NewNumberFromSize(byte_length));
   holder->set_byte_length(*byte_length_obj);
   holder->set_length(*length_obj);
-
-  Heap* heap = isolate->heap();
-  if (heap->InNewSpace(*holder)) {
-    holder->set_weak_next(heap->new_array_buffer_views_list());
-    heap->set_new_array_buffer_views_list(*holder);
-  } else {
-    holder->set_weak_next(buffer->weak_first_view());
-    buffer->set_weak_first_view(*holder);
-  }
 
   Handle<ExternalArray> elements = isolate->factory()->NewExternalArray(
       static_cast<int>(length), array_type,
@@ -585,15 +500,6 @@ RUNTIME_FUNCTION(Runtime_DataViewInitialize) {
   holder->set_buffer(*buffer);
   holder->set_byte_offset(*byte_offset);
   holder->set_byte_length(*byte_length);
-
-  Heap* heap = isolate->heap();
-  if (heap->InNewSpace(*holder)) {
-    holder->set_weak_next(heap->new_array_buffer_views_list());
-    heap->set_new_array_buffer_views_list(*holder);
-  } else {
-    holder->set_weak_next(buffer->weak_first_view());
-    buffer->set_weak_first_view(*holder);
-  }
 
   return isolate->heap()->undefined_value();
 }

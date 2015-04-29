@@ -2075,7 +2075,8 @@ void LCodeGen::DoArithmeticT(LArithmeticT* instr) {
   DCHECK(ToRegister(instr->right()).is(eax));
   DCHECK(ToRegister(instr->result()).is(eax));
 
-  Handle<Code> code = CodeFactory::BinaryOpIC(isolate(), instr->op()).code();
+  Handle<Code> code = CodeFactory::BinaryOpIC(
+      isolate(), instr->op(), language_mode()).code();
   CallCode(code, RelocInfo::CODE_TARGET, instr);
 }
 
@@ -3184,6 +3185,22 @@ void LCodeGen::DoLoadKeyedFixedArray(LLoadKeyed* instr) {
       __ cmp(result, factory()->the_hole_value());
       DeoptimizeIf(equal, instr, Deoptimizer::kHole);
     }
+  } else if (instr->hydrogen()->hole_mode() == CONVERT_HOLE_TO_UNDEFINED) {
+    DCHECK(instr->hydrogen()->elements_kind() == FAST_HOLEY_ELEMENTS);
+    Label done;
+    __ cmp(result, factory()->the_hole_value());
+    __ j(not_equal, &done);
+    if (info()->IsStub()) {
+      // A stub can safely convert the hole to undefined only if the array
+      // protector cell contains (Smi) Isolate::kArrayProtectorValid. Otherwise
+      // it needs to bail out.
+      __ mov(result, isolate()->factory()->array_protector());
+      __ cmp(FieldOperand(result, PropertyCell::kValueOffset),
+             Immediate(Smi::FromInt(Isolate::kArrayProtectorValid)));
+      DeoptimizeIf(not_equal, instr, Deoptimizer::kHole);
+    }
+    __ mov(result, isolate()->factory()->undefined_value());
+    __ bind(&done);
   }
 }
 
@@ -4953,6 +4970,22 @@ void LCodeGen::DoCheckNonSmi(LCheckNonSmi* instr) {
     __ test(ToOperand(input), Immediate(kSmiTagMask));
     DeoptimizeIf(zero, instr, Deoptimizer::kSmi);
   }
+}
+
+
+void LCodeGen::DoCheckArrayBufferNotNeutered(
+    LCheckArrayBufferNotNeutered* instr) {
+  Register view = ToRegister(instr->view());
+  Register scratch = ToRegister(instr->scratch());
+
+  Label has_no_buffer;
+  __ mov(scratch, FieldOperand(view, JSArrayBufferView::kBufferOffset));
+  __ JumpIfSmi(scratch, &has_no_buffer);
+  __ test_b(FieldOperand(scratch, JSArrayBuffer::kBitFieldOffset),
+            1 << JSArrayBuffer::WasNeutered::kShift);
+  DeoptimizeIf(not_zero, instr, Deoptimizer::kOutOfBounds);
+
+  __ bind(&has_no_buffer);
 }
 
 

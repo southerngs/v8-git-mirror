@@ -448,10 +448,16 @@ class Factory final {
 
   Handle<JSTypedArray> NewJSTypedArray(ExternalArrayType type);
 
+  Handle<JSTypedArray> NewJSTypedArray(ElementsKind elements_kind);
+
   // Creates a new JSTypedArray with the specified buffer.
   Handle<JSTypedArray> NewJSTypedArray(ExternalArrayType type,
                                        Handle<JSArrayBuffer> buffer,
                                        size_t byte_offset, size_t length);
+
+  // Creates a new on-heap JSTypedArray.
+  Handle<JSTypedArray> NewJSTypedArray(ElementsKind elements_kind,
+                                       size_t number_of_elements);
 
   Handle<JSDataView> NewJSDataView();
   Handle<JSDataView> NewJSDataView(Handle<JSArrayBuffer> buffer,
@@ -636,6 +642,10 @@ class Factory final {
 
   inline void set_string_table(Handle<StringTable> table) {
     isolate()->heap()->set_string_table(*table);
+  }
+
+  inline void set_weak_stack_trace_list(Handle<WeakFixedArray> list) {
+    isolate()->heap()->set_weak_stack_trace_list(*list);
   }
 
   Handle<String> hidden_string() {

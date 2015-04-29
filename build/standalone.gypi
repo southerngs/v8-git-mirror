@@ -35,6 +35,10 @@
     'component%': 'static_library',
     'clang_dir%': 'third_party/llvm-build/Release+Asserts',
     'clang_xcode%': 0,
+    # Track where uninitialized memory originates from. From fastest to
+    # slowest: 0 - no tracking, 1 - track only the initial allocation site, 2
+    # - track the chain of stores leading from allocation site to use site.
+    'msan_track_origins%': 1,
     'visibility%': 'hidden',
     'v8_enable_backtrace%': 0,
     'v8_enable_i18n_support%': 1,
@@ -240,6 +244,7 @@
               '-Wall',
               '-Werror',
               '-Wextra',
+              '-Wshorten-64-to-32',
             ],
             'cflags+': [
               # Clang considers the `register` keyword as deprecated, but
@@ -316,6 +321,36 @@
         ],
       },
     }],
+    ['msan==1 and OS!="mac"', {
+      'target_defaults': {
+        'cflags_cc+': [
+          '-fno-omit-frame-pointer',
+          '-gline-tables-only',
+          '-fsanitize=memory',
+          '-fsanitize-memory-track-origins=<(msan_track_origins)',
+          '-fPIC',
+        ],
+        'cflags+': [
+          '-fPIC',
+        ],
+        'cflags!': [
+          '-fno-exceptions',
+          '-fomit-frame-pointer',
+        ],
+        'ldflags': [
+          '-fsanitize=memory',
+        ],
+        'defines': [
+          'MEMORY_SANITIZER',
+        ],
+        'dependencies': [
+          # Use libc++ (third_party/libc++ and third_party/libc++abi) instead of
+          # stdlibc++ as standard library. This is intended to use for instrumented
+          # builds.
+          '<(DEPTH)/buildtools/third_party/libc++/libc++.gyp:libcxx_proxy',
+        ],
+      },
+    }],
     ['asan==1 and OS=="mac"', {
       'target_defaults': {
         'xcode_settings': {
@@ -356,6 +391,11 @@
         'cflags_cc': [ '-Wnon-virtual-dtor', '-fno-rtti', '-std=gnu++0x' ],
         'ldflags': [ '-pthread', ],
         'conditions': [
+          # TODO(arm64): It'd be nice to enable this for arm64 as well,
+          # but the Assembler requires some serious fixing first.
+          [ 'clang==1 and v8_target_arch=="x64"', {
+            'cflags': [ '-Wshorten-64-to-32' ],
+          }],
           [ 'host_arch=="ppc64" and OS!="aix"', {
             'cflags': [ '-mminimal-toc' ],
           }],

@@ -218,7 +218,7 @@ void GCTracer::Stop(GarbageCollector collector) {
     DCHECK(current_.incremental_marking_bytes == 0);
     DCHECK(current_.incremental_marking_duration == 0);
     DCHECK(current_.pure_incremental_marking_duration == 0);
-    DCHECK(longest_incremental_marking_step_ == 0.0);
+    longest_incremental_marking_step_ = 0.0;
     mark_compactor_events_.push_front(current_);
   }
 
@@ -276,7 +276,8 @@ void GCTracer::AddIncrementalMarkingStep(double duration, intptr_t bytes) {
 
 
 void GCTracer::Print() const {
-  PrintPID("%8.0f ms: ", heap_->isolate()->time_millis_since_init());
+  PrintIsolate(heap_->isolate(), "%8.0f ms: ",
+               heap_->isolate()->time_millis_since_init());
 
   PrintF("%s %.1f (%.1f) -> %.1f (%.1f) MB, ", current_.TypeName(false),
          static_cast<double>(current_.start_object_size) / MB,
@@ -319,7 +320,8 @@ void GCTracer::Print() const {
 
 
 void GCTracer::PrintNVP() const {
-  PrintPID("%8.0f ms: ", heap_->isolate()->time_millis_since_init());
+  PrintIsolate(heap_->isolate(), "[I:%p] %8.0f ms: ", heap_->isolate(),
+               heap_->isolate()->time_millis_since_init());
 
   double duration = current_.end_time - current_.start_time;
   double spent_in_mutator = current_.start_time - previous_.end_time;

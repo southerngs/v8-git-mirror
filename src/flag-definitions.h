@@ -191,12 +191,13 @@ DEFINE_IMPLICATION(es_staging, harmony)
   V(harmony_proxies, "harmony proxies")                         \
   V(harmony_sloppy, "harmony features in sloppy mode")          \
   V(harmony_unicode_regexps, "harmony unicode regexps")         \
-  V(harmony_rest_parameters, "harmony rest parameters")         \
   V(harmony_reflect, "harmony Reflect API")                     \
-  V(harmony_spreadcalls, "harmony spread-calls")
+  V(harmony_destructuring, "harmony destructuring")
 
 // Features that are complete (but still behind --harmony/es-staging flag).
-#define HARMONY_STAGED(V)                                               \
+#define HARMONY_STAGED(V)                               \
+  V(harmony_rest_parameters, "harmony rest parameters") \
+  V(harmony_spreadcalls, "harmony spread-calls")        \
   V(harmony_unicode, "harmony unicode escapes")
 
 // Features that are shipping (turned on by default, but internal flag remains).
@@ -407,7 +408,9 @@ DEFINE_BOOL(omit_map_checks_for_leaf_maps, true,
 
 // Flags for TurboFan.
 DEFINE_BOOL(turbo, false, "enable TurboFan compiler")
+DEFINE_BOOL(turbo_greedy_regalloc, false, "use the greedy register allocator")
 DEFINE_IMPLICATION(turbo, turbo_deoptimization)
+DEFINE_IMPLICATION(turbo, turbo_type_feedback)
 DEFINE_STRING(turbo_filter, "~~", "optimization filter for TurboFan compiler")
 DEFINE_BOOL(trace_turbo, false, "trace generated TurboFan IR")
 DEFINE_BOOL(trace_turbo_graph, false, "trace generated TurboFan graphs")
@@ -445,6 +448,7 @@ DEFINE_BOOL(turbo_exceptions, false, "enable exception handling in TurboFan")
 DEFINE_BOOL(turbo_stress_loop_peeling, false,
             "stress loop peeling optimization")
 DEFINE_BOOL(turbo_cf_optimization, true, "optimize control flow in TurboFan")
+DEFINE_BOOL(turbo_frame_elision, true, "elide frames in TurboFan")
 
 DEFINE_INT(typed_array_max_size_in_heap, 64,
            "threshold for in-heap typed array")

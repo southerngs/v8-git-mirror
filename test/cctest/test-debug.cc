@@ -397,7 +397,7 @@ void CheckDebuggerUnloaded(bool check_functions) {
   CHECK(!CcTest::i_isolate()->debug()->debug_info_list_);
 
   // Collect garbage to ensure weak handles are cleared.
-  CcTest::heap()->CollectAllGarbage(Heap::kNoGCFlags);
+  CcTest::heap()->CollectAllGarbage();
   CcTest::heap()->CollectAllGarbage(Heap::kMakeHeapIterableMask);
 
   // Iterate the head and check that there are no debugger related objects left.
@@ -870,7 +870,7 @@ static void DebugEventBreakPointCollectGarbage(
       CcTest::heap()->CollectGarbage(v8::internal::NEW_SPACE);
     } else {
       // Mark sweep compact.
-      CcTest::heap()->CollectAllGarbage(Heap::kNoGCFlags);
+      CcTest::heap()->CollectAllGarbage();
     }
   }
 }
@@ -1376,7 +1376,7 @@ static void CallAndGC(v8::Local<v8::Object> recv,
     CHECK_EQ(2 + i * 3, break_point_hit_count);
 
     // Mark sweep (and perhaps compact) and call function.
-    CcTest::heap()->CollectAllGarbage(Heap::kNoGCFlags);
+    CcTest::heap()->CollectAllGarbage();
     f->Call(recv, 0, NULL);
     CHECK_EQ(3 + i * 3, break_point_hit_count);
   }
@@ -2220,7 +2220,7 @@ TEST(ScriptBreakPointLineTopLevel) {
   f = v8::Local<v8::Function>::Cast(
       env->Global()->Get(v8::String::NewFromUtf8(env->GetIsolate(), "f")));
 
-  CcTest::heap()->CollectAllGarbage(Heap::kNoGCFlags);
+  CcTest::heap()->CollectAllGarbage();
 
   SetScriptBreakPointByNameFromJS(env->GetIsolate(), "test.html", 3, -1);
 
@@ -5236,7 +5236,9 @@ void V8Thread::Run() {
       "\n"
       "foo();\n";
 
-  isolate_ = v8::Isolate::New();
+  v8::Isolate::CreateParams create_params;
+  create_params.array_buffer_allocator = CcTest::array_buffer_allocator();
+  isolate_ = v8::Isolate::New(create_params);
   threaded_debugging_barriers.barrier_3.Wait();
   {
     v8::Isolate::Scope isolate_scope(isolate_);
@@ -5367,7 +5369,9 @@ void BreakpointsV8Thread::Run() {
   const char* source_2 = "cat(17);\n"
     "cat(19);\n";
 
-  isolate_ = v8::Isolate::New();
+  v8::Isolate::CreateParams create_params;
+  create_params.array_buffer_allocator = CcTest::array_buffer_allocator();
+  isolate_ = v8::Isolate::New(create_params);
   breakpoints_barriers->barrier_3.Wait();
   {
     v8::Isolate::Scope isolate_scope(isolate_);

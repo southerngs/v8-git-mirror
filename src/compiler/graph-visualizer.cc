@@ -604,10 +604,10 @@ void GraphC1Visualizer::PrintSchedule(const char* phase,
       int last_index = instruction_block->last_instruction_index();
       PrintIntProperty(
           "first_lir_id",
-          LifetimePosition::GapFromInstructionIndex(first_index).Value());
+          LifetimePosition::GapFromInstructionIndex(first_index).value());
       PrintIntProperty("last_lir_id",
                        LifetimePosition::InstructionFromInstructionIndex(
-                           last_index).Value());
+                           last_index).value());
     }
 
     {
@@ -726,7 +726,7 @@ void GraphC1Visualizer::PrintLiveRange(LiveRange* range, const char* type) {
         DCHECK(op.IsRegister());
         os_ << " \"" << Register::AllocationIndexToString(assigned_reg) << "\"";
       }
-    } else if (range->IsSpilled()) {
+    } else if (range->spilled()) {
       auto top = range->TopLevel();
       int index = -1;
       if (top->HasSpillRange()) {
@@ -737,9 +737,9 @@ void GraphC1Visualizer::PrintLiveRange(LiveRange* range, const char* type) {
             << "\"";
       } else {
         index = AllocatedOperand::cast(top->GetSpillOperand())->index();
-        if (top->Kind() == DOUBLE_REGISTERS) {
+        if (top->kind() == DOUBLE_REGISTERS) {
           os_ << " \"double_stack:" << index << "\"";
-        } else if (top->Kind() == GENERAL_REGISTERS) {
+        } else if (top->kind() == GENERAL_REGISTERS) {
           os_ << " \"stack:" << index << "\"";
         }
       }
@@ -750,23 +750,17 @@ void GraphC1Visualizer::PrintLiveRange(LiveRange* range, const char* type) {
     } else {
       parent_index = range->id();
     }
-    InstructionOperand* op = range->FirstHint();
-    int hint_index = -1;
-    if (op != NULL && op->IsUnallocated()) {
-      hint_index = UnallocatedOperand::cast(op)->virtual_register();
-    }
-    os_ << " " << parent_index << " " << hint_index;
-    UseInterval* cur_interval = range->first_interval();
-    while (cur_interval != NULL && range->Covers(cur_interval->start())) {
-      os_ << " [" << cur_interval->start().Value() << ", "
-          << cur_interval->end().Value() << "[";
-      cur_interval = cur_interval->next();
+    os_ << " " << parent_index;
+    for (auto interval = range->first_interval(); interval != nullptr;
+         interval = interval->next()) {
+      os_ << " [" << interval->start().value() << ", "
+          << interval->end().value() << "[";
     }
 
     UsePosition* current_pos = range->first_pos();
     while (current_pos != NULL) {
       if (current_pos->RegisterIsBeneficial() || FLAG_trace_all_uses) {
-        os_ << " " << current_pos->pos().Value() << " M";
+        os_ << " " << current_pos->pos().value() << " M";
       }
       current_pos = current_pos->next();
     }

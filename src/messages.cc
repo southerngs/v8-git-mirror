@@ -131,7 +131,7 @@ Handle<String> MessageHandler::GetMessage(Isolate* isolate,
                                           Handle<Object> data) {
   Factory* factory = isolate->factory();
   Handle<String> fmt_str =
-      factory->InternalizeOneByteString(STATIC_CHAR_VECTOR("FormatMessage"));
+      factory->InternalizeOneByteString(STATIC_CHAR_VECTOR("$formatMessage"));
   Handle<JSFunction> fun = Handle<JSFunction>::cast(Object::GetProperty(
           isolate->js_builtins_object(), fmt_str).ToHandleChecked());
   Handle<JSMessageObject> message = Handle<JSMessageObject>::cast(data);
@@ -163,6 +163,85 @@ SmartArrayPointer<char> MessageHandler::GetLocalizedMessage(
 }
 
 
+Handle<Object> CallSite::GetFileName(Isolate* isolate) {
+  Handle<Object> script(fun_->shared()->script(), isolate);
+  if (script->IsScript()) {
+    return Handle<Object>(Handle<Script>::cast(script)->name(), isolate);
+  }
+  return isolate->factory()->null_value();
+}
+
+
+Handle<Object> CallSite::GetFunctionName(Isolate* isolate) {
+  Handle<String> result = JSFunction::GetDebugName(fun_);
+  if (result->length() != 0) return result;
+  Handle<Object> script(fun_->shared()->script(), isolate);
+  if (script->IsScript() &&
+      Handle<Script>::cast(script)->compilation_type() ==
+          Script::COMPILATION_TYPE_EVAL) {
+    return isolate->factory()->eval_string();
+  }
+  return isolate->factory()->null_value();
+}
+
+
+Handle<Object> CallSite::GetScriptNameOrSourceUrl(Isolate* isolate) {
+  Handle<Object> script_obj(fun_->shared()->script(), isolate);
+  if (script_obj->IsScript()) {
+    Handle<Script> script = Handle<Script>::cast(script_obj);
+    Object* source_url = script->source_url();
+    if (source_url->IsString()) return Handle<Object>(source_url, isolate);
+    return Handle<Object>(script->name(), isolate);
+  }
+  return isolate->factory()->null_value();
+}
+
+
+int CallSite::GetLineNumber(Isolate* isolate) {
+  if (pos_ >= 0) {
+    Handle<Object> script_obj(fun_->shared()->script(), isolate);
+    if (script_obj->IsScript()) {
+      Handle<Script> script = Handle<Script>::cast(script_obj);
+      return Script::GetLineNumber(script, pos_) + 1;
+    }
+  }
+  return -1;
+}
+
+
+int CallSite::GetColumnNumber(Isolate* isolate) {
+  if (pos_ >= 0) {
+    Handle<Object> script_obj(fun_->shared()->script(), isolate);
+    if (script_obj->IsScript()) {
+      Handle<Script> script = Handle<Script>::cast(script_obj);
+      return Script::GetColumnNumber(script, pos_) + 1;
+    }
+  }
+  return -1;
+}
+
+
+bool CallSite::IsNative(Isolate* isolate) {
+  Handle<Object> script(fun_->shared()->script(), isolate);
+  return script->IsScript() &&
+         Handle<Script>::cast(script)->type()->value() == Script::TYPE_NATIVE;
+}
+
+
+bool CallSite::IsToplevel(Isolate* isolate) {
+  return receiver_->IsJSGlobalProxy() || receiver_->IsNull() ||
+         receiver_->IsUndefined();
+}
+
+
+bool CallSite::IsEval(Isolate* isolate) {
+  Handle<Object> script(fun_->shared()->script(), isolate);
+  return script->IsScript() &&
+         Handle<Script>::cast(script)->compilation_type() ==
+             Script::COMPILATION_TYPE_EVAL;
+}
+
+
 MaybeHandle<String> MessageTemplate::FormatMessage(int template_index,
                                                    Handle<String> arg0,
                                                    Handle<String> arg1,
@@ -189,8 +268,8 @@ MaybeHandle<String> MessageTemplate::FormatMessage(int template_index,
   Handle<String> args[] = {arg0, arg1, arg2};
   for (const char* c = template_string; *c != '\0'; c++) {
     if (*c == '%') {
-      builder.AppendString(args[i++]);
       DCHECK(i < arraysize(args));
+      builder.AppendString(args[i++]);
     } else {
       builder.AppendCharacter(*c);
     }

@@ -13,6 +13,8 @@
 
 namespace v8 {
 
+class ArrayBufferAllocator;
+
 
 class TestWithIsolate : public virtual ::testing::Test {
  public:
@@ -25,6 +27,7 @@ class TestWithIsolate : public virtual ::testing::Test {
   static void TearDownTestCase();
 
  private:
+  static ArrayBufferAllocator* array_buffer_allocator_;
   static Isolate* isolate_;
   Isolate::Scope isolate_scope_;
   HandleScope handle_scope_;
@@ -114,7 +117,6 @@ class TestWithIsolateAndZone : public virtual TestWithIsolate {
 
   DISALLOW_COPY_AND_ASSIGN(TestWithIsolateAndZone);
 };
-
 
 }  // namespace internal
 }  // namespace v8

@@ -1014,7 +1014,28 @@ class Isolate {
 
   Map* get_initial_js_array_map(ElementsKind kind);
 
+  static const int kArrayProtectorValid = 1;
+  static const int kArrayProtectorInvalid = 0;
+
   bool IsFastArrayConstructorPrototypeChainIntact();
+
+  // On intent to set an element in object, make sure that appropriate
+  // notifications occur if the set is on the elements of the array or
+  // object prototype. Also ensure that changes to prototype chain between
+  // Array and Object fire notifications.
+  void UpdateArrayProtectorOnSetElement(Handle<JSObject> object);
+  void UpdateArrayProtectorOnSetLength(Handle<JSObject> object) {
+    UpdateArrayProtectorOnSetElement(object);
+  }
+  void UpdateArrayProtectorOnSetPrototype(Handle<JSObject> object) {
+    UpdateArrayProtectorOnSetElement(object);
+  }
+  void UpdateArrayProtectorOnNormalizeElements(Handle<JSObject> object) {
+    UpdateArrayProtectorOnSetElement(object);
+  }
+
+  // Returns true if array is the initial array prototype in any native context.
+  bool IsAnyInitialArrayPrototype(Handle<JSArray> array);
 
   CallInterfaceDescriptorData* call_descriptor_data(int index);
 
@@ -1073,7 +1094,8 @@ class Isolate {
   void* deopt_maps_count_address() { return &deopt_maps_count_; }
   void* deopt_smi_count_address() { return &deopt_smi_count_; }
 
-  inline base::RandomNumberGenerator* random_number_generator();
+  //inline base::RandomNumberGenerator* random_number_generator();
+  base::RandomNumberGenerator* random_number_generator();
 
   // Given an address occupied by a live code object, return that object.
   Object* FindCodeObject(Address a);
@@ -1106,8 +1128,6 @@ class Isolate {
   BasicBlockProfiler* GetOrCreateBasicBlockProfiler();
   BasicBlockProfiler* basic_block_profiler() { return basic_block_profiler_; }
 
-  static Isolate* NewForTesting() { return new Isolate(false); }
-
   std::string GetTurboCfgFileName();
 
 #if TRACE_MAPS
@@ -1136,6 +1156,13 @@ class Isolate {
   void CheckDetachedContextsAfterGC();
 
   List<Object*>* partial_snapshot_cache() { return &partial_snapshot_cache_; }
+
+  void set_array_buffer_allocator(v8::ArrayBuffer::Allocator* allocator) {
+    array_buffer_allocator_ = allocator;
+  }
+  v8::ArrayBuffer::Allocator* array_buffer_allocator() const {
+    return array_buffer_allocator_;
+  }
 
  protected:
   explicit Isolate(bool enable_serializer);
@@ -1375,6 +1402,8 @@ class Isolate {
 
   List<Object*> partial_snapshot_cache_;
 
+  v8::ArrayBuffer::Allocator* array_buffer_allocator_;
+
   friend class ExecutionAccess;
   friend class HandleScopeImplementer;
   friend class OptimizingCompileDispatcher;
@@ -1419,7 +1448,7 @@ class PromiseOnStack {
 // versions of GCC. See V8 issue 122 for details.
 class SaveContext BASE_EMBEDDED {
  public:
-  inline explicit SaveContext(Isolate* isolate);
+  explicit SaveContext(Isolate* isolate);
 
   ~SaveContext() {
     isolate_->set_context(context_.is_null() ? NULL : *context_);

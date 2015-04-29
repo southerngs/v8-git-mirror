@@ -92,8 +92,8 @@ TEST(Promotion) {
   CHECK(heap->InSpace(*array, NEW_SPACE));
 
   // Call mark compact GC, so array becomes an old object.
-  heap->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
-  heap->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
+  heap->CollectAllGarbage();
+  heap->CollectAllGarbage();
 
   // Array now sits in the old space
   CHECK(heap->InSpace(*array, OLD_SPACE));
@@ -423,7 +423,7 @@ static intptr_t MemoryInUse() {
 
   const int kBufSize = 10000;
   char buffer[kBufSize];
-  int length = read(fd, buffer, kBufSize);
+  ssize_t length = read(fd, buffer, kBufSize);
   intptr_t line_start = 0;
   CHECK_LT(length, kBufSize);  // Make the buffer bigger.
   CHECK_GT(length, 0);  // We have to find some data in the file.
@@ -470,7 +470,9 @@ static intptr_t MemoryInUse() {
 
 
 intptr_t ShortLivingIsolate() {
-  v8::Isolate* isolate = v8::Isolate::New();
+  v8::Isolate::CreateParams create_params;
+  create_params.array_buffer_allocator = CcTest::array_buffer_allocator();
+  v8::Isolate* isolate = v8::Isolate::New(create_params);
   { v8::Isolate::Scope isolate_scope(isolate);
     v8::Locker lock(isolate);
     v8::HandleScope handle_scope(isolate);

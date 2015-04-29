@@ -7,6 +7,7 @@
 #include <fstream>  // NOLINT(readability/streams)
 #include <sstream>
 
+#include "src/base/adapters.h"
 #include "src/base/platform/elapsed-timer.h"
 #include "src/compiler/ast-graph-builder.h"
 #include "src/compiler/ast-loop-assignment-analyzer.h"
@@ -16,6 +17,7 @@
 #include "src/compiler/common-operator-reducer.h"
 #include "src/compiler/control-flow-optimizer.h"
 #include "src/compiler/control-reducer.h"
+#include "src/compiler/frame-elider.h"
 #include "src/compiler/graph-replay.h"
 #include "src/compiler/graph-visualizer.h"
 #include "src/compiler/instruction.h"
@@ -255,8 +257,8 @@ class PipelineData {
         info()->isolate(), instruction_zone(), instruction_blocks);
   }
 
-  void InitializeLiveRangeBuilder(const RegisterConfiguration* config,
-                                  const char* debug_name) {
+  void InitializeRegisterAllocationData(const RegisterConfiguration* config,
+                                        const char* debug_name) {
     DCHECK(frame_ == nullptr);
     DCHECK(register_allocation_data_ == nullptr);
     frame_ = new (instruction_zone()) Frame();
@@ -524,9 +526,7 @@ struct OsrDeconstructionPhase {
     SourcePositionTable::Scope pos(data->source_positions(),
                                    SourcePosition::Unknown());
     OsrHelper osr_helper(data->info());
-    bool success =
-        osr_helper.Deconstruct(data->jsgraph(), data->common(), temp_zone);
-    if (!success) data->info()->RetryOptimization(kOsrCompileFailed);
+    osr_helper.Deconstruct(data->jsgraph(), data->common(), temp_zone);
   }
 };
 
@@ -542,8 +542,16 @@ struct JSTypeFeedbackPhase {
                               data->info()->unoptimized_code(),
                               data->info()->feedback_vector(), native_context);
     GraphReducer graph_reducer(data->graph(), temp_zone);
-    JSTypeFeedbackSpecializer specializer(data->jsgraph(),
-                                          data->js_type_feedback(), &oracle);
+    Handle<GlobalObject> global_object = Handle<GlobalObject>::null();
+    if (data->info()->has_global_object()) {
+      global_object =
+          Handle<GlobalObject>(data->info()->global_object(), data->isolate());
+    }
+    // TODO(titzer): introduce a specialization mode/flags enum to control
+    // specializing to the global object here.
+    JSTypeFeedbackSpecializer specializer(
+        data->jsgraph(), data->js_type_feedback(), &oracle, global_object,
+        data->info()->dependencies());
     AddReducer(data, &graph_reducer, &specializer);
     graph_reducer.ReduceGraph();
   }
@@ -716,7 +724,7 @@ struct MeetRegisterConstraintsPhase {
   static const char* phase_name() { return "meet register constraints"; }
 
   void Run(PipelineData* data, Zone* temp_zone) {
-    LiveRangeBuilder builder(data->register_allocation_data());
+    ConstraintBuilder builder(data->register_allocation_data());
     builder.MeetRegisterConstraints();
   }
 };
@@ -726,7 +734,7 @@ struct ResolvePhisPhase {
   static const char* phase_name() { return "resolve phis"; }
 
   void Run(PipelineData* data, Zone* temp_zone) {
-    LiveRangeBuilder builder(data->register_allocation_data());
+    ConstraintBuilder builder(data->register_allocation_data());
     builder.ResolvePhis();
   }
 };
@@ -736,29 +744,31 @@ struct BuildLiveRangesPhase {
   static const char* phase_name() { return "build live ranges"; }
 
   void Run(PipelineData* data, Zone* temp_zone) {
-    LiveRangeBuilder builder(data->register_allocation_data());
+    LiveRangeBuilder builder(data->register_allocation_data(), temp_zone);
     builder.BuildLiveRanges();
   }
 };
 
 
+template <typename RegAllocator>
 struct AllocateGeneralRegistersPhase {
   static const char* phase_name() { return "allocate general registers"; }
 
   void Run(PipelineData* data, Zone* temp_zone) {
-    LinearScanAllocator allocator(data->register_allocation_data(),
-                                  GENERAL_REGISTERS);
+    RegAllocator allocator(data->register_allocation_data(), GENERAL_REGISTERS,
+                           temp_zone);
     allocator.AllocateRegisters();
   }
 };
 
 
+template <typename RegAllocator>
 struct AllocateDoubleRegistersPhase {
   static const char* phase_name() { return "allocate double registers"; }
 
   void Run(PipelineData* data, Zone* temp_zone) {
-    LinearScanAllocator allocator(data->register_allocation_data(),
-                                  DOUBLE_REGISTERS);
+    RegAllocator allocator(data->register_allocation_data(), DOUBLE_REGISTERS,
+                           temp_zone);
     allocator.AllocateRegisters();
   }
 };
@@ -809,7 +819,7 @@ struct ResolveControlFlowPhase {
 
   void Run(PipelineData* data, Zone* temp_zone) {
     LiveRangeConnector connector(data->register_allocation_data());
-    connector.ResolveControlFlow();
+    connector.ResolveControlFlow(temp_zone);
   }
 };
 
@@ -820,6 +830,15 @@ struct OptimizeMovesPhase {
   void Run(PipelineData* data, Zone* temp_zone) {
     MoveOptimizer move_optimizer(temp_zone, data->sequence());
     move_optimizer.Run();
+  }
+};
+
+
+struct FrameElisionPhase {
+  static const char* phase_name() { return "frame elision"; }
+
+  void Run(PipelineData* data, Zone* temp_zone) {
+    FrameElider(data->sequence()).Run();
   }
 };
 
@@ -909,12 +928,6 @@ void Pipeline::RunPrintAndVerify(const char* phase, bool untyped) {
 
 
 Handle<Code> Pipeline::GenerateCode() {
-  if (info()->is_osr() && !FLAG_turbo_osr) {
-    // TODO(turbofan): remove this flag and always handle OSR
-    info()->RetryOptimization(kOsrCompileFailed);
-    return Handle<Code>::null();
-  }
-
   // TODO(mstarzinger): This is just a temporary hack to make TurboFan work,
   // the correct solution is to restore the context register after invoking
   // builtins from full-codegen.
@@ -1036,11 +1049,12 @@ Handle<Code> Pipeline::GenerateCode() {
 
     if (info()->is_osr()) {
       Run<OsrDeconstructionPhase>();
-      if (info()->bailout_reason() != kNoReason) return Handle<Code>::null();
       RunPrintAndVerify("OSR deconstruction");
     }
 
-    if (info()->is_type_feedback_enabled()) {
+    // TODO(turbofan): Type feedback currently requires deoptimization.
+    if (info()->is_deoptimization_enabled() &&
+        info()->is_type_feedback_enabled()) {
       Run<JSTypeFeedbackPhase>();
       RunPrintAndVerify("JSType feedback");
     }
@@ -1181,6 +1195,10 @@ Handle<Code> Pipeline::ScheduleAndGenerateCode(
     return Handle<Code>();
   }
 
+  if (FLAG_turbo_frame_elision) {
+    Run<FrameElisionPhase>();
+  }
+
   BeginPhaseKind("code generation");
 
   // Optimimize jumps.
@@ -1251,7 +1269,7 @@ void Pipeline::AllocateRegisters(const RegisterConfiguration* config,
   debug_name = GetDebugName(data->info());
 #endif
 
-  data->InitializeLiveRangeBuilder(config, debug_name.get());
+  data->InitializeRegisterAllocationData(config, debug_name.get());
   if (info()->is_osr()) {
     OsrHelper osr_helper(info());
     osr_helper.SetupFrame(data->frame());
@@ -1269,8 +1287,13 @@ void Pipeline::AllocateRegisters(const RegisterConfiguration* config,
   if (verifier != nullptr) {
     CHECK(!data->register_allocation_data()->ExistsUseWithoutDefinition());
   }
-  Run<AllocateGeneralRegistersPhase>();
-  Run<AllocateDoubleRegistersPhase>();
+  if (FLAG_turbo_greedy_regalloc) {
+    Run<AllocateGeneralRegistersPhase<GreedyAllocator>>();
+    Run<AllocateDoubleRegistersPhase<GreedyAllocator>>();
+  } else {
+    Run<AllocateGeneralRegistersPhase<LinearScanAllocator>>();
+    Run<AllocateDoubleRegistersPhase<LinearScanAllocator>>();
+  }
   Run<AssignSpillSlotsPhase>();
 
   Run<CommitAssignmentPhase>();
