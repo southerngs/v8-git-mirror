@@ -2,10 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #include "src/log-utils.h"
+
+#include "src/assert-scope.h"
+#include "src/base/platform/platform.h"
+#include "src/objects-inl.h"
 #include "src/string-stream.h"
+#include "src/utils.h"
 #include "src/version.h"
 
 namespace v8 {
@@ -161,11 +164,7 @@ void Log::MessageBuilder::Append(String* str) {
   }
 }
 
-
-void Log::MessageBuilder::AppendAddress(Address addr) {
-  Append("0x%" V8PRIxPTR, addr);
-}
-
+void Log::MessageBuilder::AppendAddress(Address addr) { Append("%p", addr); }
 
 void Log::MessageBuilder::AppendSymbolName(Symbol* symbol) {
   DCHECK(symbol);
@@ -240,4 +239,5 @@ void Log::MessageBuilder::WriteToLogFile() {
 }
 
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8

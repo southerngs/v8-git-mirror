@@ -4,8 +4,12 @@
 
 #include "src/compiler/common-operator.h"
 #include "src/compiler/graph.h"
+#include "src/compiler/js-operator.h"
+#include "src/compiler/linkage.h"
 #include "src/compiler/node-properties.h"
 #include "src/compiler/operator-properties.h"
+#include "src/compiler/verifier.h"
+#include "src/handles-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -119,14 +123,44 @@ bool NodeProperties::IsControlEdge(Edge edge) {
 
 
 // static
+bool NodeProperties::IsExceptionalCall(Node* node) {
+  if (node->op()->HasProperty(Operator::kNoThrow)) return false;
+  for (Edge const edge : node->use_edges()) {
+    if (!NodeProperties::IsControlEdge(edge)) continue;
+    if (edge.from()->opcode() == IrOpcode::kIfException) return true;
+  }
+  return false;
+}
+
+
+// static
+void NodeProperties::ReplaceValueInput(Node* node, Node* value, int index) {
+  DCHECK(index < node->op()->ValueInputCount());
+  node->ReplaceInput(FirstValueIndex(node) + index, value);
+}
+
+
+// static
+void NodeProperties::ReplaceValueInputs(Node* node, Node* value) {
+  int value_input_count = node->op()->ValueInputCount();
+  DCHECK_LE(1, value_input_count);
+  node->ReplaceInput(0, value);
+  while (--value_input_count > 0) {
+    node->RemoveInput(value_input_count);
+  }
+}
+
+
+// static
 void NodeProperties::ReplaceContextInput(Node* node, Node* context) {
   node->ReplaceInput(FirstContextIndex(node), context);
 }
 
 
 // static
-void NodeProperties::ReplaceControlInput(Node* node, Node* control) {
-  node->ReplaceInput(FirstControlIndex(node), control);
+void NodeProperties::ReplaceControlInput(Node* node, Node* control, int index) {
+  DCHECK(index < node->op()->ControlInputCount());
+  node->ReplaceInput(FirstControlIndex(node) + index, control);
 }
 
 
@@ -146,51 +180,65 @@ void NodeProperties::ReplaceFrameStateInput(Node* node, int index,
 
 
 // static
+void NodeProperties::RemoveFrameStateInput(Node* node, int index) {
+  DCHECK_LT(index, OperatorProperties::GetFrameStateInputCount(node->op()));
+  node->RemoveInput(FirstFrameStateIndex(node) + index);
+}
+
+
+// static
 void NodeProperties::RemoveNonValueInputs(Node* node) {
   node->TrimInputCount(node->op()->ValueInputCount());
+}
+
+
+// static
+void NodeProperties::RemoveValueInputs(Node* node) {
+  int value_input_count = node->op()->ValueInputCount();
+  while (--value_input_count >= 0) {
+    node->RemoveInput(value_input_count);
+  }
 }
 
 
 void NodeProperties::MergeControlToEnd(Graph* graph,
                                        CommonOperatorBuilder* common,
                                        Node* node) {
-  // Connect the node to the merge exiting the graph.
-  Node* end_pred = NodeProperties::GetControlInput(graph->end());
-  if (end_pred->opcode() == IrOpcode::kMerge) {
-    int inputs = end_pred->op()->ControlInputCount() + 1;
-    end_pred->AppendInput(graph->zone(), node);
-    end_pred->set_op(common->Merge(inputs));
-  } else {
-    Node* merge = graph->NewNode(common->Merge(2), end_pred, node);
-    NodeProperties::ReplaceControlInput(graph->end(), merge);
+  graph->end()->AppendInput(graph->zone(), node);
+  graph->end()->set_op(common->End(graph->end()->InputCount()));
+}
+
+
+// static
+void NodeProperties::ReplaceUses(Node* node, Node* value, Node* effect,
+                                 Node* success, Node* exception) {
+  // Requires distinguishing between value, effect and control edges.
+  for (Edge edge : node->use_edges()) {
+    if (IsControlEdge(edge)) {
+      if (edge.from()->opcode() == IrOpcode::kIfSuccess) {
+        DCHECK_NOT_NULL(success);
+        edge.UpdateTo(success);
+      } else if (edge.from()->opcode() == IrOpcode::kIfException) {
+        DCHECK_NOT_NULL(exception);
+        edge.UpdateTo(exception);
+      } else {
+        UNREACHABLE();
+      }
+    } else if (IsEffectEdge(edge)) {
+      DCHECK_NOT_NULL(effect);
+      edge.UpdateTo(effect);
+    } else {
+      DCHECK_NOT_NULL(value);
+      edge.UpdateTo(value);
+    }
   }
 }
 
 
 // static
-void NodeProperties::ReplaceWithValue(Node* node, Node* value, Node* effect,
-                                      Node* control) {
-  if (!effect && node->op()->EffectInputCount() > 0) {
-    effect = NodeProperties::GetEffectInput(node);
-  }
-  if (control == nullptr && node->op()->ControlInputCount() > 0) {
-    control = NodeProperties::GetControlInput(node);
-  }
-
-  // Requires distinguishing between value, effect and control edges.
-  for (Edge edge : node->use_edges()) {
-    if (IsControlEdge(edge)) {
-      DCHECK_EQ(IrOpcode::kIfSuccess, edge.from()->opcode());
-      DCHECK_NOT_NULL(control);
-      edge.from()->ReplaceUses(control);
-      edge.UpdateTo(NULL);
-    } else if (IsEffectEdge(edge)) {
-      DCHECK_NOT_NULL(effect);
-      edge.UpdateTo(effect);
-    } else {
-      edge.UpdateTo(value);
-    }
-  }
+void NodeProperties::ChangeOp(Node* node, const Operator* new_op) {
+  node->set_op(new_op);
+  Verifier::VerifyNode(node);
 }
 
 
@@ -214,7 +262,9 @@ void NodeProperties::CollectControlProjections(Node* node, Node** projections,
   std::memset(projections, 0, sizeof(*projections) * projection_count);
 #endif
   size_t if_value_index = 0;
-  for (Node* const use : node->uses()) {
+  for (Edge const edge : node->use_edges()) {
+    if (!IsControlEdge(edge)) continue;
+    Node* use = edge.from();
     size_t index;
     switch (use->opcode()) {
       case IrOpcode::kIfTrue:
@@ -226,11 +276,11 @@ void NodeProperties::CollectControlProjections(Node* node, Node** projections,
         index = 1;
         break;
       case IrOpcode::kIfSuccess:
-        DCHECK_EQ(IrOpcode::kCall, node->opcode());
+        DCHECK(!node->op()->HasProperty(Operator::kNoThrow));
         index = 0;
         break;
       case IrOpcode::kIfException:
-        DCHECK_EQ(IrOpcode::kCall, node->opcode());
+        DCHECK(!node->op()->HasProperty(Operator::kNoThrow));
         index = 1;
         break;
       case IrOpcode::kIfValue:
@@ -254,6 +304,106 @@ void NodeProperties::CollectControlProjections(Node* node, Node** projections,
     DCHECK_NOT_NULL(projections[index]);
   }
 #endif
+}
+
+
+// static
+MaybeHandle<Context> NodeProperties::GetSpecializationContext(
+    Node* node, MaybeHandle<Context> context) {
+  switch (node->opcode()) {
+    case IrOpcode::kHeapConstant:
+      return Handle<Context>::cast(OpParameter<Handle<HeapObject>>(node));
+    case IrOpcode::kParameter: {
+      Node* const start = NodeProperties::GetValueInput(node, 0);
+      DCHECK_EQ(IrOpcode::kStart, start->opcode());
+      int const index = ParameterIndexOf(node->op());
+      // The context is always the last parameter to a JavaScript function, and
+      // {Parameter} indices start at -1, so value outputs of {Start} look like
+      // this: closure, receiver, param0, ..., paramN, context.
+      if (index == start->op()->ValueOutputCount() - 2) {
+        return context;
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  return MaybeHandle<Context>();
+}
+
+
+// static
+MaybeHandle<Context> NodeProperties::GetSpecializationNativeContext(
+    Node* node, MaybeHandle<Context> native_context) {
+  while (true) {
+    switch (node->opcode()) {
+      case IrOpcode::kJSLoadContext: {
+        ContextAccess const& access = ContextAccessOf(node->op());
+        if (access.index() != Context::NATIVE_CONTEXT_INDEX) {
+          return MaybeHandle<Context>();
+        }
+        // Skip over the intermediate contexts, we're only interested in the
+        // very last context in the context chain anyway.
+        node = NodeProperties::GetContextInput(node);
+        break;
+      }
+      case IrOpcode::kJSCreateBlockContext:
+      case IrOpcode::kJSCreateCatchContext:
+      case IrOpcode::kJSCreateFunctionContext:
+      case IrOpcode::kJSCreateModuleContext:
+      case IrOpcode::kJSCreateScriptContext:
+      case IrOpcode::kJSCreateWithContext: {
+        // Skip over the intermediate contexts, we're only interested in the
+        // very last context in the context chain anyway.
+        node = NodeProperties::GetContextInput(node);
+        break;
+      }
+      case IrOpcode::kHeapConstant: {
+        // Extract the native context from the actual {context}.
+        Handle<Context> context =
+            Handle<Context>::cast(OpParameter<Handle<HeapObject>>(node));
+        return handle(context->native_context());
+      }
+      case IrOpcode::kOsrValue: {
+        int const index = OpParameter<int>(node);
+        if (index == Linkage::kOsrContextSpillSlotIndex) {
+          return native_context;
+        }
+        return MaybeHandle<Context>();
+      }
+      case IrOpcode::kParameter: {
+        Node* const start = NodeProperties::GetValueInput(node, 0);
+        DCHECK_EQ(IrOpcode::kStart, start->opcode());
+        int const index = ParameterIndexOf(node->op());
+        // The context is always the last parameter to a JavaScript function,
+        // and {Parameter} indices start at -1, so value outputs of {Start}
+        // look like this: closure, receiver, param0, ..., paramN, context.
+        if (index == start->op()->ValueOutputCount() - 2) {
+          return native_context;
+        }
+        return MaybeHandle<Context>();
+      }
+      default:
+        return MaybeHandle<Context>();
+    }
+  }
+}
+
+
+// static
+MaybeHandle<JSGlobalObject> NodeProperties::GetSpecializationGlobalObject(
+    Node* node, MaybeHandle<Context> native_context) {
+  Handle<Context> context;
+  if (GetSpecializationNativeContext(node, native_context).ToHandle(&context)) {
+    return handle(context->global_object());
+  }
+  return MaybeHandle<JSGlobalObject>();
+}
+
+
+// static
+Type* NodeProperties::GetTypeOrAny(Node* node) {
+  return IsTyped(node) ? node->type() : Type::Any();
 }
 
 

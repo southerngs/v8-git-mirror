@@ -7,7 +7,7 @@
 #include "src/compiler/node-properties.h"
 #include "src/compiler/simplified-operator.h"
 #include "src/compiler/simplified-operator-reducer.h"
-#include "src/conversions.h"
+#include "src/conversions-inl.h"
 #include "src/types.h"
 #include "test/unittests/compiler/graph-unittest.h"
 #include "test/unittests/compiler/node-test-utils.h"
@@ -30,7 +30,8 @@ class SimplifiedOperatorReducerTest : public TypedGraphTest {
   Reduction Reduce(Node* node) {
     MachineOperatorBuilder machine(zone());
     JSOperatorBuilder javascript(zone());
-    JSGraph jsgraph(isolate(), graph(), common(), &javascript, &machine);
+    JSGraph jsgraph(isolate(), graph(), common(), &javascript, simplified(),
+                    &machine);
     SimplifiedOperatorReducer reducer(&jsgraph);
     return reducer.Reduce(node);
   }
@@ -397,6 +398,28 @@ TEST_F(SimplifiedOperatorReducerTest, ChangeUint32ToTagged) {
                                 Int32Constant(bit_cast<int32_t>(n))));
     ASSERT_TRUE(reduction.Changed());
     EXPECT_THAT(reduction.replacement(), IsNumberConstant(BitEq(FastUI2D(n))));
+  }
+}
+
+// -----------------------------------------------------------------------------
+// TruncateTaggedToWord32
+
+TEST_F(SimplifiedOperatorReducerTest,
+       TruncateTaggedToWord3WithChangeFloat64ToTagged) {
+  Node* param0 = Parameter(0);
+  Reduction reduction = Reduce(graph()->NewNode(
+      simplified()->TruncateTaggedToWord32(),
+      graph()->NewNode(simplified()->ChangeFloat64ToTagged(), param0)));
+  ASSERT_TRUE(reduction.Changed());
+  EXPECT_THAT(reduction.replacement(), IsTruncateFloat64ToWord32(param0));
+}
+
+TEST_F(SimplifiedOperatorReducerTest, TruncateTaggedToWord32WithConstant) {
+  TRACED_FOREACH(double, n, kFloat64Values) {
+    Reduction reduction = Reduce(graph()->NewNode(
+        simplified()->TruncateTaggedToWord32(), NumberConstant(n)));
+    ASSERT_TRUE(reduction.Changed());
+    EXPECT_THAT(reduction.replacement(), IsInt32Constant(DoubleToInt32(n)));
   }
 }
 

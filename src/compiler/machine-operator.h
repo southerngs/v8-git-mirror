@@ -6,7 +6,7 @@
 #define V8_COMPILER_MACHINE_OPERATOR_H_
 
 #include "src/base/flags.h"
-#include "src/compiler/machine-type.h"
+#include "src/machine-type.h"
 
 namespace v8 {
 namespace internal {
@@ -17,8 +17,28 @@ struct MachineOperatorGlobalCache;
 class Operator;
 
 
+// For operators that are not supported on all platforms.
+class OptionalOperator final {
+ public:
+  explicit OptionalOperator(const Operator* op) : op_(op) {}
+
+  bool IsSupported() const { return op_ != nullptr; }
+  const Operator* op() const {
+    DCHECK_NOT_NULL(op_);
+    return op_;
+  }
+
+ private:
+  const Operator* const op_;
+};
+
 // Supported write barrier modes.
-enum WriteBarrierKind { kNoWriteBarrier, kFullWriteBarrier };
+enum WriteBarrierKind {
+  kNoWriteBarrier,
+  kMapWriteBarrier,
+  kPointerWriteBarrier,
+  kFullWriteBarrier
+};
 
 std::ostream& operator<<(std::ostream& os, WriteBarrierKind);
 
@@ -26,20 +46,22 @@ std::ostream& operator<<(std::ostream& os, WriteBarrierKind);
 // A Load needs a MachineType.
 typedef MachineType LoadRepresentation;
 
+LoadRepresentation LoadRepresentationOf(Operator const*);
 
 // A Store needs a MachineType and a WriteBarrierKind in order to emit the
 // correct write barrier.
 class StoreRepresentation final {
  public:
-  StoreRepresentation(MachineType machine_type,
+  StoreRepresentation(MachineRepresentation representation,
                       WriteBarrierKind write_barrier_kind)
-      : machine_type_(machine_type), write_barrier_kind_(write_barrier_kind) {}
+      : representation_(representation),
+        write_barrier_kind_(write_barrier_kind) {}
 
-  MachineType machine_type() const { return machine_type_; }
+  MachineRepresentation representation() const { return representation_; }
   WriteBarrierKind write_barrier_kind() const { return write_barrier_kind_; }
 
  private:
-  MachineType machine_type_;
+  MachineRepresentation representation_;
   WriteBarrierKind write_barrier_kind_;
 };
 
@@ -60,10 +82,11 @@ CheckedLoadRepresentation CheckedLoadRepresentationOf(Operator const*);
 
 
 // A CheckedStore needs a MachineType.
-typedef MachineType CheckedStoreRepresentation;
+typedef MachineRepresentation CheckedStoreRepresentation;
 
 CheckedStoreRepresentation CheckedStoreRepresentationOf(Operator const*);
 
+MachineRepresentation StackSlotRepresentationOf(Operator const* op);
 
 // Interface for building machine-level operators. These operators are
 // machine-level but machine-independent and thus define a language suitable
@@ -74,23 +97,44 @@ class MachineOperatorBuilder final : public ZoneObject {
   // for operations that are unsupported by some back-ends.
   enum Flag {
     kNoFlags = 0u,
-    kFloat32Abs = 1u << 0,
-    kFloat32Max = 1u << 1,
-    kFloat32Min = 1u << 2,
-    kFloat64Abs = 1u << 3,
-    kFloat64Max = 1u << 4,
-    kFloat64Min = 1u << 5,
-    kFloat64RoundDown = 1u << 6,
-    kFloat64RoundTruncate = 1u << 7,
-    kFloat64RoundTiesAway = 1u << 8,
-    kInt32DivIsSafe = 1u << 9,
-    kUint32DivIsSafe = 1u << 10,
-    kWord32ShiftIsSafe = 1u << 11
+    // Note that Float*Max behaves like `(b < a) ? a : b`, not like Math.max().
+    // Note that Float*Min behaves like `(a < b) ? a : b`, not like Math.min().
+    kFloat32Max = 1u << 0,
+    kFloat32Min = 1u << 1,
+    kFloat64Max = 1u << 2,
+    kFloat64Min = 1u << 3,
+    kFloat32RoundDown = 1u << 4,
+    kFloat64RoundDown = 1u << 5,
+    kFloat32RoundUp = 1u << 6,
+    kFloat64RoundUp = 1u << 7,
+    kFloat32RoundTruncate = 1u << 8,
+    kFloat64RoundTruncate = 1u << 9,
+    kFloat32RoundTiesEven = 1u << 10,
+    kFloat64RoundTiesEven = 1u << 11,
+    kFloat64RoundTiesAway = 1u << 12,
+    kInt32DivIsSafe = 1u << 13,
+    kUint32DivIsSafe = 1u << 14,
+    kWord32ShiftIsSafe = 1u << 15,
+    kWord32Ctz = 1u << 16,
+    kWord64Ctz = 1u << 17,
+    kWord32Popcnt = 1u << 18,
+    kWord64Popcnt = 1u << 19,
+    kWord32ReverseBits = 1u << 20,
+    kWord64ReverseBits = 1u << 21,
+    kAllOptionalOps = kFloat32Max | kFloat32Min | kFloat64Max | kFloat64Min |
+                      kFloat32RoundDown | kFloat64RoundDown | kFloat32RoundUp |
+                      kFloat64RoundUp | kFloat32RoundTruncate |
+                      kFloat64RoundTruncate | kFloat64RoundTiesAway |
+                      kFloat32RoundTiesEven | kFloat64RoundTiesEven |
+                      kWord32Ctz | kWord64Ctz | kWord32Popcnt | kWord64Popcnt |
+                      kWord32ReverseBits | kWord64ReverseBits
   };
   typedef base::Flags<Flag, unsigned> Flags;
 
-  explicit MachineOperatorBuilder(Zone* zone, MachineType word = kMachPtr,
-                                  Flags supportedOperators = kNoFlags);
+  explicit MachineOperatorBuilder(
+      Zone* zone,
+      MachineRepresentation word = MachineType::PointerRepresentation(),
+      Flags supportedOperators = kNoFlags);
 
   const Operator* Word32And();
   const Operator* Word32Or();
@@ -101,6 +145,12 @@ class MachineOperatorBuilder final : public ZoneObject {
   const Operator* Word32Ror();
   const Operator* Word32Equal();
   const Operator* Word32Clz();
+  const OptionalOperator Word32Ctz();
+  const OptionalOperator Word32Popcnt();
+  const OptionalOperator Word64Popcnt();
+  const Operator* Word64PopcntPlaceholder();
+  const OptionalOperator Word32ReverseBits();
+  const OptionalOperator Word64ReverseBits();
   bool Word32ShiftIsSafe() const { return flags_ & kWord32ShiftIsSafe; }
 
   const Operator* Word64And();
@@ -110,7 +160,17 @@ class MachineOperatorBuilder final : public ZoneObject {
   const Operator* Word64Shr();
   const Operator* Word64Sar();
   const Operator* Word64Ror();
+  const Operator* Word64Clz();
+  const OptionalOperator Word64Ctz();
+  const Operator* Word64CtzPlaceholder();
   const Operator* Word64Equal();
+
+  const Operator* Int32PairAdd();
+  const Operator* Int32PairSub();
+  const Operator* Int32PairMul();
+  const Operator* Word32PairShl();
+  const Operator* Word32PairShr();
+  const Operator* Word32PairSar();
 
   const Operator* Int32Add();
   const Operator* Int32AddWithOverflow();
@@ -131,7 +191,9 @@ class MachineOperatorBuilder final : public ZoneObject {
   bool Uint32DivIsSafe() const { return flags_ & kUint32DivIsSafe; }
 
   const Operator* Int64Add();
+  const Operator* Int64AddWithOverflow();
   const Operator* Int64Sub();
+  const Operator* Int64SubWithOverflow();
   const Operator* Int64Mul();
   const Operator* Int64Div();
   const Operator* Int64Mod();
@@ -139,7 +201,14 @@ class MachineOperatorBuilder final : public ZoneObject {
   const Operator* Int64LessThanOrEqual();
   const Operator* Uint64Div();
   const Operator* Uint64LessThan();
+  const Operator* Uint64LessThanOrEqual();
   const Operator* Uint64Mod();
+
+  // This operator reinterprets the bits of a word as tagged pointer.
+  const Operator* BitcastWordToTagged();
+
+  // JavaScript float64 to int32/uint32 truncation.
+  const Operator* TruncateFloat64ToWord32();
 
   // These operators change the representation of numbers while preserving the
   // value of the number. Narrowing operators assume the input is representable
@@ -149,16 +218,36 @@ class MachineOperatorBuilder final : public ZoneObject {
   const Operator* ChangeFloat32ToFloat64();
   const Operator* ChangeFloat64ToInt32();   // narrowing
   const Operator* ChangeFloat64ToUint32();  // narrowing
+  const Operator* TruncateFloat64ToUint32();
+  const Operator* TruncateFloat32ToInt32();
+  const Operator* TruncateFloat32ToUint32();
+  const Operator* TryTruncateFloat32ToInt64();
+  const Operator* TryTruncateFloat64ToInt64();
+  const Operator* TryTruncateFloat32ToUint64();
+  const Operator* TryTruncateFloat64ToUint64();
   const Operator* ChangeInt32ToFloat64();
   const Operator* ChangeInt32ToInt64();
   const Operator* ChangeUint32ToFloat64();
   const Operator* ChangeUint32ToUint64();
 
-  // These operators truncate numbers, both changing the representation of
-  // the number and mapping multiple input values onto the same output value.
+  // These operators truncate or round numbers, both changing the representation
+  // of the number and mapping multiple input values onto the same output value.
   const Operator* TruncateFloat64ToFloat32();
-  const Operator* TruncateFloat64ToInt32();  // JavaScript semantics.
   const Operator* TruncateInt64ToInt32();
+  const Operator* RoundFloat64ToInt32();
+  const Operator* RoundInt32ToFloat32();
+  const Operator* RoundInt64ToFloat32();
+  const Operator* RoundInt64ToFloat64();
+  const Operator* RoundUint32ToFloat32();
+  const Operator* RoundUint64ToFloat32();
+  const Operator* RoundUint64ToFloat64();
+
+  // These operators reinterpret the bits of a floating point number as an
+  // integer and vice versa.
+  const Operator* BitcastFloat32ToInt32();
+  const Operator* BitcastFloat64ToInt64();
+  const Operator* BitcastInt32ToFloat32();
+  const Operator* BitcastInt64ToFloat64();
 
   // Floating point operators always operate with IEEE 754 round-to-nearest
   // (single-precision).
@@ -188,32 +277,29 @@ class MachineOperatorBuilder final : public ZoneObject {
   const Operator* Float64LessThanOrEqual();
 
   // Floating point min/max complying to IEEE 754 (single-precision).
-  const Operator* Float32Max();
-  const Operator* Float32Min();
-  bool HasFloat32Max() { return flags_ & kFloat32Max; }
-  bool HasFloat32Min() { return flags_ & kFloat32Min; }
+  const OptionalOperator Float32Max();
+  const OptionalOperator Float32Min();
 
   // Floating point min/max complying to IEEE 754 (double-precision).
-  const Operator* Float64Max();
-  const Operator* Float64Min();
-  bool HasFloat64Max() { return flags_ & kFloat64Max; }
-  bool HasFloat64Min() { return flags_ & kFloat64Min; }
+  const OptionalOperator Float64Max();
+  const OptionalOperator Float64Min();
 
   // Floating point abs complying to IEEE 754 (single-precision).
   const Operator* Float32Abs();
-  bool HasFloat32Abs() const { return flags_ & kFloat32Abs; }
 
   // Floating point abs complying to IEEE 754 (double-precision).
   const Operator* Float64Abs();
-  bool HasFloat64Abs() const { return flags_ & kFloat64Abs; }
 
   // Floating point rounding.
-  const Operator* Float64RoundDown();
-  const Operator* Float64RoundTruncate();
-  const Operator* Float64RoundTiesAway();
-  bool HasFloat64RoundDown() { return flags_ & kFloat64RoundDown; }
-  bool HasFloat64RoundTruncate() { return flags_ & kFloat64RoundTruncate; }
-  bool HasFloat64RoundTiesAway() { return flags_ & kFloat64RoundTiesAway; }
+  const OptionalOperator Float32RoundDown();
+  const OptionalOperator Float64RoundDown();
+  const OptionalOperator Float32RoundUp();
+  const OptionalOperator Float64RoundUp();
+  const OptionalOperator Float32RoundTruncate();
+  const OptionalOperator Float64RoundTruncate();
+  const OptionalOperator Float64RoundTiesAway();
+  const OptionalOperator Float32RoundTiesEven();
+  const OptionalOperator Float64RoundTiesEven();
 
   // Floating point bit representation.
   const Operator* Float64ExtractLowWord32();
@@ -227,18 +313,25 @@ class MachineOperatorBuilder final : public ZoneObject {
   // store [base + index], value
   const Operator* Store(StoreRepresentation rep);
 
+  const Operator* StackSlot(MachineRepresentation rep);
+
   // Access to the machine stack.
   const Operator* LoadStackPointer();
+  const Operator* LoadFramePointer();
+  const Operator* LoadParentFramePointer();
 
   // checked-load heap, index, length
   const Operator* CheckedLoad(CheckedLoadRepresentation);
   // checked-store heap, index, length, value
   const Operator* CheckedStore(CheckedStoreRepresentation);
 
+  // atomic-load [base + index]
+  const Operator* AtomicLoad(LoadRepresentation rep);
+
   // Target machine word-size assumed by this builder.
-  bool Is32() const { return word() == kRepWord32; }
-  bool Is64() const { return word() == kRepWord64; }
-  MachineType word() const { return word_; }
+  bool Is32() const { return word() == MachineRepresentation::kWord32; }
+  bool Is64() const { return word() == MachineRepresentation::kWord64; }
+  MachineRepresentation word() const { return word_; }
 
 // Pseudo operators that translate to 32/64-bit operators depending on the
 // word-size of the target machine assumed by this builder.
@@ -250,6 +343,7 @@ class MachineOperatorBuilder final : public ZoneObject {
   V(Word, Shr)            \
   V(Word, Sar)            \
   V(Word, Ror)            \
+  V(Word, Clz)            \
   V(Word, Equal)          \
   V(Int, Add)             \
   V(Int, Sub)             \
@@ -270,9 +364,8 @@ class MachineOperatorBuilder final : public ZoneObject {
 #undef PSEUDO_OP_LIST
 
  private:
-  Zone* const zone_;
   MachineOperatorGlobalCache const& cache_;
-  MachineType const word_;
+  MachineRepresentation const word_;
   Flags const flags_;
 
   DISALLOW_COPY_AND_ASSIGN(MachineOperatorBuilder);

@@ -4,15 +4,17 @@
 
 #include "src/compiler/load-elimination.h"
 
+#include "src/compiler/common-operator.h"
+#include "src/compiler/graph.h"
 #include "src/compiler/node-properties.h"
 #include "src/compiler/simplified-operator.h"
+#include "src/types.h"
 
 namespace v8 {
 namespace internal {
 namespace compiler {
 
 LoadElimination::~LoadElimination() {}
-
 
 Reduction LoadElimination::Reduce(Node* node) {
   switch (node->opcode()) {
@@ -24,11 +26,10 @@ Reduction LoadElimination::Reduce(Node* node) {
   return NoChange();
 }
 
-
 Reduction LoadElimination::ReduceLoadField(Node* node) {
   DCHECK_EQ(IrOpcode::kLoadField, node->opcode());
   FieldAccess const access = FieldAccessOf(node->op());
-  Node* const object = NodeProperties::GetValueInput(node, 0);
+  Node* object = NodeProperties::GetValueInput(node, 0);
   for (Node* effect = NodeProperties::GetEffectInput(node);;
        effect = NodeProperties::GetEffectInput(effect)) {
     switch (effect->opcode()) {
@@ -36,7 +37,7 @@ Reduction LoadElimination::ReduceLoadField(Node* node) {
         if (object == NodeProperties::GetValueInput(effect, 0) &&
             access == FieldAccessOf(effect->op())) {
           Node* const value = effect;
-          NodeProperties::ReplaceWithValue(node, value);
+          ReplaceWithValue(node, value);
           return Replace(value);
         }
         break;
@@ -45,17 +46,44 @@ Reduction LoadElimination::ReduceLoadField(Node* node) {
         if (access == FieldAccessOf(effect->op())) {
           if (object == NodeProperties::GetValueInput(effect, 0)) {
             Node* const value = NodeProperties::GetValueInput(effect, 1);
-            NodeProperties::ReplaceWithValue(node, value);
-            return Replace(value);
+            Type* stored_value_type = NodeProperties::GetType(value);
+            Type* load_type = NodeProperties::GetType(node);
+            // Make sure the replacement's type is a subtype of the node's
+            // type. Otherwise we could confuse optimizations that were
+            // based on the original type.
+            if (stored_value_type->Is(load_type)) {
+              ReplaceWithValue(node, value);
+              return Replace(value);
+            } else {
+              Node* renamed = graph()->NewNode(
+                  common()->Guard(Type::Intersect(stored_value_type, load_type,
+                                                  graph()->zone())),
+                  value, NodeProperties::GetControlInput(node));
+              ReplaceWithValue(node, renamed);
+              return Replace(renamed);
+            }
           }
           // TODO(turbofan): Alias analysis to the rescue?
           return NoChange();
         }
         break;
       }
+      case IrOpcode::kBeginRegion:
       case IrOpcode::kStoreBuffer:
       case IrOpcode::kStoreElement: {
         // These can never interfere with field loads.
+        break;
+      }
+      case IrOpcode::kFinishRegion: {
+        // "Look through" FinishRegion nodes to make LoadElimination capable
+        // of looking into atomic regions.
+        if (object == effect) object = NodeProperties::GetValueInput(effect, 0);
+        break;
+      }
+      case IrOpcode::kAllocate: {
+        // Allocations don't interfere with field loads. In case we see the
+        // actual allocation for the {object} we can abort.
+        if (object == effect) return NoChange();
         break;
       }
       default: {

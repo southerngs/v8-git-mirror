@@ -7,6 +7,8 @@
 
 #include <string>
 
+#include "src/base/platform/elapsed-timer.h"
+#include "src/base/smart-pointers.h"
 #include "src/compilation-statistics.h"
 #include "src/compiler/zone-pool.h"
 
@@ -22,6 +24,7 @@ class PipelineStatistics : public Malloced {
   ~PipelineStatistics();
 
   void BeginPhaseKind(const char* phase_kind_name);
+  void EndPhaseKind();
 
  private:
   size_t OuterZoneSize() {
@@ -36,14 +39,13 @@ class PipelineStatistics : public Malloced {
     void End(PipelineStatistics* pipeline_stats,
              CompilationStatistics::BasicStats* diff);
 
-    SmartPointer<ZonePool::StatsScope> scope_;
+    base::SmartPointer<ZonePool::StatsScope> scope_;
     base::ElapsedTimer timer_;
     size_t outer_zone_initial_size_;
     size_t allocated_bytes_at_start_;
   };
 
   bool InPhaseKind() { return !phase_kind_stats_.scope_.is_empty(); }
-  void EndPhaseKind();
 
   friend class PhaseScope;
   bool InPhase() { return !phase_stats_.scope_.is_empty(); }
@@ -76,10 +78,10 @@ class PhaseScope {
  public:
   PhaseScope(PipelineStatistics* pipeline_stats, const char* name)
       : pipeline_stats_(pipeline_stats) {
-    if (pipeline_stats_ != NULL) pipeline_stats_->BeginPhase(name);
+    if (pipeline_stats_ != nullptr) pipeline_stats_->BeginPhase(name);
   }
   ~PhaseScope() {
-    if (pipeline_stats_ != NULL) pipeline_stats_->EndPhase();
+    if (pipeline_stats_ != nullptr) pipeline_stats_->EndPhase();
   }
 
  private:

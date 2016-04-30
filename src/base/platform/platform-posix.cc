@@ -81,6 +81,8 @@ int OS::ActivationFrameAlignment() {
   return 8;
 #elif V8_TARGET_ARCH_MIPS
   return 8;
+#elif V8_TARGET_ARCH_S390
+  return 8;
 #else
   // Otherwise we just assume 16 byte alignment, i.e.:
   // - With gcc 4.4 the tree vectorization optimizer can generate code
@@ -185,6 +187,15 @@ void* OS::GetRandomMmapAddr() {
   // Little-endian Linux: 48 bits of virtual addressing.
   raw_addr &= V8_UINT64_C(0x3ffffffff000);
 #endif
+#elif V8_TARGET_ARCH_S390X
+  // Linux on Z uses bits 22-32 for Region Indexing, which translates to 42 bits
+  // of virtual addressing.  Truncate to 40 bits to allow kernel chance to
+  // fulfill request.
+  raw_addr &= V8_UINT64_C(0xfffffff000);
+#elif V8_TARGET_ARCH_S390
+  // 31 bits of virtual addressing.  Truncate to 29 bits to allow kernel chance
+  // to fulfill request.
+  raw_addr &= 0x1ffff000;
 #else
   raw_addr &= 0x3ffff000;
 
@@ -219,9 +230,8 @@ size_t OS::AllocateAlignment() {
 }
 
 
-void OS::Sleep(int milliseconds) {
-  useconds_t ms = static_cast<useconds_t>(milliseconds);
-  usleep(1000 * ms);
+void OS::Sleep(TimeDelta interval) {
+  usleep(static_cast<useconds_t>(interval.InMicroseconds()));
 }
 
 
@@ -253,6 +263,9 @@ void OS::DebugBreak() {
 #endif  // V8_OS_NACL
 #elif V8_HOST_ARCH_X64
   asm("int $3");
+#elif V8_HOST_ARCH_S390
+  // Software breakpoint instruction is 0x0001
+  asm volatile(".word 0x0001");
 #else
 #error Unsupported host architecture.
 #endif
@@ -385,7 +398,7 @@ void OS::ClearTimezoneCache(TimezoneCache* cache) {
 double OS::DaylightSavingsOffset(double time, TimezoneCache*) {
   if (std::isnan(time)) return std::numeric_limits<double>::quiet_NaN();
   time_t tv = static_cast<time_t>(std::floor(time/msPerSecond));
-  struct tm* t = localtime(&tv);
+  struct tm* t = localtime(&tv);  // NOLINT(runtime/threadsafe_fn)
   if (NULL == t) return std::numeric_limits<double>::quiet_NaN();
   return t->tm_isdst > 0 ? 3600 * msPerSecond : 0;
 }
@@ -416,9 +429,10 @@ bool OS::Remove(const char* path) {
   return (remove(path) == 0);
 }
 
+char OS::DirectorySeparator() { return '/'; }
 
 bool OS::isDirectorySeparator(const char ch) {
-  return ch == '/';
+  return ch == DirectorySeparator();
 }
 
 
@@ -631,13 +645,6 @@ void Thread::Join() {
 }
 
 
-void Thread::YieldCPU() {
-  int result = sched_yield();
-  DCHECK_EQ(0, result);
-  USE(result);
-}
-
-
 static Thread::LocalStorageKey PthreadKeyToLocalKey(pthread_key_t pthread_key) {
 #if V8_OS_CYGWIN
   // We need to cast pthread_key_t to Thread::LocalStorageKey in two steps
@@ -761,5 +768,5 @@ void Thread::SetThreadLocal(LocalStorageKey key, void* value) {
   USE(result);
 }
 
-
-} }  // namespace v8::base
+}  // namespace base
+}  // namespace v8

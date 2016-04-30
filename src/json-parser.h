@@ -5,13 +5,15 @@
 #ifndef V8_JSON_PARSER_H_
 #define V8_JSON_PARSER_H_
 
-#include "src/v8.h"
-
-#include "src/char-predicates-inl.h"
+#include "src/char-predicates.h"
 #include "src/conversions.h"
-#include "src/heap/spaces-inl.h"
+#include "src/debug/debug.h"
+#include "src/factory.h"
+#include "src/field-type.h"
 #include "src/messages.h"
-#include "src/token.h"
+#include "src/parsing/scanner.h"
+#include "src/parsing/token.h"
+#include "src/transitions.h"
 
 namespace v8 {
 namespace internal {
@@ -35,6 +37,7 @@ class JsonParser BASE_EMBEDDED {
         source_length_(source->length()),
         isolate_(source->map()->GetHeap()->isolate()),
         factory_(isolate_->factory()),
+        zone_(isolate_->allocator()),
         object_constructor_(isolate_->native_context()->object_function(),
                             isolate_),
         position_(-1) {
@@ -126,7 +129,9 @@ class JsonParser BASE_EMBEDDED {
   }
 
   Handle<String> ParseJsonInternalizedString() {
-    return ScanJsonString<true>();
+    Handle<String> result = ScanJsonString<true>();
+    if (result.is_null()) return result;
+    return factory()->InternalizeString(result);
   }
 
   template <bool is_internalized>
@@ -180,7 +185,7 @@ class JsonParser BASE_EMBEDDED {
   inline Factory* factory() { return factory_; }
   inline Handle<JSFunction> object_constructor() { return object_constructor_; }
 
-  static const int kInitialSpecialStringLength = 1024;
+  static const int kInitialSpecialStringLength = 32;
   static const int kPretenureTreshold = 100 * 1024;
 
 
@@ -213,14 +218,14 @@ MaybeHandle<Object> JsonParser<seq_one_byte>::ParseJson() {
     if (isolate_->has_pending_exception()) return Handle<Object>::null();
 
     // Parse failed. Current character is the unexpected token.
-    const char* message;
     Factory* factory = this->factory();
-    Handle<JSArray> array;
+    MessageTemplate::Template message;
+    Handle<Object> arg1 = Handle<Smi>(Smi::FromInt(position_), isolate());
+    Handle<Object> arg2;
 
     switch (c0_) {
       case kEndOfString:
-        message = "unexpected_eos";
-        array = factory->NewJSArray(0);
+        message = MessageTemplate::kJsonParseUnexpectedEOS;
         break;
       case '-':
       case '0':
@@ -233,26 +238,24 @@ MaybeHandle<Object> JsonParser<seq_one_byte>::ParseJson() {
       case '7':
       case '8':
       case '9':
-        message = "unexpected_token_number";
-        array = factory->NewJSArray(0);
+        message = MessageTemplate::kJsonParseUnexpectedTokenNumber;
         break;
       case '"':
-        message = "unexpected_token_string";
-        array = factory->NewJSArray(0);
+        message = MessageTemplate::kJsonParseUnexpectedTokenString;
         break;
       default:
-        message = "unexpected_token";
-        Handle<Object> name = factory->LookupSingleCharacterStringFromCode(c0_);
-        Handle<FixedArray> element = factory->NewFixedArray(1);
-        element->set(0, *name);
-        array = factory->NewJSArrayWithElements(element);
+        message = MessageTemplate::kJsonParseUnexpectedToken;
+        arg2 = arg1;
+        arg1 = factory->LookupSingleCharacterStringFromCode(c0_);
         break;
     }
 
-    MessageLocation location(factory->NewScript(source_),
-                             position_,
-                             position_ + 1);
-    Handle<Object> error = factory->NewSyntaxError(message, array);
+    Handle<Script> script(factory->NewScript(source_));
+    // We should sent compile error event because we compile JSON object in
+    // separated source file.
+    isolate()->debug()->OnCompileError(script);
+    MessageLocation location(script, position_, position_ + 1);
+    Handle<Object> error = factory->NewSyntaxError(message, arg1, arg2);
     return isolate()->template Throw<Object>(error, &location);
   }
   return result;
@@ -268,10 +271,10 @@ Handle<Object> JsonParser<seq_one_byte>::ParseJsonValue() {
     return Handle<Object>::null();
   }
 
-  if (isolate_->stack_guard()->InterruptRequested()) {
+  if (stack_check.InterruptRequested()) {
     ExecutionAccess access(isolate_);
     // Avoid blocking GC in long running parser (v8:3974).
-    isolate_->stack_guard()->CheckAndHandleGCInterrupt();
+    isolate_->stack_guard()->HandleGCInterrupt();
   }
 
   if (c0_ == '"') return ParseJsonString();
@@ -317,7 +320,7 @@ ParseElementResult JsonParser<seq_one_byte>::ParseElement(
   } else {
     do {
       int d = c0_ - '0';
-      if (index > 429496729U - ((d > 5) ? 1 : 0)) break;
+      if (index > 429496729U - ((d + 3) >> 3)) break;
       index = (index * 10) + d;
       Advance();
     } while (IsDecimalDigit(c0_));
@@ -331,7 +334,8 @@ ParseElementResult JsonParser<seq_one_byte>::ParseElement(
       AdvanceSkipWhitespace();
       Handle<Object> value = ParseJsonValue();
       if (!value.is_null()) {
-        JSObject::SetOwnElement(json_object, index, value, SLOPPY).Assert();
+        JSObject::SetOwnElementIgnoreAttributes(json_object, index, value, NONE)
+            .Assert();
         return kElementFound;
       } else {
         return kNullHandle;
@@ -417,7 +421,7 @@ Handle<Object> JsonParser<seq_one_byte>::ParseJsonObject() {
               !target->instance_descriptors()
                    ->GetFieldType(descriptor)
                    ->NowContains(value)) {
-            Handle<HeapType> value_type(
+            Handle<FieldType> value_type(
                 value->OptimalType(isolate(), expected_representation));
             Map::GeneralizeFieldType(target, descriptor,
                                      expected_representation, value_type);
@@ -439,7 +443,8 @@ Handle<Object> JsonParser<seq_one_byte>::ParseJsonObject() {
       // Commit the intermediate state to the object and stop transitioning.
       CommitStateToJsonObject(json_object, map, &properties);
 
-      Runtime::DefineObjectProperty(json_object, key, value, NONE).Check();
+      JSObject::DefinePropertyOrElementIgnoreAttributes(json_object, key, value)
+          .Check();
     } while (transitioning && MatchSkipWhiteSpace(','));
 
     // If we transitioned until the very end, transition the map now.
@@ -475,7 +480,8 @@ Handle<Object> JsonParser<seq_one_byte>::ParseJsonObject() {
         value = ParseJsonValue();
         if (value.is_null()) return ReportUnexpectedCharacter();
 
-        Runtime::DefineObjectProperty(json_object, key, value, NONE).Check();
+        JSObject::DefinePropertyOrElementIgnoreAttributes(json_object, key,
+                                                          value).Check();
       }
     }
 
@@ -760,17 +766,8 @@ Handle<String> JsonParser<seq_one_byte>::ScanJsonString() {
                                                              position_);
       }
       if (c0 < 0x20) return Handle<String>::null();
-      if (static_cast<uint32_t>(c0) >
-          unibrow::Utf16::kMaxNonSurrogateCharCode) {
-        running_hash =
-            StringHasher::AddCharacterCore(running_hash,
-                                           unibrow::Utf16::LeadSurrogate(c0));
-        running_hash =
-            StringHasher::AddCharacterCore(running_hash,
-                                           unibrow::Utf16::TrailSurrogate(c0));
-      } else {
-        running_hash = StringHasher::AddCharacterCore(running_hash, c0);
-      }
+      running_hash = StringHasher::AddCharacterCore(running_hash,
+                                                    static_cast<uint16_t>(c0));
       position++;
       if (position >= source_length_) return Handle<String>::null();
       c0 = seq_source_->SeqOneByteStringGet(position);
@@ -844,6 +841,7 @@ Handle<String> JsonParser<seq_one_byte>::ScanJsonString() {
   return result;
 }
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_JSON_PARSER_H_

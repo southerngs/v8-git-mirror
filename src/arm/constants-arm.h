@@ -5,6 +5,12 @@
 #ifndef V8_ARM_CONSTANTS_ARM_H_
 #define V8_ARM_CONSTANTS_ARM_H_
 
+#include <stdint.h>
+
+#include "src/base/logging.h"
+#include "src/base/macros.h"
+#include "src/globals.h"
+
 // ARM EABI is required.
 #if defined(__arm__) && !defined(__ARM_EABI__)
 #error ARM EABI support is required.
@@ -41,6 +47,11 @@ const int kNumVFPRegisters = kNumVFPSingleRegisters + kNumVFPDoubleRegisters;
 // PC is register 15.
 const int kPCRegister = 15;
 const int kNoRegister = -1;
+
+// Used in embedded constant pool builder - max reach in bits for
+// various load instructions (unsigned)
+const int kLdrMaxReachBits = 12;
+const int kVldrMaxReachBits = 10;
 
 // -----------------------------------------------------------------------------
 // Conditions.
@@ -205,6 +216,22 @@ enum {
   kImm8Mask = (1 << 8) - 1,
   kOff12Mask = (1 << 12) - 1,
   kOff8Mask = (1 << 8) - 1
+};
+
+
+enum BarrierOption {
+  OSHLD = 0x1,
+  OSHST = 0x2,
+  OSH = 0x3,
+  NSHLD = 0x5,
+  NSHST = 0x6,
+  NSH = 0x7,
+  ISHLD = 0x9,
+  ISHST = 0xa,
+  ISH = 0xb,
+  LD = 0xd,
+  ST = 0xe,
+  SY = 0xf,
 };
 
 
@@ -627,7 +654,7 @@ class Instruction {
   inline bool HasH()    const { return HValue() == 1; }
   inline bool HasLink() const { return LinkValue() == 1; }
 
-  // Decoding the double immediate in the vmov instruction.
+  // Decode the double immediate from a vmov instruction.
   double DoubleImmedVmov() const;
 
   // Instructions are read of out a code stream. The only way to get a
@@ -691,6 +718,7 @@ class VFPRegisters {
 };
 
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_ARM_CONSTANTS_ARM_H_

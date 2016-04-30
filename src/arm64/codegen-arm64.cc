@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/arm64/codegen-arm64.h"
 
 #if V8_TARGET_ARCH_ARM64
 
@@ -16,9 +16,9 @@ namespace internal {
 #define __ ACCESS_MASM(masm)
 
 #if defined(USE_SIMULATOR)
-byte* fast_exp_arm64_machine_code = NULL;
-double fast_exp_simulator(double x) {
-  Simulator * simulator = Simulator::current(Isolate::Current());
+byte* fast_exp_arm64_machine_code = nullptr;
+double fast_exp_simulator(double x, Isolate* isolate) {
+  Simulator * simulator = Simulator::current(isolate);
   Simulator::CallArgument args[] = {
       Simulator::CallArgument(x),
       Simulator::CallArgument::End()
@@ -28,19 +28,18 @@ double fast_exp_simulator(double x) {
 #endif
 
 
-UnaryMathFunction CreateExpFunction() {
-  if (!FLAG_fast_math) return &std::exp;
-
+UnaryMathFunctionWithIsolate CreateExpFunction(Isolate* isolate) {
   // Use the Math.exp implemetation in MathExpGenerator::EmitMathExp() to create
   // an AAPCS64-compliant exp() function. This will be faster than the C
   // library's exp() function, but probably less accurate.
   size_t actual_size;
   byte* buffer =
       static_cast<byte*>(base::OS::Allocate(1 * KB, &actual_size, true));
-  if (buffer == NULL) return &std::exp;
+  if (buffer == nullptr) return nullptr;
 
   ExternalReference::InitializeMathExpData();
-  MacroAssembler masm(NULL, buffer, static_cast<int>(actual_size));
+  MacroAssembler masm(isolate, buffer, static_cast<int>(actual_size),
+                      CodeObjectRequired::kNo);
   masm.SetStackPointer(csp);
 
   // The argument will be in d0 on entry.
@@ -64,11 +63,11 @@ UnaryMathFunction CreateExpFunction() {
   masm.GetCode(&desc);
   DCHECK(!RelocInfo::RequiresRelocation(desc));
 
-  CpuFeatures::FlushICache(buffer, actual_size);
+  Assembler::FlushICache(isolate, buffer, actual_size);
   base::OS::ProtectCode(buffer, actual_size);
 
 #if !defined(USE_SIMULATOR)
-  return FUNCTION_CAST<UnaryMathFunction>(buffer);
+  return FUNCTION_CAST<UnaryMathFunctionWithIsolate>(buffer);
 #else
   fast_exp_arm64_machine_code = buffer;
   return &fast_exp_simulator;
@@ -76,8 +75,8 @@ UnaryMathFunction CreateExpFunction() {
 }
 
 
-UnaryMathFunction CreateSqrtFunction() {
-  return &std::sqrt;
+UnaryMathFunctionWithIsolate CreateSqrtFunction(Isolate* isolate) {
+  return nullptr;
 }
 
 
@@ -176,8 +175,8 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
   Register map_root = array_size;
   __ LoadRoot(map_root, Heap::kFixedDoubleArrayMapRootIndex);
   __ SmiTag(x11, length);
-  __ Str(x11, MemOperand(array, FixedDoubleArray::kLengthOffset));
-  __ Str(map_root, MemOperand(array, HeapObject::kMapOffset));
+  __ Str(x11, FieldMemOperand(array, FixedDoubleArray::kLengthOffset));
+  __ Str(map_root, FieldMemOperand(array, HeapObject::kMapOffset));
 
   __ Str(target_map, FieldMemOperand(receiver, HeapObject::kMapOffset));
   __ RecordWriteField(receiver, HeapObject::kMapOffset, target_map, scratch,
@@ -185,18 +184,18 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
                       OMIT_SMI_CHECK);
 
   // Replace receiver's backing store with newly created FixedDoubleArray.
-  __ Add(x10, array, kHeapObjectTag);
-  __ Str(x10, FieldMemOperand(receiver, JSObject::kElementsOffset));
-  __ RecordWriteField(receiver, JSObject::kElementsOffset, x10,
-                      scratch, kLRHasBeenSaved, kDontSaveFPRegs,
-                      EMIT_REMEMBERED_SET, OMIT_SMI_CHECK);
+  __ Move(x10, array);
+  __ Str(array, FieldMemOperand(receiver, JSObject::kElementsOffset));
+  __ RecordWriteField(receiver, JSObject::kElementsOffset, x10, scratch,
+                      kLRHasBeenSaved, kDontSaveFPRegs, EMIT_REMEMBERED_SET,
+                      OMIT_SMI_CHECK);
 
   // Prepare for conversion loop.
   Register src_elements = x10;
   Register dst_elements = x11;
   Register dst_end = x12;
   __ Add(src_elements, elements, FixedArray::kHeaderSize - kHeapObjectTag);
-  __ Add(dst_elements, array, FixedDoubleArray::kHeaderSize);
+  __ Add(dst_elements, array, FixedDoubleArray::kHeaderSize - kHeapObjectTag);
   __ Add(dst_end, dst_elements, Operand(length, LSL, kDoubleSizeLog2));
 
   FPRegister nan_d = d1;
@@ -283,8 +282,8 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
   Register map_root = array_size;
   __ LoadRoot(map_root, Heap::kFixedArrayMapRootIndex);
   __ SmiTag(x11, length);
-  __ Str(x11, MemOperand(array, FixedDoubleArray::kLengthOffset));
-  __ Str(map_root, MemOperand(array, HeapObject::kMapOffset));
+  __ Str(x11, FieldMemOperand(array, FixedDoubleArray::kLengthOffset));
+  __ Str(map_root, FieldMemOperand(array, HeapObject::kMapOffset));
 
   // Prepare for conversion loop.
   Register src_elements = x10;
@@ -294,7 +293,7 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
   __ LoadRoot(the_hole, Heap::kTheHoleValueRootIndex);
   __ Add(src_elements, elements,
          FixedDoubleArray::kHeaderSize - kHeapObjectTag);
-  __ Add(dst_elements, array, FixedArray::kHeaderSize);
+  __ Add(dst_elements, array, FixedArray::kHeaderSize - kHeapObjectTag);
   __ Add(dst_end, dst_elements, Operand(length, LSL, kPointerSizeLog2));
 
   // Allocating heap numbers in the loop below can fail and cause a jump to
@@ -308,8 +307,7 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
   __ Cmp(dst_elements, dst_end);
   __ B(lt, &initialization_loop);
 
-  __ Add(dst_elements, array, FixedArray::kHeaderSize);
-  __ Add(array, array, kHeapObjectTag);
+  __ Add(dst_elements, array, FixedArray::kHeaderSize - kHeapObjectTag);
 
   Register heap_num_map = x15;
   __ LoadRoot(heap_num_map, Heap::kHeapNumberMapRootIndex);
@@ -368,12 +366,13 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
 }
 
 
-CodeAgingHelper::CodeAgingHelper() {
+CodeAgingHelper::CodeAgingHelper(Isolate* isolate) {
+  USE(isolate);
   DCHECK(young_sequence_.length() == kNoCodeAgeSequenceLength);
   // The sequence of instructions that is patched out for aging code is the
   // following boilerplate stack-building prologue that is found both in
   // FUNCTION and OPTIMIZED_FUNCTION code:
-  PatchingAssembler patcher(young_sequence_.start(),
+  PatchingAssembler patcher(isolate, young_sequence_.start(),
                             young_sequence_.length() / kInstructionSize);
   // The young sequence is the frame setup code for FUNCTION code types. It is
   // generated by FullCodeGenerator::Generate.
@@ -382,7 +381,7 @@ CodeAgingHelper::CodeAgingHelper() {
 #ifdef DEBUG
   const int length = kCodeAgeStubEntryOffset / kInstructionSize;
   DCHECK(old_sequence_.length() >= kCodeAgeStubEntryOffset);
-  PatchingAssembler patcher_old(old_sequence_.start(), length);
+  PatchingAssembler patcher_old(isolate, old_sequence_.start(), length);
   MacroAssembler::EmitCodeAgeSequence(&patcher_old, NULL);
 #endif
 }
@@ -417,7 +416,7 @@ void Code::PatchPlatformCodeAge(Isolate* isolate,
                                 byte* sequence,
                                 Code::Age age,
                                 MarkingParity parity) {
-  PatchingAssembler patcher(sequence,
+  PatchingAssembler patcher(isolate, sequence,
                             kNoCodeAgeSequenceLength / kInstructionSize);
   if (age == kNoAgeCodeAge) {
     MacroAssembler::EmitFrameSetupForCodeAgePatching(&patcher);
@@ -634,6 +633,7 @@ void MathExpGenerator::EmitMathExp(MacroAssembler* masm,
 
 #undef __
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_TARGET_ARCH_ARM64

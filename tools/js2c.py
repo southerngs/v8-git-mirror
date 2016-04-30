@@ -31,10 +31,9 @@
 # char arrays. It is used for embedded JavaScript code in the V8
 # library.
 
-import os, re, sys, string
-import argparse
+import os, re
+import optparse
 import jsmin
-import bz2
 import textwrap
 
 
@@ -108,6 +107,9 @@ def ExpandMacroDefinition(lines, pos, name_pattern, macro, expander):
     mapping = { }
     def add_arg(str):
       # Remember to expand recursively in the arguments
+      if arg_index[0] >= len(macro.args):
+        lineno = lines.count(os.linesep, 0, start) + 1
+        raise Error('line %s: Too many arguments for macro "%s"' % (lineno, name_pattern.pattern))
       replacement = expander(str.strip())
       mapping[macro.args[arg_index[0]]] = replacement
       arg_index[0] += 1
@@ -196,7 +198,7 @@ def ReadMacros(lines):
   return (constants, macros)
 
 
-TEMPLATE_PATTERN = re.compile(r'^\s+T\(([A-Z][a-zA-Z]*),')
+TEMPLATE_PATTERN = re.compile(r'^\s+T\(([A-Z][a-zA-Z0-9]*),')
 
 def ReadMessageTemplates(lines):
   templates = []
@@ -240,7 +242,7 @@ def ExpandInlineMacros(lines):
     lines = ExpandMacroDefinition(lines, pos, name_pattern, macro, non_expander)
 
 
-INLINE_CONSTANT_PATTERN = re.compile(r'define\s+([a-zA-Z0-9_]+)\s*=\s*([^;\n]+)[;\n]')
+INLINE_CONSTANT_PATTERN = re.compile(r'define\s+([a-zA-Z0-9_]+)\s*=\s*([^;\n]+);\n')
 
 def ExpandInlineConstants(lines):
   pos = 0
@@ -340,14 +342,14 @@ def BuildFilterChain(macro_filename, message_template_file):
     macro_filename: Name of the macro file, if any.
 
   Returns:
-    A function (string -> string) that reads a source file and processes it.
+    A function (string -> string) that processes a source file.
   """
-  filter_chain = [ReadFile]
+  filter_chain = []
 
   if macro_filename:
     (consts, macros) = ReadMacros(ReadFile(macro_filename))
-    filter_chain.append(lambda l: ExpandConstants(l, consts))
     filter_chain.append(lambda l: ExpandMacros(l, macros))
+    filter_chain.append(lambda l: ExpandConstants(l, consts))
 
   if message_template_file:
     message_templates = ReadMessageTemplates(ReadFile(message_template_file))
@@ -367,7 +369,7 @@ def BuildFilterChain(macro_filename, message_template_file):
   return reduce(chain, filter_chain)
 
 def BuildExtraFilterChain():
-  return lambda x: RemoveCommentsAndTrailingWhitespace(Validate(ReadFile(x)))
+  return lambda x: RemoveCommentsAndTrailingWhitespace(Validate(x))
 
 class Sources:
   def __init__(self):
@@ -377,7 +379,7 @@ class Sources:
 
 
 def IsDebuggerFile(filename):
-  return filename.endswith("-debugger.js")
+  return "debug" in filename
 
 def IsMacroFile(filename):
   return filename.endswith("macros.py")
@@ -386,14 +388,14 @@ def IsMessageTemplateFile(filename):
   return filename.endswith("messages.h")
 
 
-def PrepareSources(source_files, extra_files, emit_js):
+def PrepareSources(source_files, native_type, emit_js):
   """Read, prepare and assemble the list of source files.
 
   Args:
     source_files: List of JavaScript-ish source files. A file named macros.py
         will be treated as a list of macros.
-    extra_files: List of JavaScript-ish extra source files, passed in
-        externally from V8. Will not be minified or macro-ified.
+    native_type: String corresponding to a NativeType enum value, allowing us
+        to treat different types of sources differently.
     emit_js: True if we should skip the byte conversion and just leave the
         sources as JS strings.
 
@@ -414,18 +416,30 @@ def PrepareSources(source_files, extra_files, emit_js):
     source_files.remove(message_template_files[0])
     message_template_file = message_template_files[0]
 
-  filters = BuildFilterChain(macro_file, message_template_file)
-  extra_filters = BuildExtraFilterChain()
+  filters = None
+  if native_type in ("EXTRAS", "EXPERIMENTAL_EXTRAS"):
+    filters = BuildExtraFilterChain()
+  else:
+    filters = BuildFilterChain(macro_file, message_template_file)
 
   # Sort 'debugger' sources first.
   source_files = sorted(source_files,
                         lambda l,r: IsDebuggerFile(r) - IsDebuggerFile(l))
 
+  source_files_and_contents = [(f, ReadFile(f)) for f in source_files]
+
+  # Have a single not-quite-empty source file if there are none present;
+  # otherwise you get errors trying to compile an empty C++ array.
+  # It cannot be empty (or whitespace, which gets trimmed to empty), as
+  # the deserialization code assumes each file is nonempty.
+  if not source_files_and_contents:
+    source_files_and_contents = [("dummy.js", "(function() {})")]
+
   result = Sources()
 
-  for source in source_files:
+  for (source, contents) in source_files_and_contents:
     try:
-      lines = filters(source)
+      lines = filters(contents)
     except Error as e:
       raise Error("In file %s:\n%s" % (source, str(e)))
 
@@ -434,16 +448,6 @@ def PrepareSources(source_files, extra_files, emit_js):
     is_debugger = IsDebuggerFile(source)
     result.is_debugger_id.append(is_debugger)
 
-    name = os.path.basename(source)[:-3]
-    result.names.append(name if not is_debugger else name[:-9])
-
-  for extra in extra_files:
-    try:
-      lines = extra_filters(extra)
-    except Error as e:
-      raise Error("In file %s:\n%s" % (source, str(e)))
-
-    result.modules.append(lines)
     name = os.path.basename(source)[:-3]
     result.names.append(name)
 
@@ -550,8 +554,8 @@ def WriteStartupBlob(sources, startup_blob):
   output.close()
 
 
-def JS2C(sources, extra_sources, target, native_type, raw_file, startup_blob, emitJS):
-  prepared_sources = PrepareSources(sources, extra_sources, emitJS)
+def JS2C(sources, target, native_type, raw_file, startup_blob, emit_js):
+  prepared_sources = PrepareSources(sources, native_type, emit_js)
   sources_output = "".join(prepared_sources.modules)
   metadata = BuildMetadata(prepared_sources, sources_output, native_type)
 
@@ -566,7 +570,7 @@ def JS2C(sources, extra_sources, target, native_type, raw_file, startup_blob, em
 
   # Emit resulting source file.
   output = open(target, "w")
-  if emitJS:
+  if emit_js:
     output.write(sources_output)
   else:
     output.write(HEADER_TEMPLATE % metadata)
@@ -574,28 +578,26 @@ def JS2C(sources, extra_sources, target, native_type, raw_file, startup_blob, em
 
 
 def main():
-  parser = argparse.ArgumentParser()
-  parser.add_argument("out.cc",
-                      help="output filename")
-  parser.add_argument("type",
-                      help="type parameter for NativesCollection template")
-  parser.add_argument("sources.js",
-                      help="JS internal sources or macros.py.",
-                      nargs="+")
-  parser.add_argument("--raw",
-                      help="file to write the processed sources array to.")
-  parser.add_argument("--startup_blob",
-                      help="file to write the startup blob to.")
-  parser.add_argument("--extra",
-                      help="extra JS sources.",
-                      nargs="*")
-  parser.add_argument("--js",
-                      help="writes a JS file output instead of a C file",
-                      action="store_true")
-
-  args = vars(parser.parse_args())
-  JS2C(args["sources.js"], args["extra"] or [], args["out.cc"], args["type"], args["raw"], args["startup_blob"],
-       args["js"])
+  parser = optparse.OptionParser()
+  parser.add_option("--raw",
+                    help="file to write the processed sources array to.")
+  parser.add_option("--startup_blob",
+                    help="file to write the startup blob to.")
+  parser.add_option("--js",
+                    help="writes a JS file output instead of a C file",
+                    action="store_true", default=False, dest='js')
+  parser.add_option("--nojs", action="store_false", default=False, dest='js')
+  parser.set_usage("""js2c out.cc type sources.js ...
+        out.cc: C code to be generated.
+        type: type parameter for NativesCollection template.
+        sources.js: JS internal sources or macros.py.""")
+  (options, args) = parser.parse_args()
+  JS2C(args[2:],
+       args[0],
+       args[1],
+       options.raw,
+       options.startup_blob,
+       options.js)
 
 
 if __name__ == "__main__":

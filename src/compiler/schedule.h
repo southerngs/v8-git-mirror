@@ -37,6 +37,7 @@ class BasicBlock final : public ZoneObject {
     kBranch,      // Branch if true to first successor, otherwise second.
     kSwitch,      // Table dispatch to one of the successor blocks.
     kDeoptimize,  // Return a value from this method.
+    kTailCall,    // Tail call another method from this method.
     kReturn,      // Return a value from this method.
     kThrow        // Throw an exception.
   };
@@ -137,7 +138,7 @@ class BasicBlock final : public ZoneObject {
   void set_rpo_number(int32_t rpo_number);
 
   // Loop membership helpers.
-  inline bool IsLoopHeader() const { return loop_end_ != NULL; }
+  inline bool IsLoopHeader() const { return loop_end_ != nullptr; }
   bool LoopContains(BasicBlock* block) const;
 
   // Computes the immediate common dominator of {b1} and {b2}. The worst time
@@ -152,8 +153,8 @@ class BasicBlock final : public ZoneObject {
   BasicBlock* dominator_;    // Immediate dominator of the block.
   BasicBlock* rpo_next_;     // Link to next block in special RPO order.
   BasicBlock* loop_header_;  // Pointer to dominating loop header basic block,
-                             // NULL if none. For loop headers, this points to
-                             // enclosing loop header.
+  // nullptr if none. For loop headers, this points to
+  // enclosing loop header.
   BasicBlock* loop_end_;     // end of the loop, if this block is a loop header.
   int32_t loop_depth_;       // loop nesting, 0 is top-level
 
@@ -220,6 +221,9 @@ class Schedule final : public ZoneObject {
   // BasicBlock building: add a deoptimize at the end of {block}.
   void AddDeoptimize(BasicBlock* block, Node* input);
 
+  // BasicBlock building: add a tailcall at the end of {block}.
+  void AddTailCall(BasicBlock* block, Node* input);
+
   // BasicBlock building: add a return at the end of {block}.
   void AddReturn(BasicBlock* block, Node* input);
 
@@ -239,6 +243,7 @@ class Schedule final : public ZoneObject {
     return AddSuccessor(block, succ);
   }
 
+  const BasicBlockVector* all_blocks() const { return &all_blocks_; }
   BasicBlockVector* rpo_order() { return &rpo_order_; }
   const BasicBlockVector* rpo_order() const { return &rpo_order_; }
 
@@ -250,6 +255,16 @@ class Schedule final : public ZoneObject {
  private:
   friend class Scheduler;
   friend class BasicBlockInstrumentor;
+  friend class RawMachineAssembler;
+
+  // Ensure properties of the CFG assumed by further stages.
+  void EnsureCFGWellFormedness();
+  // Ensure split-edge form for a hand-assembled schedule.
+  void EnsureSplitEdgeForm(BasicBlock* block);
+  // Ensure entry into a deferred block happens from a single hot block.
+  void EnsureDeferredCodeSingleEntryPoint(BasicBlock* block);
+  // Copy deferred block markers down as far as possible
+  void PropagateDeferredMark();
 
   void AddSuccessor(BasicBlock* block, BasicBlock* succ);
   void MoveSuccessors(BasicBlock* from, BasicBlock* to);

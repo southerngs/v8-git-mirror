@@ -70,7 +70,6 @@ class MachineOperatorReducer final : public Reducer {
   Reduction ReduceUint32Div(Node* node);
   Reduction ReduceInt32Mod(Node* node);
   Reduction ReduceUint32Mod(Node* node);
-  Reduction ReduceTruncateFloat64ToInt32(Node* node);
   Reduction ReduceStore(Node* node);
   Reduction ReduceProjection(size_t index, Node* node);
   Reduction ReduceWord32Shifts(Node* node);
@@ -80,6 +79,7 @@ class MachineOperatorReducer final : public Reducer {
   Reduction ReduceWord32Or(Node* node);
   Reduction ReduceFloat64InsertLowWord32(Node* node);
   Reduction ReduceFloat64InsertHighWord32(Node* node);
+  Reduction ReduceFloat64Compare(Node* node);
 
   Graph* graph() const;
   JSGraph* jsgraph() const { return jsgraph_; }

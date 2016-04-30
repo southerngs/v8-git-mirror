@@ -35,27 +35,68 @@ from . import utils
 from ..objects import testcase
 
 # Use this to run several variants of the tests.
-VARIANT_FLAGS = {
-    "default": [],
-    "stress": ["--stress-opt", "--always-opt"],
-    "turbofan": ["--turbo", "--always-opt"],
-    "nocrankshaft": ["--nocrankshaft"]}
+ALL_VARIANT_FLAGS = {
+  "default": [[]],
+  "stress": [["--stress-opt", "--always-opt"]],
+  "turbofan": [["--turbo"]],
+  "turbofan_opt": [["--turbo", "--always-opt"]],
+  "nocrankshaft": [["--nocrankshaft"]],
+  "ignition": [["--ignition", "--turbo"]],
+  "ignition_turbofan": [["--ignition", "--turbo", "--turbo-from-bytecode"]],
+  "preparser": [["--min-preparse-length=0"]],
+}
 
-FAST_VARIANT_FLAGS = [
-    f for v, f in VARIANT_FLAGS.iteritems() if v in ["default", "turbofan"]
-]
+# FAST_VARIANTS implies no --always-opt.
+FAST_VARIANT_FLAGS = {
+  "default": [[]],
+  "stress": [["--stress-opt"]],
+  "turbofan": [["--turbo"]],
+  "nocrankshaft": [["--nocrankshaft"]],
+  "ignition": [["--ignition", "--turbo"]],
+  "ignition_turbofan": [["--ignition", "--turbo", "--turbo-from-bytecode"]],
+  "preparser": [["--min-preparse-length=0"]],
+}
+
+ALL_VARIANTS = set(["default", "stress", "turbofan", "turbofan_opt",
+                    "nocrankshaft", "ignition", "ignition_turbofan",
+                    "preparser"])
+FAST_VARIANTS = set(["default", "turbofan"])
+STANDARD_VARIANT = set(["default"])
+
+
+class VariantGenerator(object):
+  def __init__(self, suite, variants):
+    self.suite = suite
+    self.all_variants = ALL_VARIANTS & variants
+    self.fast_variants = FAST_VARIANTS & variants
+    self.standard_variant = STANDARD_VARIANT & variants
+
+  def FilterVariantsByTest(self, testcase):
+    if testcase.outcomes and statusfile.OnlyStandardVariant(
+        testcase.outcomes):
+      return self.standard_variant
+    if testcase.outcomes and statusfile.OnlyFastVariants(testcase.outcomes):
+      return self.fast_variants
+    return self.all_variants
+
+  def GetFlagSets(self, testcase, variant):
+    if testcase.outcomes and statusfile.OnlyFastVariants(testcase.outcomes):
+      return FAST_VARIANT_FLAGS[variant]
+    else:
+      return ALL_VARIANT_FLAGS[variant]
+
 
 class TestSuite(object):
 
   @staticmethod
-  def LoadTestSuite(root):
+  def LoadTestSuite(root, global_init=True):
     name = root.split(os.path.sep)[-1]
     f = None
     try:
       (f, pathname, description) = imp.find_module("testcfg", [root])
       module = imp.load_module("testcfg", f, pathname, description)
       return module.GetSuite(name, root)
-    except:
+    except ImportError:
       # Use default if no testcfg is present.
       return GoogleTestSuite(name, root)
     finally:
@@ -63,6 +104,7 @@ class TestSuite(object):
         f.close()
 
   def __init__(self, name, root):
+    # Note: This might be called concurrently from different processes.
     self.name = name  # string
     self.root = root  # string containing path
     self.tests = None  # list of TestCase objects
@@ -89,15 +131,19 @@ class TestSuite(object):
   def ListTests(self, context):
     raise NotImplementedError
 
-  def VariantFlags(self, testcase, default_flags):
-    if testcase.outcomes and statusfile.OnlyStandardVariant(testcase.outcomes):
-      return [[]]
-    if testcase.outcomes and statusfile.OnlyFastVariants(testcase.outcomes):
-      # FAST_VARIANTS implies no --always-opt.
-      return [ filter(lambda flag: flag != "--always-opt", f)
-               for f in filter(lambda flags: flags in FAST_VARIANT_FLAGS,
-                               default_flags) ]
-    return default_flags
+  def _VariantGeneratorFactory(self):
+    """The variant generator class to be used."""
+    return VariantGenerator
+
+  def CreateVariantGenerator(self, variants):
+    """Return a generator for the testing variants of this suite.
+
+    Args:
+      variants: List of variant names to be run as specified by the test
+                runner.
+    Returns: An object of type VariantGenerator.
+    """
+    return self._VariantGeneratorFactory()(self, set(variants))
 
   def DownloadData(self):
     pass
@@ -110,10 +156,6 @@ class TestSuite(object):
     self.tests = self.ListTests(context)
 
   @staticmethod
-  def _FilterFlaky(flaky, mode):
-    return (mode == "run" and not flaky) or (mode == "skip" and flaky)
-
-  @staticmethod
   def _FilterSlow(slow, mode):
     return (mode == "run" and not slow) or (mode == "skip" and slow)
 
@@ -122,13 +164,11 @@ class TestSuite(object):
     return (mode == "run" and not pass_fail) or (mode == "skip" and pass_fail)
 
   def FilterTestCasesByStatus(self, warn_unused_rules,
-                              flaky_tests="dontcare",
                               slow_tests="dontcare",
                               pass_fail_tests="dontcare"):
     filtered = []
     used_rules = set()
     for t in self.tests:
-      flaky = False
       slow = False
       pass_fail = False
       testname = self.CommonTestName(t)
@@ -142,7 +182,6 @@ class TestSuite(object):
         for outcome in t.outcomes:
           if outcome.startswith('Flags: '):
             t.flags += outcome[7:].split()
-        flaky = statusfile.IsFlaky(t.outcomes)
         slow = statusfile.IsSlow(t.outcomes)
         pass_fail = statusfile.IsPassOrFail(t.outcomes)
       skip = False
@@ -150,14 +189,13 @@ class TestSuite(object):
         assert rule[-1] == '*'
         if testname.startswith(rule[:-1]):
           used_rules.add(rule)
-          t.outcomes = self.wildcards[rule]
+          t.outcomes |= self.wildcards[rule]
           if statusfile.DoSkip(t.outcomes):
             skip = True
             break  # "for rule in self.wildcards"
-          flaky = flaky or statusfile.IsFlaky(t.outcomes)
           slow = slow or statusfile.IsSlow(t.outcomes)
           pass_fail = pass_fail or statusfile.IsPassOrFail(t.outcomes)
-      if (skip or self._FilterFlaky(flaky, flaky_tests)
+      if (skip
           or self._FilterSlow(slow, slow_tests)
           or self._FilterPassFail(pass_fail, pass_fail_tests)):
         continue  # "for t in self.tests"
@@ -175,21 +213,34 @@ class TestSuite(object):
         print("Unused rule: %s -> %s" % (rule, self.wildcards[rule]))
 
   def FilterTestCasesByArgs(self, args):
+    """Filter test cases based on command-line arguments.
+
+    An argument with an asterisk in the end will match all test cases
+    that have the argument as a prefix. Without asterisk, only exact matches
+    will be used with the exeption of the test-suite name as argument.
+    """
     filtered = []
-    filtered_args = []
+    globs = []
+    exact_matches = []
     for a in args:
-      argpath = a.split(os.path.sep)
+      argpath = a.split('/')
       if argpath[0] != self.name:
         continue
       if len(argpath) == 1 or (len(argpath) == 2 and argpath[1] == '*'):
         return  # Don't filter, run all tests in this suite.
-      path = os.path.sep.join(argpath[1:])
+      path = '/'.join(argpath[1:])
       if path[-1] == '*':
         path = path[:-1]
-      filtered_args.append(path)
+        globs.append(path)
+      else:
+        exact_matches.append(path)
     for t in self.tests:
-      for a in filtered_args:
+      for a in globs:
         if t.path.startswith(a):
+          filtered.append(t)
+          break
+      for a in exact_matches:
+        if t.path == a:
           filtered.append(t)
           break
     self.tests = filtered
@@ -200,14 +251,14 @@ class TestSuite(object):
   def GetSourceForTest(self, testcase):
     return "(no source available)"
 
-  def IsFailureOutput(self, output, testpath):
-    return output.exit_code != 0
+  def IsFailureOutput(self, testcase):
+    return testcase.output.exit_code != 0
 
   def IsNegativeTest(self, testcase):
     return False
 
   def HasFailed(self, testcase):
-    execution_failed = self.IsFailureOutput(testcase.output, testcase.path)
+    execution_failed = self.IsFailureOutput(testcase)
     if self.IsNegativeTest(testcase):
       return not execution_failed
     else:
@@ -239,6 +290,11 @@ class TestSuite(object):
     return self.total_duration
 
 
+class StandardVariantGenerator(VariantGenerator):
+  def FilterVariantsByTest(self, testcase):
+    return self.standard_variant
+
+
 class GoogleTestSuite(TestSuite):
   def __init__(self, name, root):
     super(GoogleTestSuite, self).__init__(name, root)
@@ -261,9 +317,9 @@ class GoogleTestSuite(TestSuite):
       if test_desc.endswith('.'):
         test_case = test_desc
       elif test_case and test_desc:
-        test = testcase.TestCase(self, test_case + test_desc, dependency=None)
+        test = testcase.TestCase(self, test_case + test_desc)
         tests.append(test)
-    tests.sort()
+    tests.sort(key=lambda t: t.path)
     return tests
 
   def GetFlagsForTestCase(self, testcase, context):
@@ -272,8 +328,8 @@ class GoogleTestSuite(TestSuite):
             ["--gtest_print_time=0"] +
             context.mode_flags)
 
-  def VariantFlags(self, testcase, default_flags):
-    return [[]]
+  def _VariantGeneratorFactory(self):
+    return StandardVariantGenerator
 
   def shell(self):
     return self.name

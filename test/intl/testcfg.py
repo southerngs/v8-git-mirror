@@ -45,8 +45,11 @@ class IntlTestSuite(testsuite.TestSuite):
       files.sort()
       for filename in files:
         if (filename.endswith(".js") and filename != "assert.js" and
-            filename != "utils.js"):
-          testname = os.path.join(dirname[len(self.root) + 1:], filename[:-3])
+            filename != "utils.js" and filename != "regexp-assert.js" and
+            filename != "regexp-prepare.js"):
+          fullpath = os.path.join(dirname, filename)
+          relpath = fullpath[len(self.root) + 1 : -3]
+          testname = relpath.replace(os.path.sep, "/")
           test = testcase.TestCase(self, testname)
           tests.append(test)
     return tests
@@ -57,7 +60,9 @@ class IntlTestSuite(testsuite.TestSuite):
     files = []
     files.append(os.path.join(self.root, "assert.js"))
     files.append(os.path.join(self.root, "utils.js"))
+    files.append(os.path.join(self.root, "regexp-prepare.js"))
     files.append(os.path.join(self.root, testcase.path + self.suffix()))
+    files.append(os.path.join(self.root, "regexp-assert.js"))
 
     flags += files
     if context.isolates:

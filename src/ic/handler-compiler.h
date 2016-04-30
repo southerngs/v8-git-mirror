@@ -19,7 +19,7 @@ enum ReturnHolder { RETURN_HOLDER, DONT_RETURN_ANYTHING };
 class PropertyHandlerCompiler : public PropertyAccessCompiler {
  public:
   static Handle<Code> Find(Handle<Name> name, Handle<Map> map, Code::Kind kind,
-                           CacheHolderFlag cache_holder, Code::StubType type);
+                           CacheHolderFlag cache_holder);
 
  protected:
   PropertyHandlerCompiler(Isolate* isolate, Code::Kind kind, Handle<Map> map,
@@ -98,7 +98,7 @@ class PropertyHandlerCompiler : public PropertyAccessCompiler {
                            Handle<Name> name, Label* miss,
                            PrototypeCheckType check, ReturnHolder return_what);
 
-  Handle<Code> GetCode(Code::Kind kind, Code::StubType type, Handle<Name> name);
+  Handle<Code> GetCode(Code::Kind kind, Handle<Name> name);
   void set_holder(Handle<JSObject> holder) { holder_ = holder; }
   Handle<Map> map() const { return map_; }
   void set_map(Handle<Map> map) { map_ = map; }
@@ -123,7 +123,7 @@ class NamedLoadHandlerCompiler : public PropertyHandlerCompiler {
   Handle<Code> CompileLoadField(Handle<Name> name, FieldIndex index);
 
   Handle<Code> CompileLoadCallback(Handle<Name> name,
-                                   Handle<ExecutableAccessorInfo> callback);
+                                   Handle<AccessorInfo> callback);
 
   Handle<Code> CompileLoadCallback(Handle<Name> name,
                                    const CallOptimization& call_optimization,
@@ -180,8 +180,7 @@ class NamedLoadHandlerCompiler : public PropertyHandlerCompiler {
  private:
   Handle<Code> CompileLoadNonexistent(Handle<Name> name);
   void GenerateLoadConstant(Handle<Object> value);
-  void GenerateLoadCallback(Register reg,
-                            Handle<ExecutableAccessorInfo> callback);
+  void GenerateLoadCallback(Register reg, Handle<AccessorInfo> callback);
   void GenerateLoadCallback(const CallOptimization& call_optimization,
                             Handle<Map> receiver_map);
 
@@ -224,14 +223,14 @@ class NamedStoreHandlerCompiler : public PropertyHandlerCompiler {
                                       Handle<Name> name);
   Handle<Code> CompileStoreField(LookupIterator* it);
   Handle<Code> CompileStoreCallback(Handle<JSObject> object, Handle<Name> name,
-                                    Handle<ExecutableAccessorInfo> callback);
+                                    Handle<AccessorInfo> callback,
+                                    LanguageMode language_mode);
   Handle<Code> CompileStoreCallback(Handle<JSObject> object, Handle<Name> name,
                                     const CallOptimization& call_optimization,
                                     int accessor_index);
   Handle<Code> CompileStoreViaSetter(Handle<JSObject> object, Handle<Name> name,
                                      int accessor_index,
                                      int expected_arguments);
-  Handle<Code> CompileStoreInterceptor(Handle<Name> name);
 
   static void GenerateStoreViaSetter(MacroAssembler* masm, Handle<Map> map,
                                      Register receiver, Register holder,
@@ -252,16 +251,21 @@ class NamedStoreHandlerCompiler : public PropertyHandlerCompiler {
   virtual void FrontendFooter(Handle<Name> name, Label* miss);
   void GenerateRestoreName(Label* label, Handle<Name> name);
 
+  // Pop the vector and slot into appropriate registers, moving the map in
+  // the process. (This is an accomodation for register pressure on ia32).
+  void RearrangeVectorAndSlot(Register current_map, Register destination_map);
+
  private:
   void GenerateRestoreName(Handle<Name> name);
-  void GenerateRestoreMap(Handle<Map> transition, Register scratch,
-                          Label* miss);
+  void GenerateRestoreMap(Handle<Map> transition, Register map_reg,
+                          Register scratch, Label* miss);
 
   void GenerateConstantCheck(Register map_reg, int descriptor,
                              Register value_reg, Register scratch,
                              Label* miss_label);
 
-  void GenerateFieldTypeChecks(HeapType* field_type, Register value_reg,
+  bool RequiresFieldTypeChecks(FieldType* field_type) const;
+  void GenerateFieldTypeChecks(FieldType* field_type, Register value_reg,
                                Label* miss_label);
 
   static Builtins::Name SlowBuiltin(Code::Kind kind) {
@@ -294,7 +298,7 @@ class ElementHandlerCompiler : public PropertyHandlerCompiler {
 
   static void GenerateStoreSlow(MacroAssembler* masm);
 };
-}
-}  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_IC_HANDLER_COMPILER_H_

@@ -2,14 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/isolate.h"
-#include "src/snapshot/serialize.h"
-
 #ifndef V8_SNAPSHOT_SNAPSHOT_H_
 #define V8_SNAPSHOT_SNAPSHOT_H_
 
+#include "src/snapshot/partial-serializer.h"
+#include "src/snapshot/startup-serializer.h"
+
 namespace v8 {
 namespace internal {
+
+// Forward declarations.
+class Isolate;
+class PartialSerializer;
+class StartupSerializer;
 
 class Snapshot : public AllStatic {
  public:
@@ -33,13 +38,9 @@ class Snapshot : public AllStatic {
   static bool Initialize(Isolate* isolate);
   // Create a new context using the internal partial snapshot.
   static MaybeHandle<Context> NewContextFromSnapshot(
-      Isolate* isolate, Handle<JSGlobalProxy> global_proxy,
-      Handle<FixedArray>* outdated_contexts_out);
+      Isolate* isolate, Handle<JSGlobalProxy> global_proxy);
 
-  static bool HaveASnapshotToStartFrom(Isolate* isolate) {
-    // Do not use snapshots if the isolate is used to create snapshots.
-    return isolate->snapshot_blob() != NULL;
-  }
+  static bool HaveASnapshotToStartFrom(Isolate* isolate);
 
   static bool EmbedsScript(Isolate* isolate);
 
@@ -88,6 +89,42 @@ class Snapshot : public AllStatic {
 void SetSnapshotFromFile(StartupData* snapshot_blob);
 #endif
 
-} }  // namespace v8::internal
+// Wrapper around reservation sizes and the serialization payload.
+class SnapshotData : public SerializedData {
+ public:
+  // Used when producing.
+  explicit SnapshotData(const Serializer& ser);
+
+  // Used when consuming.
+  explicit SnapshotData(const Vector<const byte> snapshot)
+      : SerializedData(const_cast<byte*>(snapshot.begin()), snapshot.length()) {
+    CHECK(IsSane());
+  }
+
+  Vector<const Reservation> Reservations() const;
+  Vector<const byte> Payload() const;
+
+  Vector<const byte> RawData() const {
+    return Vector<const byte>(data_, size_);
+  }
+
+ private:
+  bool IsSane();
+
+  // The data header consists of uint32_t-sized entries:
+  // [0] magic number and external reference count
+  // [1] version hash
+  // [2] number of reservation size entries
+  // [3] payload length
+  // ... reservations
+  // ... serialized payload
+  static const int kCheckSumOffset = kMagicNumberOffset + kInt32Size;
+  static const int kNumReservationsOffset = kCheckSumOffset + kInt32Size;
+  static const int kPayloadLengthOffset = kNumReservationsOffset + kInt32Size;
+  static const int kHeaderSize = kPayloadLengthOffset + kInt32Size;
+};
+
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_SNAPSHOT_SNAPSHOT_H_

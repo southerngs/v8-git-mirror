@@ -15,9 +15,16 @@ namespace compiler {
 static const char*
     general_register_names_[RegisterConfiguration::kMaxGeneralRegisters];
 static const char*
-    double_register_names_[RegisterConfiguration::kMaxDoubleRegisters];
+    double_register_names_[RegisterConfiguration::kMaxFPRegisters];
 static char register_names_[10 * (RegisterConfiguration::kMaxGeneralRegisters +
-                                  RegisterConfiguration::kMaxDoubleRegisters)];
+                                  RegisterConfiguration::kMaxFPRegisters)];
+
+namespace {
+static int allocatable_codes[InstructionSequenceTest::kDefaultNRegs] = {
+    0, 1, 2, 3, 4, 5, 6, 7};
+static int allocatable_double_codes[InstructionSequenceTest::kDefaultNRegs] = {
+    0, 1, 2, 3, 4, 5, 6, 7};
+}
 
 
 static void InitializeRegisterNames() {
@@ -27,7 +34,7 @@ static void InitializeRegisterNames() {
     loc += base::OS::SNPrintF(loc, 100, "gp_%d", i);
     *loc++ = 0;
   }
-  for (int i = 0; i < RegisterConfiguration::kMaxDoubleRegisters; ++i) {
+  for (int i = 0; i < RegisterConfiguration::kMaxFPRegisters; ++i) {
     double_register_names_[i] = loc;
     loc += base::OS::SNPrintF(loc, 100, "fp_%d", i) + 1;
     *loc++ = 0;
@@ -59,8 +66,10 @@ void InstructionSequenceTest::SetNumRegs(int num_general_registers,
 RegisterConfiguration* InstructionSequenceTest::config() {
   if (config_.is_empty()) {
     config_.Reset(new RegisterConfiguration(
-        num_general_registers_, num_double_registers_, num_double_registers_,
-        general_register_names_, double_register_names_));
+        num_general_registers_, num_double_registers_, num_general_registers_,
+        num_double_registers_, num_double_registers_, allocatable_codes,
+        allocatable_double_codes, general_register_names_,
+        double_register_names_));
   }
   return config_.get();
 }
@@ -93,9 +102,9 @@ void InstructionSequenceTest::EndLoop() {
 }
 
 
-void InstructionSequenceTest::StartBlock() {
+void InstructionSequenceTest::StartBlock(bool deferred) {
   block_returns_ = false;
-  NewBlock();
+  NewBlock(deferred);
 }
 
 
@@ -109,7 +118,7 @@ Instruction* InstructionSequenceTest::EndBlock(BlockCompletion completion) {
     case kBlockEnd:
       break;
     case kFallThrough:
-      result = EmitFallThrough();
+      result = EmitJump();
       break;
     case kJump:
       CHECK(!block_returns_);
@@ -408,7 +417,7 @@ InstructionOperand InstructionSequenceTest::ConvertOutputOp(VReg vreg,
 }
 
 
-InstructionBlock* InstructionSequenceTest::NewBlock() {
+InstructionBlock* InstructionSequenceTest::NewBlock(bool deferred) {
   CHECK(current_block_ == nullptr);
   Rpo rpo = Rpo::FromInt(static_cast<int>(instruction_blocks_.size()));
   Rpo loop_header = Rpo::Invalid();
@@ -429,8 +438,8 @@ InstructionBlock* InstructionSequenceTest::NewBlock() {
     }
   }
   // Construct instruction block.
-  auto instruction_block =
-      new (zone()) InstructionBlock(zone(), rpo, loop_header, loop_end, false);
+  auto instruction_block = new (zone())
+      InstructionBlock(zone(), rpo, loop_header, loop_end, deferred, false);
   instruction_blocks_.push_back(instruction_block);
   current_block_ = instruction_block;
   sequence()->StartBlock(rpo);
@@ -441,11 +450,20 @@ InstructionBlock* InstructionSequenceTest::NewBlock() {
 void InstructionSequenceTest::WireBlocks() {
   CHECK(!current_block());
   CHECK(instruction_blocks_.size() == completions_.size());
+  CHECK(loop_blocks_.empty());
+  // Wire in end block to look like a scheduler produced cfg.
+  auto end_block = NewBlock();
+  current_block_ = nullptr;
+  sequence()->EndBlock(end_block->rpo_number());
   size_t offset = 0;
   for (const auto& completion : completions_) {
     switch (completion.type_) {
-      case kBlockEnd:
+      case kBlockEnd: {
+        auto block = instruction_blocks_[offset];
+        block->successors().push_back(end_block->rpo_number());
+        end_block->predecessors().push_back(block->rpo_number());
         break;
+      }
       case kFallThrough:  // Fallthrough.
       case kJump:
         WireBlock(offset, completion.offset_0_);

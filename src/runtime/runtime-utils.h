@@ -5,18 +5,49 @@
 #ifndef V8_RUNTIME_RUNTIME_UTILS_H_
 #define V8_RUNTIME_RUNTIME_UTILS_H_
 
+#include "src/base/logging.h"
+#include "src/runtime/runtime.h"
 
 namespace v8 {
 namespace internal {
 
-#define RUNTIME_ASSERT(value) \
-  if (!(value)) return isolate->ThrowIllegalOperation();
+#ifdef DEBUG
+
+#define RUNTIME_ASSERT(value)                      \
+  do {                                             \
+    if (!(value)) {                                \
+      V8_RuntimeError(__FILE__, __LINE__, #value); \
+      return isolate->ThrowIllegalOperation();     \
+    }                                              \
+  } while (0)
+
+#define RUNTIME_ASSERT_HANDLIFIED(value, T)        \
+  do {                                             \
+    if (!(value)) {                                \
+      V8_RuntimeError(__FILE__, __LINE__, #value); \
+      isolate->ThrowIllegalOperation();            \
+      return MaybeHandle<T>();                     \
+    }                                              \
+  } while (0)
+
+#else
+
+#define RUNTIME_ASSERT(value)                  \
+  do {                                         \
+    if (!(value)) {                            \
+      return isolate->ThrowIllegalOperation(); \
+    }                                          \
+  } while (0)
 
 #define RUNTIME_ASSERT_HANDLIFIED(value, T) \
-  if (!(value)) {                           \
-    isolate->ThrowIllegalOperation();       \
-    return MaybeHandle<T>();                \
-  }
+  do {                                      \
+    if (!(value)) {                         \
+      isolate->ThrowIllegalOperation();     \
+      return MaybeHandle<T>();              \
+    }                                       \
+  } while (0)
+
+#endif
 
 // Cast the given object to a value of the specified type and store
 // it in a variable with the given name.  If the object is not of the
@@ -53,6 +84,17 @@ namespace internal {
 #define CONVERT_DOUBLE_ARG_CHECKED(name, index) \
   RUNTIME_ASSERT(args[index]->IsNumber());      \
   double name = args.number_at(index);
+
+
+// Cast the given argument to a size_t and store its value in a variable with
+// the given name.  If the argument is not a size_t call IllegalOperation and
+// return.
+#define CONVERT_SIZE_ARG_CHECKED(name, index)            \
+  RUNTIME_ASSERT(args[index]->IsNumber());               \
+  Handle<Object> name##_object = args.at<Object>(index); \
+  size_t name = 0;                                       \
+  RUNTIME_ASSERT(TryNumberToSize(isolate, *name##_object, &name));
+
 
 // Call the specified converter on the object *comand store the result in
 // a variable of the specified type with the given name.  If the
@@ -150,7 +192,23 @@ static inline ObjectPair MakePair(Object* x, Object* y) {
 }
 #endif
 
+
+// A mechanism to return a triple of Object pointers. In all calling
+// conventions, a struct of two pointers is returned in memory,
+// allocated by the caller, and passed as a pointer in a hidden first parameter.
+struct ObjectTriple {
+  Object* x;
+  Object* y;
+  Object* z;
+};
+
+static inline ObjectTriple MakeTriple(Object* x, Object* y, Object* z) {
+  ObjectTriple result = {x, y, z};
+  // ObjectTriple is assigned to a hidden first argument.
+  return result;
 }
-}  // namespace v8::internal
+
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_RUNTIME_RUNTIME_UTILS_H_

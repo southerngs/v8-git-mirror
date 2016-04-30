@@ -66,11 +66,13 @@ class ZoneLinkedList : public std::list<T, zone_allocator<T>> {
 // A wrapper subclass std::priority_queue to make it easy to construct one
 // that uses a zone allocator.
 template <typename T, typename Compare = std::less<T>>
-class ZonePriorityQueue : public std::priority_queue<T, ZoneVector<T>> {
+class ZonePriorityQueue
+    : public std::priority_queue<T, ZoneVector<T>, Compare> {
  public:
   // Constructs an empty list.
   explicit ZonePriorityQueue(Zone* zone)
-      : std::priority_queue<T, ZoneVector<T>>(Compare(), ZoneVector<T>(zone)) {}
+      : std::priority_queue<T, ZoneVector<T>, Compare>(Compare(),
+                                                       ZoneVector<T>(zone)) {}
 };
 
 
@@ -112,12 +114,12 @@ class ZoneSet : public std::set<K, Compare, zone_allocator<K>> {
 // a zone allocator.
 template <typename K, typename V, typename Compare = std::less<K>>
 class ZoneMap
-    : public std::map<K, V, Compare, zone_allocator<std::pair<K, V>>> {
+    : public std::map<K, V, Compare, zone_allocator<std::pair<const K, V>>> {
  public:
   // Constructs an empty map.
   explicit ZoneMap(Zone* zone)
-      : std::map<K, V, Compare, zone_allocator<std::pair<K, V>>>(
-            Compare(), zone_allocator<std::pair<K, V>>(zone)) {}
+      : std::map<K, V, Compare, zone_allocator<std::pair<const K, V>>>(
+            Compare(), zone_allocator<std::pair<const K, V>>(zone)) {}
 };
 
 

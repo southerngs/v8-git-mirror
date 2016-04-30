@@ -318,13 +318,6 @@ class TimeTicks final {
   // Returns true if the high-resolution clock is working on this system.
   static bool IsHighResolutionClockWorking();
 
-  // Returns Linux kernel timestamp for generating profiler events. This method
-  // returns null TimeTicks if the kernel cannot provide the timestamps (e.g.,
-  // on non-Linux OS or if the kernel module for timestamps is not loaded).
-
-  static TimeTicks KernelTimestampNow();
-  static bool KernelTimestampAvailable();
-
   // Returns true if this object has not been initialized.
   bool IsNull() const { return ticks_ == 0; }
 
@@ -398,6 +391,7 @@ inline TimeTicks operator+(const TimeDelta& delta, const TimeTicks& ticks) {
   return ticks + delta;
 }
 
-} }  // namespace v8::base
+}  // namespace base
+}  // namespace v8
 
 #endif  // V8_BASE_PLATFORM_TIME_H_

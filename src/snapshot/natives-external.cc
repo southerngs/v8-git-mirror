@@ -93,23 +93,17 @@ class NativesStore {
     return Vector<const char>::cast(name);
   }
 
-  bool ReadNameAndContentPair(SnapshotByteSource* bytes) {
+  void ReadNameAndContentPair(SnapshotByteSource* bytes) {
     const byte* id;
-    int id_length;
     const byte* source;
-    int source_length;
-    bool success = bytes->GetBlob(&id, &id_length) &&
-                   bytes->GetBlob(&source, &source_length);
-    if (success) {
-      Vector<const char> id_vector(reinterpret_cast<const char*>(id),
-                                   id_length);
-      Vector<const char> source_vector(
-          reinterpret_cast<const char*>(source), source_length);
-      native_ids_.Add(id_vector);
-      native_source_.Add(source_vector);
-      native_names_.Add(NameFromId(id, id_length));
-    }
-    return success;
+    int id_length = bytes->GetBlob(&id);
+    int source_length = bytes->GetBlob(&source);
+    Vector<const char> id_vector(reinterpret_cast<const char*>(id), id_length);
+    Vector<const char> source_vector(reinterpret_cast<const char*>(source),
+                                     source_length);
+    native_ids_.Add(id_vector);
+    native_source_.Add(source_vector);
+    native_names_.Add(NameFromId(id, id_length));
   }
 
   List<Vector<const char> > native_ids_;
@@ -125,11 +119,11 @@ template<NativeType type>
 class NativesHolder {
  public:
   static NativesStore* get() {
-    DCHECK(holder_);
+    CHECK(holder_);
     return holder_;
   }
   static void set(NativesStore* store) {
-    DCHECK(store);
+    CHECK(store);
     holder_ = store;
   }
   static bool empty() { return holder_ == NULL; }
@@ -159,6 +153,9 @@ void ReadNatives() {
     NativesHolder<CORE>::set(NativesStore::MakeFromScriptsSource(&bytes));
     NativesHolder<EXPERIMENTAL>::set(
         NativesStore::MakeFromScriptsSource(&bytes));
+    NativesHolder<EXTRAS>::set(NativesStore::MakeFromScriptsSource(&bytes));
+    NativesHolder<EXPERIMENTAL_EXTRAS>::set(
+        NativesStore::MakeFromScriptsSource(&bytes));
     DCHECK(!bytes.HasMore());
   }
 }
@@ -185,6 +182,8 @@ void SetNativesFromFile(StartupData* natives_blob) {
 void DisposeNatives() {
   NativesHolder<CORE>::Dispose();
   NativesHolder<EXPERIMENTAL>::Dispose();
+  NativesHolder<EXTRAS>::Dispose();
+  NativesHolder<EXPERIMENTAL_EXTRAS>::Dispose();
 }
 
 
@@ -225,10 +224,19 @@ Vector<const char> NativesCollection<type>::GetScriptsSource() {
 }
 
 
-// The compiler can't 'see' all uses of the static methods and hence
-// my choice to elide them. This we'll explicitly instantiate these.
-template class NativesCollection<CORE>;
-template class NativesCollection<EXPERIMENTAL>;
+// Explicit template instantiations.
+#define INSTANTIATE_TEMPLATES(T)                                            \
+  template int NativesCollection<T>::GetBuiltinsCount();                    \
+  template int NativesCollection<T>::GetDebuggerCount();                    \
+  template int NativesCollection<T>::GetIndex(const char* name);            \
+  template Vector<const char> NativesCollection<T>::GetScriptSource(int i); \
+  template Vector<const char> NativesCollection<T>::GetScriptName(int i);   \
+  template Vector<const char> NativesCollection<T>::GetScriptsSource();
+INSTANTIATE_TEMPLATES(CORE)
+INSTANTIATE_TEMPLATES(EXPERIMENTAL)
+INSTANTIATE_TEMPLATES(EXTRAS)
+INSTANTIATE_TEMPLATES(EXPERIMENTAL_EXTRAS)
+#undef INSTANTIATE_TEMPLATES
 
-}  // namespace v8::internal
+}  // namespace internal
 }  // namespace v8

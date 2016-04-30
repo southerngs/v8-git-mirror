@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/runtime/runtime-utils.h"
 
 #include "src/arguments.h"
-#include "src/jsregexp-inl.h"
-#include "src/jsregexp.h"
-#include "src/runtime/runtime-utils.h"
+#include "src/conversions-inl.h"
+#include "src/isolate-inl.h"
+#include "src/regexp/jsregexp-inl.h"
+#include "src/regexp/jsregexp.h"
 #include "src/string-builder.h"
 #include "src/string-search.h"
 
@@ -121,11 +122,13 @@ RUNTIME_FUNCTION(Runtime_StringReplaceOneCharWithString) {
   if (isolate->has_pending_exception()) return isolate->heap()->exception();
 
   subject = String::Flatten(subject);
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-      isolate, result,
-      StringReplaceOneCharWithString(isolate, subject, search, replace, &found,
-                                     kRecursionLimit));
-  return *result;
+  if (StringReplaceOneCharWithString(isolate, subject, search, replace, &found,
+                                     kRecursionLimit).ToHandle(&result)) {
+    return *result;
+  }
+  if (isolate->has_pending_exception()) return isolate->heap()->exception();
+  // In case of empty handle and no pending exception we have stack overflow.
+  return isolate->StackOverflow();
 }
 
 
@@ -137,7 +140,7 @@ RUNTIME_FUNCTION(Runtime_StringIndexOf) {
   CONVERT_ARG_HANDLE_CHECKED(String, pat, 1);
   CONVERT_ARG_HANDLE_CHECKED(Object, index, 2);
 
-  uint32_t start_index;
+  uint32_t start_index = 0;
   if (!index->ToArrayIndex(&start_index)) return Smi::FromInt(-1);
 
   RUNTIME_ASSERT(start_index <= static_cast<uint32_t>(sub->length()));
@@ -188,7 +191,7 @@ RUNTIME_FUNCTION(Runtime_StringLastIndexOf) {
   CONVERT_ARG_HANDLE_CHECKED(String, pat, 1);
   CONVERT_ARG_HANDLE_CHECKED(Object, index, 2);
 
-  uint32_t start_index;
+  uint32_t start_index = 0;
   if (!index->ToArrayIndex(&start_index)) return Smi::FromInt(-1);
 
   uint32_t pat_length = pat->length();
@@ -279,7 +282,7 @@ RUNTIME_FUNCTION(Runtime_StringLocaleCompare) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_SubStringRT) {
+RUNTIME_FUNCTION(Runtime_SubString) {
   HandleScope scope(isolate);
   DCHECK(args.length() == 3);
 
@@ -307,13 +310,7 @@ RUNTIME_FUNCTION(Runtime_SubStringRT) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_SubString) {
-  SealHandleScope shs(isolate);
-  return __RT_impl_Runtime_SubStringRT(args, isolate);
-}
-
-
-RUNTIME_FUNCTION(Runtime_StringAddRT) {
+RUNTIME_FUNCTION(Runtime_StringAdd) {
   HandleScope scope(isolate);
   DCHECK(args.length() == 2);
   CONVERT_ARG_HANDLE_CHECKED(String, str1, 0);
@@ -323,12 +320,6 @@ RUNTIME_FUNCTION(Runtime_StringAddRT) {
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, result, isolate->factory()->NewConsString(str1, str2));
   return *result;
-}
-
-
-RUNTIME_FUNCTION(Runtime_StringAdd) {
-  SealHandleScope shs(isolate);
-  return __RT_impl_Runtime_StringAddRT(args, isolate);
 }
 
 
@@ -350,7 +341,7 @@ RUNTIME_FUNCTION(Runtime_StringMatch) {
 
   RUNTIME_ASSERT(regexp_info->HasFastObjectElements());
 
-  RegExpImpl::GlobalCache global_cache(regexp, subject, true, isolate);
+  RegExpImpl::GlobalCache global_cache(regexp, subject, isolate);
   if (global_cache.HasException()) return isolate->heap()->exception();
 
   int capture_count = regexp->CaptureCount();
@@ -380,14 +371,13 @@ RUNTIME_FUNCTION(Runtime_StringMatch) {
   Handle<String> substring =
       isolate->factory()->NewSubString(subject, offsets.at(0), offsets.at(1));
   elements->set(0, *substring);
-  for (int i = 1; i < matches; i++) {
-    HandleScope temp_scope(isolate);
+  FOR_WITH_HANDLE_SCOPE(isolate, int, i = 1, i, i < matches, i++, {
     int from = offsets.at(i * 2);
     int to = offsets.at(i * 2 + 1);
     Handle<String> substring =
         isolate->factory()->NewProperSubString(subject, from, to);
     elements->set(i, *substring);
-  }
+  });
   Handle<JSArray> result = isolate->factory()->NewJSArrayWithElements(elements);
   result->set_length(Smi::FromInt(matches));
   return *result;
@@ -414,90 +404,24 @@ RUNTIME_FUNCTION(Runtime_StringCharCodeAtRT) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_CharFromCode) {
-  HandleScope handlescope(isolate);
-  DCHECK(args.length() == 1);
-  if (args[0]->IsNumber()) {
-    CONVERT_NUMBER_CHECKED(uint32_t, code, Uint32, args[0]);
-    code &= 0xffff;
-    return *isolate->factory()->LookupSingleCharacterStringFromCode(code);
-  }
-  return isolate->heap()->empty_string();
-}
-
-
-RUNTIME_FUNCTION(Runtime_StringCompareRT) {
+RUNTIME_FUNCTION(Runtime_StringCompare) {
   HandleScope handle_scope(isolate);
-  DCHECK(args.length() == 2);
-
+  DCHECK_EQ(2, args.length());
   CONVERT_ARG_HANDLE_CHECKED(String, x, 0);
   CONVERT_ARG_HANDLE_CHECKED(String, y, 1);
-
   isolate->counters()->string_compare_runtime()->Increment();
-
-  // A few fast case tests before we flatten.
-  if (x.is_identical_to(y)) return Smi::FromInt(EQUAL);
-  if (y->length() == 0) {
-    if (x->length() == 0) return Smi::FromInt(EQUAL);
-    return Smi::FromInt(GREATER);
-  } else if (x->length() == 0) {
-    return Smi::FromInt(LESS);
+  switch (String::Compare(x, y)) {
+    case ComparisonResult::kLessThan:
+      return Smi::FromInt(LESS);
+    case ComparisonResult::kEqual:
+      return Smi::FromInt(EQUAL);
+    case ComparisonResult::kGreaterThan:
+      return Smi::FromInt(GREATER);
+    case ComparisonResult::kUndefined:
+      break;
   }
-
-  int d = x->Get(0) - y->Get(0);
-  if (d < 0)
-    return Smi::FromInt(LESS);
-  else if (d > 0)
-    return Smi::FromInt(GREATER);
-
-  // Slow case.
-  x = String::Flatten(x);
-  y = String::Flatten(y);
-
-  DisallowHeapAllocation no_gc;
-  Object* equal_prefix_result = Smi::FromInt(EQUAL);
-  int prefix_length = x->length();
-  if (y->length() < prefix_length) {
-    prefix_length = y->length();
-    equal_prefix_result = Smi::FromInt(GREATER);
-  } else if (y->length() > prefix_length) {
-    equal_prefix_result = Smi::FromInt(LESS);
-  }
-  int r;
-  String::FlatContent x_content = x->GetFlatContent();
-  String::FlatContent y_content = y->GetFlatContent();
-  if (x_content.IsOneByte()) {
-    Vector<const uint8_t> x_chars = x_content.ToOneByteVector();
-    if (y_content.IsOneByte()) {
-      Vector<const uint8_t> y_chars = y_content.ToOneByteVector();
-      r = CompareChars(x_chars.start(), y_chars.start(), prefix_length);
-    } else {
-      Vector<const uc16> y_chars = y_content.ToUC16Vector();
-      r = CompareChars(x_chars.start(), y_chars.start(), prefix_length);
-    }
-  } else {
-    Vector<const uc16> x_chars = x_content.ToUC16Vector();
-    if (y_content.IsOneByte()) {
-      Vector<const uint8_t> y_chars = y_content.ToOneByteVector();
-      r = CompareChars(x_chars.start(), y_chars.start(), prefix_length);
-    } else {
-      Vector<const uc16> y_chars = y_content.ToUC16Vector();
-      r = CompareChars(x_chars.start(), y_chars.start(), prefix_length);
-    }
-  }
-  Object* result;
-  if (r == 0) {
-    result = equal_prefix_result;
-  } else {
-    result = (r < 0) ? Smi::FromInt(LESS) : Smi::FromInt(GREATER);
-  }
-  return result;
-}
-
-
-RUNTIME_FUNCTION(Runtime_StringCompare) {
-  SealHandleScope shs(isolate);
-  return __RT_impl_Runtime_StringCompareRT(args, isolate);
+  UNREACHABLE();
+  return Smi::FromInt(0);
 }
 
 
@@ -632,6 +556,7 @@ RUNTIME_FUNCTION(Runtime_StringBuilderJoin) {
   RUNTIME_ASSERT(fixed_array->get(0)->IsString());
   String* first = String::cast(fixed_array->get(0));
   String* separator_raw = *separator;
+
   int first_length = first->length();
   String::WriteToFlat(first, sink, 0, first_length);
   sink += first_length;
@@ -655,6 +580,26 @@ RUNTIME_FUNCTION(Runtime_StringBuilderJoin) {
   return *answer;
 }
 
+template <typename sinkchar>
+static void WriteRepeatToFlat(String* src, Vector<sinkchar> buffer, int cursor,
+                              int repeat, int length) {
+  if (repeat == 0) return;
+
+  sinkchar* start = &buffer[cursor];
+  String::WriteToFlat<sinkchar>(src, start, 0, length);
+
+  int done = 1;
+  sinkchar* next = start + length;
+
+  while (done < repeat) {
+    int block = Min(done, repeat - done);
+    int block_chars = block * length;
+    CopyChars(next, start, block_chars);
+    next += block_chars;
+    done += block;
+  }
+}
+
 template <typename Char>
 static void JoinSparseArrayWithSeparator(FixedArray* elements,
                                          int elements_length,
@@ -664,34 +609,30 @@ static void JoinSparseArrayWithSeparator(FixedArray* elements,
   DisallowHeapAllocation no_gc;
   int previous_separator_position = 0;
   int separator_length = separator->length();
+  DCHECK_LT(0, separator_length);
   int cursor = 0;
   for (int i = 0; i < elements_length; i += 2) {
     int position = NumberToInt32(elements->get(i));
     String* string = String::cast(elements->get(i + 1));
     int string_length = string->length();
     if (string->length() > 0) {
-      while (previous_separator_position < position) {
-        String::WriteToFlat<Char>(separator, &buffer[cursor], 0,
-                                  separator_length);
-        cursor += separator_length;
-        previous_separator_position++;
-      }
+      int repeat = position - previous_separator_position;
+      WriteRepeatToFlat<Char>(separator, buffer, cursor, repeat,
+                              separator_length);
+      cursor += repeat * separator_length;
+      previous_separator_position = position;
       String::WriteToFlat<Char>(string, &buffer[cursor], 0, string_length);
       cursor += string->length();
     }
   }
-  if (separator_length > 0) {
-    // Array length must be representable as a signed 32-bit number,
-    // otherwise the total string length would have been too large.
-    DCHECK(array_length <= 0x7fffffff);  // Is int32_t.
-    int last_array_index = static_cast<int>(array_length - 1);
-    while (previous_separator_position < last_array_index) {
-      String::WriteToFlat<Char>(separator, &buffer[cursor], 0,
-                                separator_length);
-      cursor += separator_length;
-      previous_separator_position++;
-    }
-  }
+
+  int last_array_index = static_cast<int>(array_length - 1);
+  // Array length must be representable as a signed 32-bit number,
+  // otherwise the total string length would have been too large.
+  DCHECK(array_length <= 0x7fffffff);  // Is int32_t.
+  int repeat = last_array_index - previous_separator_position;
+  WriteRepeatToFlat<Char>(separator, buffer, cursor, repeat, separator_length);
+  cursor += repeat * separator_length;
   DCHECK(cursor <= buffer.length());
 }
 
@@ -717,13 +658,6 @@ RUNTIME_FUNCTION(Runtime_SparseJoinWithSeparator) {
   RUNTIME_ASSERT(elements_length <= elements_array->elements()->length());
   RUNTIME_ASSERT((elements_length & 1) == 0);  // Even length.
   FixedArray* elements = FixedArray::cast(elements_array->elements());
-  for (int i = 0; i < elements_length; i += 2) {
-    RUNTIME_ASSERT(elements->get(i)->IsNumber());
-    CONVERT_NUMBER_CHECKED(uint32_t, position, Uint32, elements->get(i));
-    RUNTIME_ASSERT(position < array_length);
-    RUNTIME_ASSERT(elements->get(i + 1)->IsString());
-  }
-
   {
     DisallowHeapAllocation no_gc;
     for (int i = 0; i < elements_length; i += 2) {
@@ -1220,46 +1154,93 @@ RUNTIME_FUNCTION(Runtime_NewString) {
   return *result;
 }
 
-
-RUNTIME_FUNCTION(Runtime_NewConsString) {
-  HandleScope scope(isolate);
-  DCHECK(args.length() == 4);
-  CONVERT_INT32_ARG_CHECKED(length, 0);
-  CONVERT_BOOLEAN_ARG_CHECKED(is_one_byte, 1);
-  CONVERT_ARG_HANDLE_CHECKED(String, left, 2);
-  CONVERT_ARG_HANDLE_CHECKED(String, right, 3);
-
-  Handle<String> result;
-  if (is_one_byte) {
-    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-        isolate, result,
-        isolate->factory()->NewOneByteConsString(length, left, right));
-  } else {
-    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-        isolate, result,
-        isolate->factory()->NewTwoByteConsString(length, left, right));
-  }
-  return *result;
-}
-
-
-RUNTIME_FUNCTION(Runtime_StringEquals) {
+RUNTIME_FUNCTION(Runtime_StringLessThan) {
   HandleScope handle_scope(isolate);
-  DCHECK(args.length() == 2);
-
+  DCHECK_EQ(2, args.length());
   CONVERT_ARG_HANDLE_CHECKED(String, x, 0);
   CONVERT_ARG_HANDLE_CHECKED(String, y, 1);
-
-  bool not_equal = !String::Equals(x, y);
-  // This is slightly convoluted because the value that signifies
-  // equality is 0 and inequality is 1 so we have to negate the result
-  // from String::Equals.
-  DCHECK(not_equal == 0 || not_equal == 1);
-  STATIC_ASSERT(EQUAL == 0);
-  STATIC_ASSERT(NOT_EQUAL == 1);
-  return Smi::FromInt(not_equal);
+  switch (String::Compare(x, y)) {
+    case ComparisonResult::kLessThan:
+      return isolate->heap()->true_value();
+    case ComparisonResult::kEqual:
+    case ComparisonResult::kGreaterThan:
+      return isolate->heap()->false_value();
+    case ComparisonResult::kUndefined:
+      break;
+  }
+  UNREACHABLE();
+  return Smi::FromInt(0);
 }
 
+RUNTIME_FUNCTION(Runtime_StringLessThanOrEqual) {
+  HandleScope handle_scope(isolate);
+  DCHECK_EQ(2, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(String, x, 0);
+  CONVERT_ARG_HANDLE_CHECKED(String, y, 1);
+  switch (String::Compare(x, y)) {
+    case ComparisonResult::kEqual:
+    case ComparisonResult::kLessThan:
+      return isolate->heap()->true_value();
+    case ComparisonResult::kGreaterThan:
+      return isolate->heap()->false_value();
+    case ComparisonResult::kUndefined:
+      break;
+  }
+  UNREACHABLE();
+  return Smi::FromInt(0);
+}
+
+RUNTIME_FUNCTION(Runtime_StringGreaterThan) {
+  HandleScope handle_scope(isolate);
+  DCHECK_EQ(2, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(String, x, 0);
+  CONVERT_ARG_HANDLE_CHECKED(String, y, 1);
+  switch (String::Compare(x, y)) {
+    case ComparisonResult::kGreaterThan:
+      return isolate->heap()->true_value();
+    case ComparisonResult::kEqual:
+    case ComparisonResult::kLessThan:
+      return isolate->heap()->false_value();
+    case ComparisonResult::kUndefined:
+      break;
+  }
+  UNREACHABLE();
+  return Smi::FromInt(0);
+}
+
+RUNTIME_FUNCTION(Runtime_StringGreaterThanOrEqual) {
+  HandleScope handle_scope(isolate);
+  DCHECK_EQ(2, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(String, x, 0);
+  CONVERT_ARG_HANDLE_CHECKED(String, y, 1);
+  switch (String::Compare(x, y)) {
+    case ComparisonResult::kEqual:
+    case ComparisonResult::kGreaterThan:
+      return isolate->heap()->true_value();
+    case ComparisonResult::kLessThan:
+      return isolate->heap()->false_value();
+    case ComparisonResult::kUndefined:
+      break;
+  }
+  UNREACHABLE();
+  return Smi::FromInt(0);
+}
+
+RUNTIME_FUNCTION(Runtime_StringEqual) {
+  HandleScope handle_scope(isolate);
+  DCHECK_EQ(2, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(String, x, 0);
+  CONVERT_ARG_HANDLE_CHECKED(String, y, 1);
+  return isolate->heap()->ToBoolean(String::Equals(x, y));
+}
+
+RUNTIME_FUNCTION(Runtime_StringNotEqual) {
+  HandleScope handle_scope(isolate);
+  DCHECK_EQ(2, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(String, x, 0);
+  CONVERT_ARG_HANDLE_CHECKED(String, y, 1);
+  return isolate->heap()->ToBoolean(!String::Equals(x, y));
+}
 
 RUNTIME_FUNCTION(Runtime_FlattenString) {
   HandleScope scope(isolate);
@@ -1270,8 +1251,14 @@ RUNTIME_FUNCTION(Runtime_FlattenString) {
 
 
 RUNTIME_FUNCTION(Runtime_StringCharFromCode) {
-  SealHandleScope shs(isolate);
-  return __RT_impl_Runtime_CharFromCode(args, isolate);
+  HandleScope handlescope(isolate);
+  DCHECK_EQ(1, args.length());
+  if (args[0]->IsNumber()) {
+    CONVERT_NUMBER_CHECKED(uint32_t, code, Uint32, args[0]);
+    code &= 0xffff;
+    return *isolate->factory()->LookupSingleCharacterStringFromCode(code);
+  }
+  return isolate->heap()->empty_string();
 }
 
 
@@ -1283,9 +1270,16 @@ RUNTIME_FUNCTION(Runtime_StringCharAt) {
   if (std::isinf(args.number_at(1))) return isolate->heap()->empty_string();
   Object* code = __RT_impl_Runtime_StringCharCodeAtRT(args, isolate);
   if (code->IsNaN()) return isolate->heap()->empty_string();
-  return __RT_impl_Runtime_CharFromCode(Arguments(1, &code), isolate);
+  return __RT_impl_Runtime_StringCharFromCode(Arguments(1, &code), isolate);
 }
 
+RUNTIME_FUNCTION(Runtime_ExternalStringGetChar) {
+  SealHandleScope shs(isolate);
+  DCHECK_EQ(2, args.length());
+  CONVERT_ARG_CHECKED(ExternalString, string, 0);
+  CONVERT_INT32_ARG_CHECKED(index, 1);
+  return Smi::FromInt(string->Get(index));
+}
 
 RUNTIME_FUNCTION(Runtime_OneByteSeqStringGetChar) {
   SealHandleScope shs(isolate);
@@ -1336,18 +1330,5 @@ RUNTIME_FUNCTION(Runtime_StringCharCodeAt) {
   return __RT_impl_Runtime_StringCharCodeAtRT(args, isolate);
 }
 
-
-RUNTIME_FUNCTION(Runtime_IsStringWrapperSafeForDefaultValueOf) {
-  UNIMPLEMENTED();
-  return NULL;
-}
-
-
-RUNTIME_FUNCTION(Runtime_StringGetLength) {
-  HandleScope scope(isolate);
-  DCHECK(args.length() == 1);
-  CONVERT_ARG_HANDLE_CHECKED(String, s, 0);
-  return Smi::FromInt(s->length());
-}
-}
-}  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8

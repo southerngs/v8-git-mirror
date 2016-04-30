@@ -51,15 +51,13 @@ class OperandGenerator {
 
   InstructionOperand DefineAsFixed(Node* node, Register reg) {
     return Define(node, UnallocatedOperand(UnallocatedOperand::FIXED_REGISTER,
-                                           Register::ToAllocationIndex(reg),
-                                           GetVReg(node)));
+                                           reg.code(), GetVReg(node)));
   }
 
   InstructionOperand DefineAsFixed(Node* node, DoubleRegister reg) {
     return Define(node,
                   UnallocatedOperand(UnallocatedOperand::FIXED_DOUBLE_REGISTER,
-                                     DoubleRegister::ToAllocationIndex(reg),
-                                     GetVReg(node)));
+                                     reg.code(), GetVReg(node)));
   }
 
   InstructionOperand DefineAsConstant(Node* node) {
@@ -70,12 +68,26 @@ class OperandGenerator {
   }
 
   InstructionOperand DefineAsLocation(Node* node, LinkageLocation location,
-                                      MachineType type) {
-    return Define(node, ToUnallocatedOperand(location, type, GetVReg(node)));
+                                      MachineRepresentation rep) {
+    return Define(node, ToUnallocatedOperand(location, rep, GetVReg(node)));
+  }
+
+  InstructionOperand DefineAsDualLocation(Node* node,
+                                          LinkageLocation primary_location,
+                                          LinkageLocation secondary_location) {
+    return Define(node,
+                  ToDualLocationUnallocatedOperand(
+                      primary_location, secondary_location, GetVReg(node)));
   }
 
   InstructionOperand Use(Node* node) {
     return Use(node, UnallocatedOperand(UnallocatedOperand::NONE,
+                                        UnallocatedOperand::USED_AT_START,
+                                        GetVReg(node)));
+  }
+
+  InstructionOperand UseAny(Node* node) {
+    return Use(node, UnallocatedOperand(UnallocatedOperand::ANY,
                                         UnallocatedOperand::USED_AT_START,
                                         GetVReg(node)));
   }
@@ -107,15 +119,24 @@ class OperandGenerator {
 
   InstructionOperand UseFixed(Node* node, Register reg) {
     return Use(node, UnallocatedOperand(UnallocatedOperand::FIXED_REGISTER,
-                                        Register::ToAllocationIndex(reg),
-                                        GetVReg(node)));
+                                        reg.code(), GetVReg(node)));
   }
 
   InstructionOperand UseFixed(Node* node, DoubleRegister reg) {
     return Use(node,
                UnallocatedOperand(UnallocatedOperand::FIXED_DOUBLE_REGISTER,
-                                  DoubleRegister::ToAllocationIndex(reg),
-                                  GetVReg(node)));
+                                  reg.code(), GetVReg(node)));
+  }
+
+  InstructionOperand UseExplicit(LinkageLocation location) {
+    MachineRepresentation rep = InstructionSequence::DefaultRepresentation();
+    if (location.IsRegister()) {
+      return ExplicitOperand(LocationOperand::REGISTER, rep,
+                             location.AsRegister());
+    } else {
+      return ExplicitOperand(LocationOperand::STACK_SLOT, rep,
+                             location.GetLocation());
+    }
   }
 
   InstructionOperand UseImmediate(Node* node) {
@@ -123,8 +144,20 @@ class OperandGenerator {
   }
 
   InstructionOperand UseLocation(Node* node, LinkageLocation location,
-                                 MachineType type) {
-    return Use(node, ToUnallocatedOperand(location, type, GetVReg(node)));
+                                 MachineRepresentation rep) {
+    return Use(node, ToUnallocatedOperand(location, rep, GetVReg(node)));
+  }
+
+  // Used to force gap moves from the from_location to the to_location
+  // immediately before an instruction.
+  InstructionOperand UsePointerLocation(LinkageLocation to_location,
+                                        LinkageLocation from_location) {
+    MachineRepresentation rep = MachineType::PointerRepresentation();
+    UnallocatedOperand casted_from_operand =
+        UnallocatedOperand::cast(TempLocation(from_location, rep));
+    selector_->Emit(kArchNop, casted_from_operand);
+    return ToUnallocatedOperand(to_location, rep,
+                                casted_from_operand.virtual_register());
   }
 
   InstructionOperand TempRegister() {
@@ -137,13 +170,13 @@ class OperandGenerator {
     UnallocatedOperand op = UnallocatedOperand(
         UnallocatedOperand::MUST_HAVE_REGISTER,
         UnallocatedOperand::USED_AT_START, sequence()->NextVirtualRegister());
-    sequence()->MarkAsRepresentation(kRepFloat64, op.virtual_register());
+    sequence()->MarkAsRepresentation(MachineRepresentation::kFloat64,
+                                     op.virtual_register());
     return op;
   }
 
   InstructionOperand TempRegister(Register reg) {
-    return UnallocatedOperand(UnallocatedOperand::FIXED_REGISTER,
-                              Register::ToAllocationIndex(reg),
+    return UnallocatedOperand(UnallocatedOperand::FIXED_REGISTER, reg.code(),
                               InstructionOperand::kInvalidVirtualRegister);
   }
 
@@ -151,8 +184,9 @@ class OperandGenerator {
     return sequence()->AddImmediate(Constant(imm));
   }
 
-  InstructionOperand TempLocation(LinkageLocation location, MachineType type) {
-    return ToUnallocatedOperand(location, type,
+  InstructionOperand TempLocation(LinkageLocation location,
+                                  MachineRepresentation rep) {
+    return ToUnallocatedOperand(location, rep,
                                 sequence()->NextVirtualRegister());
   }
 
@@ -177,13 +211,16 @@ class OperandGenerator {
         return Constant(OpParameter<int64_t>(node));
       case IrOpcode::kFloat32Constant:
         return Constant(OpParameter<float>(node));
+      case IrOpcode::kRelocatableInt32Constant:
+      case IrOpcode::kRelocatableInt64Constant:
+        return Constant(OpParameter<RelocatablePtrConstantInfo>(node));
       case IrOpcode::kFloat64Constant:
       case IrOpcode::kNumberConstant:
         return Constant(OpParameter<double>(node));
       case IrOpcode::kExternalConstant:
         return Constant(OpParameter<ExternalReference>(node));
       case IrOpcode::kHeapConstant:
-        return Constant(OpParameter<Unique<HeapObject> >(node).handle());
+        return Constant(OpParameter<Handle<HeapObject>>(node));
       default:
         break;
     }
@@ -205,33 +242,43 @@ class OperandGenerator {
     return operand;
   }
 
+  UnallocatedOperand ToDualLocationUnallocatedOperand(
+      LinkageLocation primary_location, LinkageLocation secondary_location,
+      int virtual_register) {
+    // We only support the primary location being a register and the secondary
+    // one a slot.
+    DCHECK(primary_location.IsRegister() &&
+           secondary_location.IsCalleeFrameSlot());
+    int reg_id = primary_location.AsRegister();
+    int slot_id = secondary_location.AsCalleeFrameSlot();
+    return UnallocatedOperand(reg_id, slot_id, virtual_register);
+  }
+
   UnallocatedOperand ToUnallocatedOperand(LinkageLocation location,
-                                          MachineType type,
+                                          MachineRepresentation rep,
                                           int virtual_register) {
-    if (location.location_ == LinkageLocation::ANY_REGISTER) {
+    if (location.IsAnyRegister()) {
       // any machine register.
       return UnallocatedOperand(UnallocatedOperand::MUST_HAVE_REGISTER,
                                 virtual_register);
     }
-    if (location.location_ < 0) {
+    if (location.IsCallerFrameSlot()) {
       // a location on the caller frame.
       return UnallocatedOperand(UnallocatedOperand::FIXED_SLOT,
-                                location.location_, virtual_register);
+                                location.AsCallerFrameSlot(), virtual_register);
     }
-    if (location.location_ > LinkageLocation::ANY_REGISTER) {
+    if (location.IsCalleeFrameSlot()) {
       // a spill location on this (callee) frame.
-      return UnallocatedOperand(
-          UnallocatedOperand::FIXED_SLOT,
-          location.location_ - LinkageLocation::ANY_REGISTER - 1,
-          virtual_register);
+      return UnallocatedOperand(UnallocatedOperand::FIXED_SLOT,
+                                location.AsCalleeFrameSlot(), virtual_register);
     }
     // a fixed register.
-    if (RepresentationOf(type) == kRepFloat64) {
+    if (IsFloatingPoint(rep)) {
       return UnallocatedOperand(UnallocatedOperand::FIXED_DOUBLE_REGISTER,
-                                location.location_, virtual_register);
+                                location.AsRegister(), virtual_register);
     }
     return UnallocatedOperand(UnallocatedOperand::FIXED_REGISTER,
-                              location.location_, virtual_register);
+                              location.AsRegister(), virtual_register);
   }
 
   InstructionSelector* selector_;
@@ -259,22 +306,32 @@ class FlagsContinuation final {
     DCHECK_NOT_NULL(false_block);
   }
 
-  // Creates a new flags continuation from the given condition and result node.
-  FlagsContinuation(FlagsCondition condition, Node* result)
-      : mode_(kFlags_set), condition_(condition), result_(result) {
-    DCHECK_NOT_NULL(result);
+  // Creates a new flags continuation for an eager deoptimization exit.
+  static FlagsContinuation ForDeoptimize(FlagsCondition condition,
+                                         Node* frame_state) {
+    return FlagsContinuation(kFlags_deoptimize, condition, frame_state);
+  }
+
+  // Creates a new flags continuation for a boolean value.
+  static FlagsContinuation ForSet(FlagsCondition condition, Node* result) {
+    return FlagsContinuation(kFlags_set, condition, result);
   }
 
   bool IsNone() const { return mode_ == kFlags_none; }
   bool IsBranch() const { return mode_ == kFlags_branch; }
+  bool IsDeoptimize() const { return mode_ == kFlags_deoptimize; }
   bool IsSet() const { return mode_ == kFlags_set; }
   FlagsCondition condition() const {
     DCHECK(!IsNone());
     return condition_;
   }
+  Node* frame_state() const {
+    DCHECK(IsDeoptimize());
+    return frame_state_or_result_;
+  }
   Node* result() const {
     DCHECK(IsSet());
-    return result_;
+    return frame_state_or_result_;
   }
   BasicBlock* true_block() const {
     DCHECK(IsBranch());
@@ -292,41 +349,7 @@ class FlagsContinuation final {
 
   void Commute() {
     DCHECK(!IsNone());
-    switch (condition_) {
-      case kEqual:
-      case kNotEqual:
-      case kOverflow:
-      case kNotOverflow:
-        return;
-      case kSignedLessThan:
-        condition_ = kSignedGreaterThan;
-        return;
-      case kSignedGreaterThanOrEqual:
-        condition_ = kSignedLessThanOrEqual;
-        return;
-      case kSignedLessThanOrEqual:
-        condition_ = kSignedGreaterThanOrEqual;
-        return;
-      case kSignedGreaterThan:
-        condition_ = kSignedLessThan;
-        return;
-      case kUnsignedLessThan:
-        condition_ = kUnsignedGreaterThan;
-        return;
-      case kUnsignedGreaterThanOrEqual:
-        condition_ = kUnsignedLessThanOrEqual;
-        return;
-      case kUnsignedLessThanOrEqual:
-        condition_ = kUnsignedGreaterThanOrEqual;
-        return;
-      case kUnsignedGreaterThan:
-        condition_ = kUnsignedLessThan;
-        return;
-      case kUnorderedEqual:
-      case kUnorderedNotEqual:
-        return;
-    }
-    UNREACHABLE();
+    condition_ = CommuteFlagsCondition(condition_);
   }
 
   void OverwriteAndNegateIfEqual(FlagsCondition condition) {
@@ -345,38 +368,20 @@ class FlagsContinuation final {
   }
 
  private:
-  FlagsMode mode_;
-  FlagsCondition condition_;
-  Node* result_;             // Only valid if mode_ == kFlags_set.
-  BasicBlock* true_block_;   // Only valid if mode_ == kFlags_branch.
-  BasicBlock* false_block_;  // Only valid if mode_ == kFlags_branch.
-};
-
-
-// An internal helper class for generating the operands to calls.
-// TODO(bmeurer): Get rid of the CallBuffer business and make
-// InstructionSelector::VisitCall platform independent instead.
-struct CallBuffer {
-  CallBuffer(Zone* zone, const CallDescriptor* descriptor,
-             FrameStateDescriptor* frame_state);
-
-  const CallDescriptor* descriptor;
-  FrameStateDescriptor* frame_state_descriptor;
-  NodeVector output_nodes;
-  InstructionOperandVector outputs;
-  InstructionOperandVector instruction_args;
-  NodeVector pushed_nodes;
-
-  size_t input_count() const { return descriptor->InputCount(); }
-
-  size_t frame_state_count() const { return descriptor->FrameStateCount(); }
-
-  size_t frame_state_value_count() const {
-    return (frame_state_descriptor == NULL)
-               ? 0
-               : (frame_state_descriptor->GetTotalSize() +
-                  1);  // Include deopt id.
+  FlagsContinuation(FlagsMode mode, FlagsCondition condition,
+                    Node* frame_state_or_result)
+      : mode_(mode),
+        condition_(condition),
+        frame_state_or_result_(frame_state_or_result) {
+    DCHECK_NOT_NULL(frame_state_or_result);
   }
+
+  FlagsMode const mode_;
+  FlagsCondition condition_;
+  Node* frame_state_or_result_;  // Only valid if mode_ == kFlags_deoptimize
+                                 // or mode_ == kFlags_set.
+  BasicBlock* true_block_;       // Only valid if mode_ == kFlags_branch.
+  BasicBlock* false_block_;      // Only valid if mode_ == kFlags_branch.
 };
 
 }  // namespace compiler

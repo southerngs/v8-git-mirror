@@ -30,19 +30,6 @@
 # define V8_INFINITY INFINITY
 #endif
 
-#if V8_TARGET_ARCH_IA32 || (V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_32_BIT) || \
-    V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_MIPS ||     \
-    V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_PPC
-#define V8_TURBOFAN_BACKEND 1
-#else
-#define V8_TURBOFAN_BACKEND 0
-#endif
-#if V8_TURBOFAN_BACKEND
-#define V8_TURBOFAN_TARGET 1
-#else
-#define V8_TURBOFAN_TARGET 0
-#endif
-
 namespace v8 {
 
 namespace base {
@@ -72,10 +59,18 @@ namespace internal {
 #if (V8_TARGET_ARCH_MIPS64 && !V8_HOST_ARCH_MIPS64)
 #define USE_SIMULATOR 1
 #endif
+#if (V8_TARGET_ARCH_S390 && !V8_HOST_ARCH_S390)
+#define USE_SIMULATOR 1
+#endif
 #endif
 
-// Determine whether the architecture uses an out-of-line constant pool.
-#define V8_OOL_CONSTANT_POOL 0
+// Determine whether the architecture uses an embedded constant pool
+// (contiguous constant pool embedded in code object).
+#if V8_TARGET_ARCH_PPC
+#define V8_EMBEDDED_CONSTANT_POOL 1
+#else
+#define V8_EMBEDDED_CONSTANT_POOL 0
+#endif
 
 #ifdef V8_TARGET_ARCH_ARM
 // Set stack limit lower for ARM than for other architectures because
@@ -118,12 +113,14 @@ const int kMaxUInt16 = (1 << 16) - 1;
 const int kMinUInt16 = 0;
 
 const uint32_t kMaxUInt32 = 0xFFFFFFFFu;
+const int kMinUInt32 = 0;
 
 const int kCharSize      = sizeof(char);      // NOLINT
 const int kShortSize     = sizeof(short);     // NOLINT
 const int kIntSize       = sizeof(int);       // NOLINT
 const int kInt32Size     = sizeof(int32_t);   // NOLINT
 const int kInt64Size     = sizeof(int64_t);   // NOLINT
+const int kFloatSize     = sizeof(float);     // NOLINT
 const int kDoubleSize    = sizeof(double);    // NOLINT
 const int kIntptrSize    = sizeof(intptr_t);  // NOLINT
 const int kPointerSize   = sizeof(void*);     // NOLINT
@@ -135,6 +132,12 @@ const int kRegisterSize  = kPointerSize;
 const int kPCOnStackSize = kRegisterSize;
 const int kFPOnStackSize = kRegisterSize;
 
+#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X87
+const int kElidedFrameSlots = kPCOnStackSize / kPointerSize;
+#else
+const int kElidedFrameSlots = 0;
+#endif
+
 const int kDoubleSizeLog2 = 3;
 
 #if V8_HOST_ARCH_64_BIT
@@ -142,7 +145,14 @@ const int kPointerSizeLog2 = 3;
 const intptr_t kIntptrSignBit = V8_INT64_C(0x8000000000000000);
 const uintptr_t kUintptrAllBitsSet = V8_UINT64_C(0xFFFFFFFFFFFFFFFF);
 const bool kRequiresCodeRange = true;
+#if V8_TARGET_ARCH_MIPS64
+// To use pseudo-relative jumps such as j/jal instructions which have 28-bit
+// encoded immediate, the addresses have to be in range of 256MB aligned
+// region. Used only for large object space.
+const size_t kMaximalCodeRangeSize = 256 * MB;
+#else
 const size_t kMaximalCodeRangeSize = 512 * MB;
+#endif
 #if V8_OS_WIN
 const size_t kMinimumCodeRangeSize = 4 * MB;
 const size_t kReservedCodeRangePages = 1;
@@ -197,6 +207,8 @@ typedef int32_t uc32;
 const int kOneByteSize    = kCharSize;
 const int kUC16Size     = sizeof(uc16);      // NOLINT
 
+// 128 bit SIMD value size.
+const int kSimd128Size = 16;
 
 // Round up n to be a multiple of sz, where sz is a power of 2.
 #define ROUND_UP(n, sz) (((n) + ((sz) - 1)) & ~((sz) - 1))
@@ -215,6 +227,20 @@ F FUNCTION_CAST(Address addr) {
 }
 
 
+// Determine whether the architecture uses function descriptors
+// which provide a level of indirection between the function pointer
+// and the function entrypoint.
+#if V8_HOST_ARCH_PPC && \
+    (V8_OS_AIX || (V8_TARGET_ARCH_PPC64 && V8_TARGET_BIG_ENDIAN))
+#define USES_FUNCTION_DESCRIPTORS 1
+#define FUNCTION_ENTRYPOINT_ADDRESS(f)       \
+  (reinterpret_cast<v8::internal::Address*>( \
+      &(reinterpret_cast<intptr_t*>(f)[0])))
+#else
+#define USES_FUNCTION_DESCRIPTORS 0
+#endif
+
+
 // -----------------------------------------------------------------------------
 // Forward declarations for frequently used classes
 // (sorted alphabetically)
@@ -227,60 +253,36 @@ template <typename T, class P = FreeStoreAllocationPolicy> class List;
 
 // The Strict Mode (ECMA-262 5th edition, 4.2.2).
 
-enum LanguageMode {
-  // LanguageMode is expressed as a bitmask. Descriptions of the bits:
-  STRICT_BIT = 1 << 0,
-  STRONG_BIT = 1 << 1,
-  LANGUAGE_END,
-
-  // Shorthands for some common language modes.
-  SLOPPY = 0,
-  STRICT = STRICT_BIT,
-  STRONG = STRICT_BIT | STRONG_BIT
-};
+enum LanguageMode { SLOPPY, STRICT, LANGUAGE_END = 3 };
 
 
-inline std::ostream& operator<<(std::ostream& os, LanguageMode mode) {
+inline std::ostream& operator<<(std::ostream& os, const LanguageMode& mode) {
   switch (mode) {
-    case SLOPPY:
-      return os << "sloppy";
-    case STRICT:
-      return os << "strict";
-    case STRONG:
-      return os << "strong";
-    default:
-      return os << "unknown";
+    case SLOPPY: return os << "sloppy";
+    case STRICT: return os << "strict";
+    default: UNREACHABLE();
   }
+  return os;
 }
 
 
 inline bool is_sloppy(LanguageMode language_mode) {
-  return (language_mode & STRICT_BIT) == 0;
+  return language_mode == SLOPPY;
 }
 
 
 inline bool is_strict(LanguageMode language_mode) {
-  return language_mode & STRICT_BIT;
-}
-
-
-inline bool is_strong(LanguageMode language_mode) {
-  return language_mode & STRONG_BIT;
+  return language_mode != SLOPPY;
 }
 
 
 inline bool is_valid_language_mode(int language_mode) {
-  return language_mode == SLOPPY || language_mode == STRICT ||
-         language_mode == STRONG;
+  return language_mode == SLOPPY || language_mode == STRICT;
 }
 
 
-inline LanguageMode construct_language_mode(bool strict_bit, bool strong_bit) {
-  int language_mode = 0;
-  if (strict_bit) language_mode |= STRICT_BIT;
-  if (strong_bit) language_mode |= STRONG_BIT;
-  DCHECK(is_valid_language_mode(language_mode));
-  return static_cast<LanguageMode>(language_mode);
+inline LanguageMode construct_language_mode(bool strict_bit) {
+  return static_cast<LanguageMode>(strict_bit);
 }
 
 
@@ -298,6 +300,10 @@ const intptr_t kPointerAlignmentMask = kPointerAlignment - 1;
 // Desired alignment for double values.
 const intptr_t kDoubleAlignment = 8;
 const intptr_t kDoubleAlignmentMask = kDoubleAlignment - 1;
+
+// Desired alignment for 128 bit SIMD values.
+const intptr_t kSimd128Alignment = 16;
+const intptr_t kSimd128AlignmentMask = kSimd128Alignment - 1;
 
 // Desired alignment for generated code is 32 bytes (to improve cache line
 // utilization).
@@ -365,7 +371,6 @@ class CodeGenerator;
 class CodeStub;
 class Context;
 class Debug;
-class Debugger;
 class DebugInfo;
 class Descriptor;
 class DescriptorArray;
@@ -377,6 +382,7 @@ class MemoryChunk;
 class SeededNumberDictionary;
 class UnseededNumberDictionary;
 class NameDictionary;
+class GlobalDictionary;
 template <typename T> class MaybeHandle;
 template <typename T> class Handle;
 class Heap;
@@ -396,18 +402,19 @@ class MarkCompactCollector;
 class NewSpace;
 class Object;
 class OldSpace;
+class ParameterCount;
 class Foreign;
 class Scope;
 class ScopeInfo;
 class Script;
 class Smi;
 template <typename Config, class Allocator = FreeStoreAllocationPolicy>
-    class SplayTree;
+class SplayTree;
 class String;
 class Symbol;
 class Name;
 class Struct;
-class Symbol;
+class TypeFeedbackVector;
 class Variable;
 class RelocInfo;
 class Deserializer;
@@ -438,12 +445,29 @@ enum AllocationSpace {
 const int kSpaceTagSize = 3;
 const int kSpaceTagMask = (1 << kSpaceTagSize) - 1;
 
+enum AllocationAlignment {
+  kWordAligned,
+  kDoubleAligned,
+  kDoubleUnaligned,
+  kSimd128Unaligned
+};
 
 // A flag that indicates whether objects should be pretenured when
 // allocated (allocated directly into the old generation) or not
 // (allocated in the young generation if the object size and type
 // allows).
 enum PretenureFlag { NOT_TENURED, TENURED };
+
+inline std::ostream& operator<<(std::ostream& os, const PretenureFlag& flag) {
+  switch (flag) {
+    case NOT_TENURED:
+      return os << "NotTenured";
+    case TENURED:
+      return os << "Tenured";
+  }
+  UNREACHABLE();
+  return os;
+}
 
 enum MinimumCapacity {
   USE_DEFAULT_MINIMUM_CAPACITY,
@@ -458,12 +482,16 @@ enum VisitMode {
   VISIT_ALL,
   VISIT_ALL_IN_SCAVENGE,
   VISIT_ALL_IN_SWEEP_NEWSPACE,
-  VISIT_ONLY_STRONG
+  VISIT_ONLY_STRONG,
+  VISIT_ONLY_STRONG_FOR_SERIALIZATION,
+  VISIT_ONLY_STRONG_ROOT_LIST,
 };
 
 // Flag indicating whether code is built into the VM (one of the natives files).
-enum NativesFlag { NOT_NATIVES_CODE, NATIVES_CODE };
+enum NativesFlag { NOT_NATIVES_CODE, EXTENSION_CODE, NATIVES_CODE };
 
+// JavaScript defines two kinds of 'nil'.
+enum NilValue { kNullValue, kUndefinedValue };
 
 // ParseRestriction is used to restrict the set of valid statements in a
 // unit of compilation.  Restriction violations cause a syntax error.
@@ -475,13 +503,15 @@ enum ParseRestriction {
 // A CodeDesc describes a buffer holding instructions and relocation
 // information. The instructions start at the beginning of the buffer
 // and grow forward, the relocation information starts at the end of
-// the buffer and grows backward.
+// the buffer and grows backward.  A constant pool may exist at the
+// end of the instructions.
 //
-//  |<--------------- buffer_size ---------------->|
-//  |<-- instr_size -->|        |<-- reloc_size -->|
-//  +==================+========+==================+
-//  |   instructions   |  free  |    reloc info    |
-//  +==================+========+==================+
+//  |<--------------- buffer_size ----------------------------------->|
+//  |<------------- instr_size ---------->|        |<-- reloc_size -->|
+//  |               |<- const_pool_size ->|                           |
+//  +=====================================+========+==================+
+//  |  instructions |        data         |  free  |    reloc info    |
+//  +=====================================+========+==================+
 //  ^
 //  |
 //  buffer
@@ -491,13 +521,9 @@ struct CodeDesc {
   int buffer_size;
   int instr_size;
   int reloc_size;
+  int constant_pool_size;
   Assembler* origin;
 };
-
-
-// Callback function used for iterating objects in heap spaces,
-// for example, scanning heap objects.
-typedef int (*HeapObjectCallback)(HeapObject* obj);
 
 
 // Callback function used for checking constraints when copying/relocating
@@ -520,7 +546,7 @@ enum InlineCacheState {
   // Has been executed and only one receiver type has been seen.
   MONOMORPHIC,
   // Check failed due to prototype (or map deprecation).
-  PROTOTYPE_FAILURE,
+  RECOMPUTE_HANDLER,
   // Multiple receiver types have been seen.
   POLYMORPHIC,
   // Many receiver types have been seen.
@@ -528,31 +554,8 @@ enum InlineCacheState {
   // A generic handler is installed and no extra typefeedback is recorded.
   GENERIC,
   // Special state for debug break or step in prepare stubs.
-  DEBUG_STUB,
-  // Type-vector-based ICs have a default state, with the full calculation
-  // of IC state only determined by a look at the IC and the typevector
-  // together.
-  DEFAULT
+  DEBUG_STUB
 };
-
-
-enum CallFunctionFlags {
-  NO_CALL_FUNCTION_FLAGS,
-  CALL_AS_METHOD,
-  // Always wrap the receiver and call to the JSFunction. Only use this flag
-  // both the receiver type and the target method are statically known.
-  WRAP_AND_CALL
-};
-
-
-enum CallConstructorFlags {
-  NO_CALL_CONSTRUCTOR_FLAGS = 0,
-  // The call target is cached in the instruction stream.
-  RECORD_CONSTRUCTOR_TARGET = 1,
-  SUPER_CONSTRUCTOR_CALL = 1 << 1,
-  SUPER_CALL_RECORD_TARGET = SUPER_CONSTRUCTOR_CALL | RECORD_CONSTRUCTOR_TARGET
-};
-
 
 enum CacheHolderFlag {
   kCacheOnPrototype,
@@ -640,25 +643,9 @@ struct AccessorDescriptor {
 #define CODE_POINTER_ALIGN(value)                               \
   (((value) + kCodeAlignmentMask) & ~kCodeAlignmentMask)
 
-// Support for tracking C++ memory allocation.  Insert TRACK_MEMORY("Fisk")
-// inside a C++ class and new and delete will be overloaded so logging is
-// performed.
-// This file (globals.h) is included before log.h, so we use direct calls to
-// the Logger rather than the LOG macro.
-#ifdef DEBUG
-#define TRACK_MEMORY(name) \
-  void* operator new(size_t size) { \
-    void* result = ::operator new(size); \
-    Logger::NewEventStatic(name, result, size); \
-    return result; \
-  } \
-  void operator delete(void* object) { \
-    Logger::DeleteEventStatic(name, object); \
-    ::operator delete(object); \
-  }
-#else
-#define TRACK_MEMORY(name)
-#endif
+// DOUBLE_POINTER_ALIGN returns the value algined for double pointers.
+#define DOUBLE_POINTER_ALIGN(value) \
+  (((value) + kDoubleAlignmentMask) & ~kDoubleAlignmentMask)
 
 
 // CPU feature flags.
@@ -697,9 +684,76 @@ enum CpuFeature {
   FPR_GPR_MOV,
   LWSYNC,
   ISELECT,
+  // S390
+  DISTINCT_OPS,
+  GENERAL_INSTR_EXT,
+  FLOATING_POINT_EXT,
   NUMBER_OF_CPU_FEATURES
 };
 
+// Defines hints about receiver values based on structural knowledge.
+enum class ConvertReceiverMode : unsigned {
+  kNullOrUndefined,     // Guaranteed to be null or undefined.
+  kNotNullOrUndefined,  // Guaranteed to never be null or undefined.
+  kAny                  // No specific knowledge about receiver.
+};
+
+inline size_t hash_value(ConvertReceiverMode mode) {
+  return bit_cast<unsigned>(mode);
+}
+
+inline std::ostream& operator<<(std::ostream& os, ConvertReceiverMode mode) {
+  switch (mode) {
+    case ConvertReceiverMode::kNullOrUndefined:
+      return os << "NULL_OR_UNDEFINED";
+    case ConvertReceiverMode::kNotNullOrUndefined:
+      return os << "NOT_NULL_OR_UNDEFINED";
+    case ConvertReceiverMode::kAny:
+      return os << "ANY";
+  }
+  UNREACHABLE();
+  return os;
+}
+
+// Defines whether tail call optimization is allowed.
+enum class TailCallMode : unsigned { kAllow, kDisallow };
+
+inline size_t hash_value(TailCallMode mode) { return bit_cast<unsigned>(mode); }
+
+inline std::ostream& operator<<(std::ostream& os, TailCallMode mode) {
+  switch (mode) {
+    case TailCallMode::kAllow:
+      return os << "ALLOW_TAIL_CALLS";
+    case TailCallMode::kDisallow:
+      return os << "DISALLOW_TAIL_CALLS";
+  }
+  UNREACHABLE();
+  return os;
+}
+
+// Defines specifics about arguments object or rest parameter creation.
+enum class CreateArgumentsType : uint8_t {
+  kMappedArguments,
+  kUnmappedArguments,
+  kRestParameter
+};
+
+inline size_t hash_value(CreateArgumentsType type) {
+  return bit_cast<uint8_t>(type);
+}
+
+inline std::ostream& operator<<(std::ostream& os, CreateArgumentsType type) {
+  switch (type) {
+    case CreateArgumentsType::kMappedArguments:
+      return os << "MAPPED_ARGUMENTS";
+    case CreateArgumentsType::kUnmappedArguments:
+      return os << "UNMAPPED_ARGUMENTS";
+    case CreateArgumentsType::kRestParameter:
+      return os << "REST_PARAMETER";
+  }
+  UNREACHABLE();
+  return os;
+}
 
 // Used to specify if a macro instruction must perform a smi check on tagged
 // values.
@@ -716,8 +770,7 @@ enum ScopeType {
   SCRIPT_SCOPE,    // The top-level scope for a script or a top-level eval.
   CATCH_SCOPE,     // The scope introduced by catch.
   BLOCK_SCOPE,     // The scope introduced by a new block.
-  WITH_SCOPE,      // The scope introduced by with.
-  ARROW_SCOPE      // The top-level scope for an arrow function literal.
+  WITH_SCOPE       // The scope introduced by with.
 };
 
 // The mips architecture prior to revision 5 has inverted encoding for sNaN.
@@ -734,39 +787,37 @@ const uint64_t kHoleNanInt64 =
     (static_cast<uint64_t>(kHoleNanUpper32) << 32) | kHoleNanLower32;
 
 
+// ES6 section 20.1.2.6 Number.MAX_SAFE_INTEGER
+const double kMaxSafeInteger = 9007199254740991.0;  // 2^53-1
+
+
 // The order of this enum has to be kept in sync with the predicates below.
 enum VariableMode {
   // User declared variables:
-  VAR,             // declared via 'var', and 'function' declarations
+  VAR,  // declared via 'var', and 'function' declarations
 
-  CONST_LEGACY,    // declared via legacy 'const' declarations
+  CONST_LEGACY,  // declared via legacy 'const' declarations
 
-  LET,             // declared via 'let' declarations (first lexical)
+  LET,  // declared via 'let' declarations (first lexical)
 
-  CONST,           // declared via 'const' declarations
-
-  IMPORT,          // declared via 'import' declarations (last lexical)
+  CONST,  // declared via 'const' declarations (last lexical)
 
   // Variables introduced by the compiler:
-  INTERNAL,        // like VAR, but not user-visible (may or may not
-                   // be in a context)
+  TEMPORARY,  // temporary variables (not user-visible), stack-allocated
+              // unless the scope as a whole has forced context allocation
 
-  TEMPORARY,       // temporary variables (not user-visible), stack-allocated
-                   // unless the scope as a whole has forced context allocation
-
-  DYNAMIC,         // always require dynamic lookup (we don't know
-                   // the declaration)
+  DYNAMIC,  // always require dynamic lookup (we don't know
+            // the declaration)
 
   DYNAMIC_GLOBAL,  // requires dynamic lookup, but we know that the
                    // variable is global unless it has been shadowed
                    // by an eval-introduced variable
 
-  DYNAMIC_LOCAL    // requires dynamic lookup, but we know that the
-                   // variable is local and where it is unless it
-                   // has been shadowed by an eval-introduced
-                   // variable
+  DYNAMIC_LOCAL  // requires dynamic lookup, but we know that the
+                 // variable is local and where it is unless it
+                 // has been shadowed by an eval-introduced
+                 // variable
 };
-
 
 inline bool IsDynamicVariableMode(VariableMode mode) {
   return mode >= DYNAMIC && mode <= DYNAMIC_LOCAL;
@@ -774,18 +825,52 @@ inline bool IsDynamicVariableMode(VariableMode mode) {
 
 
 inline bool IsDeclaredVariableMode(VariableMode mode) {
-  return mode >= VAR && mode <= IMPORT;
+  return mode >= VAR && mode <= CONST;
 }
 
 
 inline bool IsLexicalVariableMode(VariableMode mode) {
-  return mode >= LET && mode <= IMPORT;
+  return mode >= LET && mode <= CONST;
 }
 
 
 inline bool IsImmutableVariableMode(VariableMode mode) {
-  return mode == CONST || mode == CONST_LEGACY || mode == IMPORT;
+  return mode == CONST || mode == CONST_LEGACY;
 }
+
+
+enum class VariableLocation {
+  // Before and during variable allocation, a variable whose location is
+  // not yet determined.  After allocation, a variable looked up as a
+  // property on the global object (and possibly absent).  name() is the
+  // variable name, index() is invalid.
+  UNALLOCATED,
+
+  // A slot in the parameter section on the stack.  index() is the
+  // parameter index, counting left-to-right.  The receiver is index -1;
+  // the first parameter is index 0.
+  PARAMETER,
+
+  // A slot in the local section on the stack.  index() is the variable
+  // index in the stack frame, starting at 0.
+  LOCAL,
+
+  // An indexed slot in a heap context.  index() is the variable index in
+  // the context object on the heap, starting at 0.  scope() is the
+  // corresponding scope.
+  CONTEXT,
+
+  // An indexed slot in a script context that contains a respective global
+  // property cell.  name() is the variable name, index() is the variable
+  // index in the context object on the heap, starting at 0.  scope() is the
+  // corresponding script scope.
+  GLOBAL,
+
+  // A named slot in a heap context.  name() is the variable name in the
+  // context object on the heap, with lookup starting at the current
+  // context.  index() is invalid.
+  LOOKUP
+};
 
 
 // ES6 Draft Rev3 10.2 specifies declarative environment records with mutable
@@ -832,12 +917,6 @@ enum MaybeAssignedFlag { kNotAssigned, kMaybeAssigned };
 enum ParseErrorType { kSyntaxError = 0, kReferenceError = 1 };
 
 
-enum ClearExceptionFlag {
-  KEEP_EXCEPTION,
-  CLEAR_EXCEPTION
-};
-
-
 enum MinusZeroMode {
   TREAT_MINUS_ZERO_AS_ZERO,
   FAIL_ON_MINUS_ZERO
@@ -846,26 +925,23 @@ enum MinusZeroMode {
 
 enum Signedness { kSigned, kUnsigned };
 
-
 enum FunctionKind {
   kNormalFunction = 0,
   kArrowFunction = 1 << 0,
   kGeneratorFunction = 1 << 1,
   kConciseMethod = 1 << 2,
   kConciseGeneratorMethod = kGeneratorFunction | kConciseMethod,
-  kAccessorFunction = 1 << 3,
-  kDefaultConstructor = 1 << 4,
-  kSubclassConstructor = 1 << 5,
-  kBaseConstructor = 1 << 6,
-  kInObjectLiteral = 1 << 7,
+  kDefaultConstructor = 1 << 3,
+  kSubclassConstructor = 1 << 4,
+  kBaseConstructor = 1 << 5,
+  kGetterFunction = 1 << 6,
+  kSetterFunction = 1 << 7,
+  kAccessorFunction = kGetterFunction | kSetterFunction,
   kDefaultBaseConstructor = kDefaultConstructor | kBaseConstructor,
   kDefaultSubclassConstructor = kDefaultConstructor | kSubclassConstructor,
-  kConciseMethodInObjectLiteral = kConciseMethod | kInObjectLiteral,
-  kConciseGeneratorMethodInObjectLiteral =
-      kConciseGeneratorMethod | kInObjectLiteral,
-  kAccessorFunctionInObjectLiteral = kAccessorFunction | kInObjectLiteral,
+  kClassConstructor =
+      kBaseConstructor | kSubclassConstructor | kDefaultConstructor,
 };
-
 
 inline bool IsValidFunctionKind(FunctionKind kind) {
   return kind == FunctionKind::kNormalFunction ||
@@ -873,14 +949,13 @@ inline bool IsValidFunctionKind(FunctionKind kind) {
          kind == FunctionKind::kGeneratorFunction ||
          kind == FunctionKind::kConciseMethod ||
          kind == FunctionKind::kConciseGeneratorMethod ||
+         kind == FunctionKind::kGetterFunction ||
+         kind == FunctionKind::kSetterFunction ||
          kind == FunctionKind::kAccessorFunction ||
          kind == FunctionKind::kDefaultBaseConstructor ||
          kind == FunctionKind::kDefaultSubclassConstructor ||
          kind == FunctionKind::kBaseConstructor ||
-         kind == FunctionKind::kSubclassConstructor ||
-         kind == FunctionKind::kConciseMethodInObjectLiteral ||
-         kind == FunctionKind::kConciseGeneratorMethodInObjectLiteral ||
-         kind == FunctionKind::kAccessorFunctionInObjectLiteral;
+         kind == FunctionKind::kSubclassConstructor;
 }
 
 
@@ -901,6 +976,15 @@ inline bool IsConciseMethod(FunctionKind kind) {
   return kind & FunctionKind::kConciseMethod;
 }
 
+inline bool IsGetterFunction(FunctionKind kind) {
+  DCHECK(IsValidFunctionKind(kind));
+  return kind & FunctionKind::kGetterFunction;
+}
+
+inline bool IsSetterFunction(FunctionKind kind) {
+  DCHECK(IsValidFunctionKind(kind));
+  return kind & FunctionKind::kSetterFunction;
+}
 
 inline bool IsAccessorFunction(FunctionKind kind) {
   DCHECK(IsValidFunctionKind(kind));
@@ -926,26 +1010,30 @@ inline bool IsSubclassConstructor(FunctionKind kind) {
 }
 
 
-inline bool IsConstructor(FunctionKind kind) {
+inline bool IsClassConstructor(FunctionKind kind) {
   DCHECK(IsValidFunctionKind(kind));
-  return kind &
-         (FunctionKind::kBaseConstructor | FunctionKind::kSubclassConstructor |
-          FunctionKind::kDefaultConstructor);
+  return kind & FunctionKind::kClassConstructor;
 }
 
 
-inline bool IsInObjectLiteral(FunctionKind kind) {
-  DCHECK(IsValidFunctionKind(kind));
-  return kind & FunctionKind::kInObjectLiteral;
+inline bool IsConstructable(FunctionKind kind, LanguageMode mode) {
+  if (IsAccessorFunction(kind)) return false;
+  if (IsConciseMethod(kind)) return false;
+  if (IsArrowFunction(kind)) return false;
+  if (IsGeneratorFunction(kind)) return false;
+  return true;
 }
 
 
-inline FunctionKind WithObjectLiteralBit(FunctionKind kind) {
-  kind = static_cast<FunctionKind>(kind | FunctionKind::kInObjectLiteral);
-  DCHECK(IsValidFunctionKind(kind));
-  return kind;
+inline uint32_t ObjectHash(Address address) {
+  // All objects are at least pointer aligned, so we can remove the trailing
+  // zeros.
+  return static_cast<uint32_t>(bit_cast<uintptr_t>(address) >>
+                               kPointerSizeLog2);
 }
-} }  // namespace v8::internal
+
+}  // namespace internal
+}  // namespace v8
 
 namespace i = v8::internal;
 

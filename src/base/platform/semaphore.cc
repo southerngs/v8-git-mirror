@@ -74,7 +74,18 @@ bool Semaphore::WaitFor(const TimeDelta& rel_time) {
 #elif V8_OS_POSIX
 
 Semaphore::Semaphore(int count) {
+  // The sem_init() does not check for alignment of the native handle.
+  // Unaligned native handle can later cause a failure in semaphore signal.
+  // Check the alignment here to catch the failure earlier.
+  // Context: crbug.com/605349.
+  const uintptr_t kPointerAlignmentMask = sizeof(void*) - 1;
+  CHECK_EQ(
+      0, reinterpret_cast<uintptr_t>(&native_handle_) & kPointerAlignmentMask);
   DCHECK(count >= 0);
+#if V8_LIBC_GLIBC
+  // sem_init in glibc prior to 2.1 does not zero out semaphores.
+  memset(&native_handle_, 0, sizeof(native_handle_));
+#endif
   int result = sem_init(&native_handle_, 0, count);
   DCHECK_EQ(0, result);
   USE(result);
@@ -90,8 +101,9 @@ Semaphore::~Semaphore() {
 
 void Semaphore::Signal() {
   int result = sem_post(&native_handle_);
-  DCHECK_EQ(0, result);
-  USE(result);
+  if (result != 0) {
+    V8_Fatal(__FILE__, __LINE__, "Semaphore signal failure: %d\n", errno);
+  }
 }
 
 
@@ -201,4 +213,5 @@ bool Semaphore::WaitFor(const TimeDelta& rel_time) {
 
 #endif  // V8_OS_MACOSX
 
-} }  // namespace v8::base
+}  // namespace base
+}  // namespace v8

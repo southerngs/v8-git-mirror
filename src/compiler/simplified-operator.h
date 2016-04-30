@@ -7,17 +7,15 @@
 
 #include <iosfwd>
 
-#include "src/compiler/machine-type.h"
 #include "src/handles.h"
+#include "src/machine-type.h"
+#include "src/objects.h"
 
 namespace v8 {
 namespace internal {
 
 // Forward declarations.
-template <class>
-class TypeImpl;
-struct ZoneTypeConfig;
-typedef TypeImpl<ZoneTypeConfig> Type;
+class Type;
 class Zone;
 
 
@@ -124,7 +122,7 @@ ElementAccess const& ElementAccessOf(const Operator* op) WARN_UNUSED_RESULT;
 //   - Bool: a tagged pointer to either the canonical JS #false or
 //           the canonical JS #true object
 //   - Bit: an untagged integer 0 or 1, but word-sized
-class SimplifiedOperatorBuilder final {
+class SimplifiedOperatorBuilder final : public ZoneObject {
  public:
   explicit SimplifiedOperatorBuilder(Zone* zone);
 
@@ -139,29 +137,48 @@ class SimplifiedOperatorBuilder final {
   const Operator* NumberMultiply();
   const Operator* NumberDivide();
   const Operator* NumberModulus();
+  const Operator* NumberBitwiseOr();
+  const Operator* NumberBitwiseXor();
+  const Operator* NumberBitwiseAnd();
+  const Operator* NumberShiftLeft();
+  const Operator* NumberShiftRight();
+  const Operator* NumberShiftRightLogical();
+  const Operator* NumberClz32();
+  const Operator* NumberCeil();
+  const Operator* NumberFloor();
+  const Operator* NumberRound();
+  const Operator* NumberTrunc();
   const Operator* NumberToInt32();
   const Operator* NumberToUint32();
-
-  const Operator* PlainPrimitiveToNumber();
+  const Operator* NumberIsHoleNaN();
 
   const Operator* ReferenceEqual(Type* type);
 
   const Operator* StringEqual();
   const Operator* StringLessThan();
   const Operator* StringLessThanOrEqual();
-  const Operator* StringAdd();
+  const Operator* StringToNumber();
 
+  const Operator* ChangeTaggedSignedToInt32();
   const Operator* ChangeTaggedToInt32();
   const Operator* ChangeTaggedToUint32();
   const Operator* ChangeTaggedToFloat64();
+  const Operator* ChangeInt31ToTagged();
   const Operator* ChangeInt32ToTagged();
   const Operator* ChangeUint32ToTagged();
   const Operator* ChangeFloat64ToTagged();
   const Operator* ChangeBoolToBit();
   const Operator* ChangeBitToBool();
+  const Operator* TruncateTaggedToWord32();
 
+  const Operator* ObjectIsCallable();
+  const Operator* ObjectIsNumber();
+  const Operator* ObjectIsReceiver();
   const Operator* ObjectIsSmi();
-  const Operator* ObjectIsNonNegativeSmi();
+  const Operator* ObjectIsString();
+  const Operator* ObjectIsUndetectable();
+
+  const Operator* Allocate(PretenureFlag pretenure = NOT_TENURED);
 
   const Operator* LoadField(FieldAccess const&);
   const Operator* StoreField(FieldAccess const&);

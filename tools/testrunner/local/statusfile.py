@@ -25,6 +25,7 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import os
 
 # These outcomes can occur in a TestCase's outcomes list:
 SKIP = "SKIP"
@@ -34,18 +35,18 @@ OKAY = "OKAY"
 TIMEOUT = "TIMEOUT"
 CRASH = "CRASH"
 SLOW = "SLOW"
-FLAKY = "FLAKY"
 FAST_VARIANTS = "FAST_VARIANTS"
 NO_VARIANTS = "NO_VARIANTS"
 # These are just for the status files and are mapped below in DEFS:
 FAIL_OK = "FAIL_OK"
 PASS_OR_FAIL = "PASS_OR_FAIL"
+FAIL_SLOPPY = "FAIL_SLOPPY"
 
 ALWAYS = "ALWAYS"
 
 KEYWORDS = {}
-for key in [SKIP, FAIL, PASS, OKAY, TIMEOUT, CRASH, SLOW, FLAKY, FAIL_OK,
-            FAST_VARIANTS, NO_VARIANTS, PASS_OR_FAIL, ALWAYS]:
+for key in [SKIP, FAIL, PASS, OKAY, TIMEOUT, CRASH, SLOW, FAIL_OK,
+            FAST_VARIANTS, NO_VARIANTS, PASS_OR_FAIL, FAIL_SLOPPY, ALWAYS]:
   KEYWORDS[key] = key
 
 DEFS = {FAIL_OK: [FAIL, OKAY],
@@ -55,9 +56,9 @@ DEFS = {FAIL_OK: [FAIL, OKAY],
 VARIABLES = {ALWAYS: True}
 for var in ["debug", "release", "big", "little",
             "android_arm", "android_arm64", "android_ia32", "android_x87",
-            "android_x64", "arm", "arm64", "ia32", "mips", "mipsel",
+            "android_x64", "arm", "arm64", "ia32", "mips", "mipsel", "mips64",
             "mips64el", "x64", "x87", "nacl_ia32", "nacl_x64", "ppc", "ppc64",
-            "macos", "windows", "linux", "aix"]:
+            "s390", "s390x", "macos", "windows", "linux", "aix"]:
   VARIABLES[var] = var
 
 
@@ -75,10 +76,6 @@ def OnlyStandardVariant(outcomes):
 
 def OnlyFastVariants(outcomes):
   return FAST_VARIANTS in outcomes
-
-
-def IsFlaky(outcomes):
-  return FLAKY in outcomes
 
 
 def IsPassOrFail(outcomes):
@@ -124,10 +121,14 @@ def _ParseOutcomeList(rule, outcomes, target_dict, variables):
     target_dict[rule] = result
 
 
-def ReadStatusFile(path, variables):
+def ReadContent(path):
   with open(path) as f:
     global KEYWORDS
-    contents = eval(f.read(), KEYWORDS)
+    return eval(f.read(), KEYWORDS)
+
+
+def ReadStatusFile(path, variables):
+  contents = ReadContent(path)
 
   rules = {}
   wildcards = {}
@@ -145,3 +146,30 @@ def ReadStatusFile(path, variables):
       else:
         _ParseOutcomeList(rule, section[rule], rules, variables)
   return rules, wildcards
+
+
+def PresubmitCheck(path):
+  contents = ReadContent(path)
+  root_prefix = os.path.basename(os.path.dirname(path)) + "/"
+  status = {"success": True}
+  def _assert(check, message):  # Like "assert", but doesn't throw.
+    if not check:
+      print("%s: Error: %s" % (path, message))
+      status["success"] = False
+  try:
+    for section in contents:
+      _assert(type(section) == list, "Section must be a list")
+      _assert(len(section) == 2, "Section list must have exactly 2 entries")
+      section = section[1]
+      _assert(type(section) == dict,
+              "Second entry of section must be a dictionary")
+      for rule in section:
+        _assert(type(rule) == str, "Rule key must be a string")
+        _assert(not rule.startswith(root_prefix),
+                "Suite name prefix must not be used in rule keys")
+        _assert(not rule.endswith('.js'),
+                ".js extension must not be used in rule keys.")
+    return status["success"]
+  except Exception as e:
+    print e
+    return False

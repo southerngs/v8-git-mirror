@@ -70,92 +70,18 @@ function parseState(s) {
 }
 
 
-function SnapshotLogProcessor() {
-  LogReader.call(this, {
-      'code-creation': {
-          parsers: [null, parseInt, parseInt, parseInt, null, 'var-args'],
-          processor: this.processCodeCreation },
-      'code-move': { parsers: [parseInt, parseInt],
-          processor: this.processCodeMove },
-      'code-delete': { parsers: [parseInt],
-          processor: this.processCodeDelete },
-      'function-creation': null,
-      'function-move': null,
-      'function-delete': null,
-      'sfi-move': null,
-      'snapshot-pos': { parsers: [parseInt, parseInt],
-          processor: this.processSnapshotPosition }});
-
-  V8Profile.prototype.handleUnknownCode = function(operation, addr) {
-    var op = Profile.Operation;
-    switch (operation) {
-      case op.MOVE:
-        print('Snapshot: Code move event for unknown code: 0x' +
-              addr.toString(16));
-        break;
-      case op.DELETE:
-        print('Snapshot: Code delete event for unknown code: 0x' +
-              addr.toString(16));
-        break;
-    }
-  };
-
-  this.profile_ = new V8Profile();
-  this.serializedEntries_ = [];
-}
-inherits(SnapshotLogProcessor, LogReader);
-
-
-SnapshotLogProcessor.prototype.processCodeCreation = function(
-    type, kind, start, size, name, maybe_func) {
-  if (maybe_func.length) {
-    var funcAddr = parseInt(maybe_func[0]);
-    var state = parseState(maybe_func[1]);
-    this.profile_.addFuncCode(type, name, start, size, funcAddr, state);
-  } else {
-    this.profile_.addCode(type, name, start, size);
-  }
-};
-
-
-SnapshotLogProcessor.prototype.processCodeMove = function(from, to) {
-  this.profile_.moveCode(from, to);
-};
-
-
-SnapshotLogProcessor.prototype.processCodeDelete = function(start) {
-  this.profile_.deleteCode(start);
-};
-
-
-SnapshotLogProcessor.prototype.processSnapshotPosition = function(addr, pos) {
-  this.serializedEntries_[pos] = this.profile_.findEntry(addr);
-};
-
-
-SnapshotLogProcessor.prototype.processLogFile = function(fileName) {
-  var contents = readFile(fileName);
-  this.processLogChunk(contents);
-};
-
-
-SnapshotLogProcessor.prototype.getSerializedEntryName = function(pos) {
-  var entry = this.serializedEntries_[pos];
-  return entry ? entry.getRawName() : null;
-};
-
-
 function TickProcessor(
     cppEntriesProvider,
     separateIc,
     callGraphSize,
     ignoreUnknown,
     stateFilter,
-    snapshotLogProcessor,
     distortion,
     range,
     sourceMap,
-    timedRange) {
+    timedRange,
+    pairwiseTimedRange,
+    onlySummary) {
   LogReader.call(this, {
       'shared-library': { parsers: [null, parseInt, parseInt],
           processor: this.processSharedLibrary },
@@ -168,8 +94,6 @@ function TickProcessor(
           processor: this.processCodeDelete },
       'sfi-move': { parsers: [parseInt, parseInt],
           processor: this.processFunctionMove },
-      'snapshot-pos': { parsers: [parseInt, parseInt],
-          processor: this.processSnapshotPosition },
       'tick': {
           parsers: [parseInt, parseInt, parseInt,
                     parseInt, parseInt, 'var-args'],
@@ -193,13 +117,13 @@ function TickProcessor(
       'code-allocate': null,
       'begin-code-region': null,
       'end-code-region': null },
-      timedRange);
+      timedRange,
+      pairwiseTimedRange);
 
   this.cppEntriesProvider_ = cppEntriesProvider;
   this.callGraphSize_ = callGraphSize;
   this.ignoreUnknown_ = ignoreUnknown;
   this.stateFilter_ = stateFilter;
-  this.snapshotLogProcessor_ = snapshotLogProcessor;
   this.sourceMap = sourceMap;
   this.deserializedEntriesNames_ = [];
   var ticks = this.ticks_ =
@@ -245,6 +169,7 @@ function TickProcessor(
 
   this.generation_ = 1;
   this.currentProducerProfile_ = null;
+  this.onlySummary_ = onlySummary;
 };
 inherits(TickProcessor, LogReader);
 
@@ -358,14 +283,6 @@ TickProcessor.prototype.processFunctionMove = function(from, to) {
 };
 
 
-TickProcessor.prototype.processSnapshotPosition = function(addr, pos) {
-  if (this.snapshotLogProcessor_) {
-    this.deserializedEntriesNames_[addr] =
-      this.snapshotLogProcessor_.getSerializedEntryName(pos);
-  }
-};
-
-
 TickProcessor.prototype.includeTick = function(vmState) {
   return this.stateFilter_ == null || this.stateFilter_ == vmState;
 };
@@ -454,29 +371,30 @@ TickProcessor.prototype.printStatistics = function() {
   if (this.ignoreUnknown_) {
     totalTicks -= this.ticks_.unaccounted;
   }
+  var printAllTicks = !this.onlySummary_;
 
   // Count library ticks
   var flatViewNodes = flatView.head.children;
   var self = this;
 
   var libraryTicks = 0;
-  this.printHeader('Shared libraries');
+  if(printAllTicks) this.printHeader('Shared libraries');
   this.printEntries(flatViewNodes, totalTicks, null,
       function(name) { return self.isSharedLibrary(name); },
-      function(rec) { libraryTicks += rec.selfTime; });
+      function(rec) { libraryTicks += rec.selfTime; }, printAllTicks);
   var nonLibraryTicks = totalTicks - libraryTicks;
 
   var jsTicks = 0;
-  this.printHeader('JavaScript');
+  if(printAllTicks) this.printHeader('JavaScript');
   this.printEntries(flatViewNodes, totalTicks, nonLibraryTicks,
       function(name) { return self.isJsCode(name); },
-      function(rec) { jsTicks += rec.selfTime; });
+      function(rec) { jsTicks += rec.selfTime; }, printAllTicks);
 
   var cppTicks = 0;
-  this.printHeader('C++');
+  if(printAllTicks) this.printHeader('C++');
   this.printEntries(flatViewNodes, totalTicks, nonLibraryTicks,
       function(name) { return self.isCppCode(name); },
-      function(rec) { cppTicks += rec.selfTime; });
+      function(rec) { cppTicks += rec.selfTime; }, printAllTicks);
 
   this.printHeader('Summary');
   this.printLine('JavaScript', jsTicks, totalTicks, nonLibraryTicks);
@@ -488,25 +406,27 @@ TickProcessor.prototype.printStatistics = function() {
                    this.ticks_.total, null);
   }
 
-  print('\n [C++ entry points]:');
-  print('   ticks    cpp   total   name');
-  var c_entry_functions = this.profile_.getCEntryProfile();
-  var total_c_entry = c_entry_functions[0].ticks;
-  for (var i = 1; i < c_entry_functions.length; i++) {
-    c = c_entry_functions[i];
-    this.printLine(c.name, c.ticks, total_c_entry, totalTicks);
-  }
+  if(printAllTicks) {
+    print('\n [C++ entry points]:');
+    print('   ticks    cpp   total   name');
+    var c_entry_functions = this.profile_.getCEntryProfile();
+    var total_c_entry = c_entry_functions[0].ticks;
+    for (var i = 1; i < c_entry_functions.length; i++) {
+      c = c_entry_functions[i];
+      this.printLine(c.name, c.ticks, total_c_entry, totalTicks);
+    }
 
-  this.printHeavyProfHeader();
-  var heavyProfile = this.profile_.getBottomUpProfile();
-  var heavyView = this.viewBuilder_.buildView(heavyProfile);
-  // To show the same percentages as in the flat profile.
-  heavyView.head.totalTime = totalTicks;
-  // Sort by total time, desc, then by name, desc.
-  heavyView.sort(function(rec1, rec2) {
-      return rec2.totalTime - rec1.totalTime ||
-          (rec2.internalFuncName < rec1.internalFuncName ? -1 : 1); });
-  this.printHeavyProfile(heavyView.head.children);
+    this.printHeavyProfHeader();
+    var heavyProfile = this.profile_.getBottomUpProfile();
+    var heavyView = this.viewBuilder_.buildView(heavyProfile);
+    // To show the same percentages as in the flat profile.
+    heavyView.head.totalTime = totalTicks;
+    // Sort by total time, desc, then by name, desc.
+    heavyView.sort(function(rec1, rec2) {
+        return rec2.totalTime - rec1.totalTime ||
+            (rec2.internalFuncName < rec1.internalFuncName ? -1 : 1); });
+    this.printHeavyProfile(heavyView.head.children);
+  }
 };
 
 
@@ -598,13 +518,15 @@ TickProcessor.prototype.formatFunctionName = function(funcName) {
 };
 
 TickProcessor.prototype.printEntries = function(
-    profile, totalTicks, nonLibTicks, filterP, callback) {
+    profile, totalTicks, nonLibTicks, filterP, callback, printAllTicks) {
   var that = this;
   this.processProfile(profile, filterP, function (rec) {
     if (rec.selfTime == 0) return;
     callback(rec);
     var funcName = that.formatFunctionName(rec.internalFuncName);
-    that.printLine(funcName, rec.selfTime, totalTicks, nonLibTicks);
+    if(printAllTicks) {
+      that.printLine(funcName, rec.selfTime, totalTicks, nonLibTicks);
+    }
   });
 };
 
@@ -748,8 +670,11 @@ inherits(MacCppEntriesProvider, UnixCppEntriesProvider);
 MacCppEntriesProvider.prototype.loadSymbols = function(libName) {
   this.parsePos = 0;
   libName = this.targetRootFS + libName;
+
+  // It seems that in OS X `nm` thinks that `-f` is a format option, not a
+  // "flat" display option flag.
   try {
-    this.symbols = [os.system(this.nmExec, ['-n', '-f', libName], -1, -1), ''];
+    this.symbols = [os.system(this.nmExec, ['-n', libName], -1, -1), ''];
   } catch (e) {
     // If the library cannot be found on this system let's not panic.
     this.symbols = '';
@@ -871,8 +796,6 @@ function ArgumentsProcessor(args) {
         'Specify the \'nm\' executable to use (e.g. --nm=/my_dir/nm)'],
     '--target': ['targetRootFS', '',
         'Specify the target root directory for cross environment'],
-    '--snapshot-log': ['snapshotLogFileName', 'snapshot.log',
-        'Specify snapshot log file to use (e.g. --snapshot-log=snapshot.log)'],
     '--range': ['range', 'auto,auto',
         'Specify the range limit as [start],[end]'],
     '--distortion': ['distortion', 0,
@@ -880,19 +803,23 @@ function ArgumentsProcessor(args) {
     '--source-map': ['sourceMap', null,
         'Specify the source map that should be used for output'],
     '--timed-range': ['timedRange', true,
-        'Ignore ticks before first and after last Date.now() call']
+        'Ignore ticks before first and after last Date.now() call'],
+    '--pairwise-timed-range': ['pairwiseTimedRange', true,
+        'Ignore ticks outside pairs of Date.now() calls'],
+    '--only-summary': ['onlySummary', true,
+        'Print only tick summary, exclude other information']
   };
   this.argsDispatch_['--js'] = this.argsDispatch_['-j'];
   this.argsDispatch_['--gc'] = this.argsDispatch_['-g'];
   this.argsDispatch_['--compiler'] = this.argsDispatch_['-c'];
   this.argsDispatch_['--other'] = this.argsDispatch_['-o'];
   this.argsDispatch_['--external'] = this.argsDispatch_['-e'];
+  this.argsDispatch_['--ptr'] = this.argsDispatch_['--pairwise-timed-range'];
 };
 
 
 ArgumentsProcessor.DEFAULTS = {
   logFileName: 'v8.log',
-  snapshotLogFileName: null,
   platform: 'unix',
   stateFilter: null,
   callGraphSize: 5,
@@ -902,17 +829,19 @@ ArgumentsProcessor.DEFAULTS = {
   nm: 'nm',
   range: 'auto,auto',
   distortion: 0,
-  timedRange: false
+  timedRange: false,
+  pairwiseTimedRange: false,
+  onlySummary: false
 };
 
 
 ArgumentsProcessor.prototype.parse = function() {
   while (this.args_.length) {
-    var arg = this.args_[0];
+    var arg = this.args_.shift();
     if (arg.charAt(0) != '-') {
-      break;
+      this.result_.logFileName = arg;
+      continue;
     }
-    this.args_.shift();
     var userValue = null;
     var eqPos = arg.indexOf('=');
     if (eqPos != -1) {
@@ -925,10 +854,6 @@ ArgumentsProcessor.prototype.parse = function() {
     } else {
       return false;
     }
-  }
-
-  if (this.args_.length >= 1) {
-      this.result_.logFileName = this.args_.shift();
   }
   return true;
 };
@@ -954,15 +879,15 @@ ArgumentsProcessor.prototype.printUsageAndExit = function() {
         ArgumentsProcessor.DEFAULTS.logFileName + '".\n');
   print('Options:');
   for (var arg in this.argsDispatch_) {
-    var synonims = [arg];
+    var synonyms = [arg];
     var dispatch = this.argsDispatch_[arg];
     for (var synArg in this.argsDispatch_) {
       if (arg !== synArg && dispatch === this.argsDispatch_[synArg]) {
-        synonims.push(synArg);
+        synonyms.push(synArg);
         delete this.argsDispatch_[synArg];
       }
     }
-    print('  ' + padRight(synonims.join(', '), 20) + dispatch[2]);
+    print('  ' + padRight(synonyms.join(', '), 20) + " " + dispatch[2]);
   }
   quit(2);
 };

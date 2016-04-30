@@ -111,6 +111,7 @@ local function MakeClangCommandLine(
       .. " -DENABLE_DEBUGGER_SUPPORT"
       .. " -DV8_I18N_SUPPORT"
       .. " -I./"
+      .. " -Iinclude/"
       .. " -Ithird_party/icu/source/common"
       .. " -Ithird_party/icu/source/i18n"
       .. " " .. arch_options
@@ -184,7 +185,7 @@ end
 
 local function ParseGYPFile()
    local gyp = ""
-   local gyp_files = { "tools/gyp/v8.gyp", "test/cctest/cctest.gyp" }
+   local gyp_files = { "src/v8.gyp", "test/cctest/cctest.gyp" }
    for i = 1, #gyp_files do
       local f = assert(io.open(gyp_files[i]), "failed to open GYP file")
       local t = f:read('*a')

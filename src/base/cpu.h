@@ -59,6 +59,9 @@ class CPU final {
   static const int ARM_CORTEX_A12 = 0xc0c;
   static const int ARM_CORTEX_A15 = 0xc0f;
 
+  // Denver-specific part code
+  static const int NVIDIA_DENVER_V10 = 0x002;
+
   // PPC-specific part codes
   enum {
     PPC_POWER5,
@@ -72,6 +75,9 @@ class CPU final {
 
   // General features
   bool has_fpu() const { return has_fpu_; }
+  int icache_line_size() const { return icache_line_size_; }
+  int dcache_line_size() const { return dcache_line_size_; }
+  static const int UNKNOWN_CACHE_LINE_SIZE = 0;
 
   // x86 features
   bool has_cmov() const { return has_cmov_; }
@@ -115,6 +121,8 @@ class CPU final {
   int architecture_;
   int variant_;
   int part_;
+  int icache_line_size_;
+  int dcache_line_size_;
   bool has_fpu_;
   bool has_cmov_;
   bool has_sahf_;
@@ -142,6 +150,7 @@ class CPU final {
   bool is_fp64_mode_;
 };
 
-} }  // namespace v8::base
+}  // namespace base
+}  // namespace v8
 
 #endif  // V8_BASE_CPU_H_

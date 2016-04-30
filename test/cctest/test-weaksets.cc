@@ -31,9 +31,9 @@
 
 #include "src/global-handles.h"
 #include "test/cctest/cctest.h"
+#include "test/cctest/heap/utils-inl.h"
 
 using namespace v8::internal;
-
 
 static Isolate* GetIsolateFrom(LocalContext* context) {
   return reinterpret_cast<Isolate*>((*context)->GetIsolate());
@@ -60,7 +60,7 @@ static void WeakPointerCallback(
   std::pair<v8::Persistent<v8::Value>*, int>* p =
       reinterpret_cast<std::pair<v8::Persistent<v8::Value>*, int>*>(
           data.GetParameter());
-  DCHECK_EQ(1234, p->second);
+  CHECK_EQ(1234, p->second);
   NumberOfWeakCalls++;
   p->first->Reset();
 }
@@ -90,7 +90,8 @@ TEST(WeakSet_Weakness) {
   {
     HandleScope scope(isolate);
     Handle<Smi> smi(Smi::FromInt(23), isolate);
-    Runtime::WeakCollectionSet(weakset, key, smi);
+    int32_t hash = Object::GetOrCreateHash(isolate, key)->value();
+    JSWeakCollection::Set(weakset, key, smi, hash);
   }
   CHECK_EQ(1, ObjectHashTable::cast(weakset->table())->NumberOfElements());
 
@@ -145,7 +146,8 @@ TEST(WeakSet_Shrinking) {
     for (int i = 0; i < 32; i++) {
       Handle<JSObject> object = factory->NewJSObjectFromMap(map);
       Handle<Smi> smi(Smi::FromInt(i), isolate);
-      Runtime::WeakCollectionSet(weakset, object, smi);
+      int32_t hash = Object::GetOrCreateHash(isolate, object)->value();
+      JSWeakCollection::Set(weakset, object, smi, hash);
     }
   }
 
@@ -183,17 +185,17 @@ TEST(WeakSet_Regress2060a) {
 
   // Start second old-space page so that values land on evacuation candidate.
   Page* first_page = heap->old_space()->anchor()->next_page();
-  int dummy_array_size = Page::kMaxRegularHeapObjectSize - 92 * KB;
-  factory->NewFixedArray(dummy_array_size / kPointerSize, TENURED);
+  SimulateFullSpace(heap->old_space());
 
   // Fill up weak set with values on an evacuation candidate.
   {
     HandleScope scope(isolate);
     for (int i = 0; i < 32; i++) {
       Handle<JSObject> object = factory->NewJSObject(function, TENURED);
-      CHECK(!heap->InNewSpace(object->address()));
+      CHECK(!heap->InNewSpace(*object));
       CHECK(!first_page->Contains(object->address()));
-      Runtime::WeakCollectionSet(weakset, key, object);
+      int32_t hash = Object::GetOrCreateHash(isolate, key)->value();
+      JSWeakCollection::Set(weakset, key, object, hash);
     }
   }
 
@@ -222,20 +224,20 @@ TEST(WeakSet_Regress2060b) {
 
   // Start second old-space page so that keys land on evacuation candidate.
   Page* first_page = heap->old_space()->anchor()->next_page();
-  int dummy_array_size = Page::kMaxRegularHeapObjectSize - 92 * KB;
-  factory->NewFixedArray(dummy_array_size / kPointerSize, TENURED);
+  SimulateFullSpace(heap->old_space());
 
   // Fill up weak set with keys on an evacuation candidate.
   Handle<JSObject> keys[32];
   for (int i = 0; i < 32; i++) {
     keys[i] = factory->NewJSObject(function, TENURED);
-    CHECK(!heap->InNewSpace(keys[i]->address()));
+    CHECK(!heap->InNewSpace(*keys[i]));
     CHECK(!first_page->Contains(keys[i]->address()));
   }
   Handle<JSWeakSet> weakset = AllocateJSWeakSet(isolate);
   for (int i = 0; i < 32; i++) {
     Handle<Smi> smi(Smi::FromInt(i), isolate);
-    Runtime::WeakCollectionSet(weakset, keys[i], smi);
+    int32_t hash = Object::GetOrCreateHash(isolate, keys[i])->value();
+    JSWeakCollection::Set(weakset, keys[i], smi, hash);
   }
 
   // Force compacting garbage collection. The subsequent collections are used

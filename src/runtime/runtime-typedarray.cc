@@ -2,95 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
-#include "src/arguments.h"
-#include "src/runtime/runtime.h"
 #include "src/runtime/runtime-utils.h"
 
+#include "src/arguments.h"
+#include "src/factory.h"
+#include "src/messages.h"
+#include "src/objects-inl.h"
+#include "src/runtime/runtime.h"
 
 namespace v8 {
 namespace internal {
-
-void Runtime::SetupArrayBuffer(Isolate* isolate,
-                               Handle<JSArrayBuffer> array_buffer,
-                               bool is_external, void* data,
-                               size_t allocated_length) {
-  DCHECK(array_buffer->GetInternalFieldCount() ==
-         v8::ArrayBuffer::kInternalFieldCount);
-  for (int i = 0; i < v8::ArrayBuffer::kInternalFieldCount; i++) {
-    array_buffer->SetInternalField(i, Smi::FromInt(0));
-  }
-  array_buffer->set_backing_store(data);
-  array_buffer->set_bit_field(0);
-  array_buffer->set_is_external(is_external);
-  array_buffer->set_is_neuterable(true);
-
-  Handle<Object> byte_length =
-      isolate->factory()->NewNumberFromSize(allocated_length);
-  CHECK(byte_length->IsSmi() || byte_length->IsHeapNumber());
-  array_buffer->set_byte_length(*byte_length);
-
-  if (data && !is_external) {
-    isolate->heap()->RegisterNewArrayBuffer(data, allocated_length);
-  }
-}
-
-
-bool Runtime::SetupArrayBufferAllocatingData(Isolate* isolate,
-                                             Handle<JSArrayBuffer> array_buffer,
-                                             size_t allocated_length,
-                                             bool initialize) {
-  void* data;
-  CHECK(isolate->array_buffer_allocator() != NULL);
-  // Prevent creating array buffers when serializing.
-  DCHECK(!isolate->serializer_enabled());
-  if (allocated_length != 0) {
-    if (initialize) {
-      data = isolate->array_buffer_allocator()->Allocate(allocated_length);
-    } else {
-      data = isolate->array_buffer_allocator()->AllocateUninitialized(
-          allocated_length);
-    }
-    if (data == NULL) return false;
-  } else {
-    data = NULL;
-  }
-
-  SetupArrayBuffer(isolate, array_buffer, false, data, allocated_length);
-  return true;
-}
-
-
-void Runtime::NeuterArrayBuffer(Handle<JSArrayBuffer> array_buffer) {
-  array_buffer->Neuter();
-}
-
-
-RUNTIME_FUNCTION(Runtime_ArrayBufferInitialize) {
-  HandleScope scope(isolate);
-  DCHECK(args.length() == 2);
-  CONVERT_ARG_HANDLE_CHECKED(JSArrayBuffer, holder, 0);
-  CONVERT_NUMBER_ARG_HANDLE_CHECKED(byteLength, 1);
-  if (!holder->byte_length()->IsUndefined()) {
-    // ArrayBuffer is already initialized; probably a fuzz test.
-    return *holder;
-  }
-  size_t allocated_length = 0;
-  if (!TryNumberToSize(isolate, *byteLength, &allocated_length)) {
-    THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewRangeError("invalid_array_buffer_length",
-                               HandleVector<Object>(NULL, 0)));
-  }
-  if (!Runtime::SetupArrayBufferAllocatingData(isolate, holder,
-                                               allocated_length)) {
-    THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewRangeError("invalid_array_buffer_length",
-                               HandleVector<Object>(NULL, 0)));
-  }
-  return *holder;
-}
-
 
 RUNTIME_FUNCTION(Runtime_ArrayBufferGetByteLength) {
   SealHandleScope shs(isolate);
@@ -102,14 +23,24 @@ RUNTIME_FUNCTION(Runtime_ArrayBufferGetByteLength) {
 
 RUNTIME_FUNCTION(Runtime_ArrayBufferSliceImpl) {
   HandleScope scope(isolate);
-  DCHECK(args.length() == 3);
+  DCHECK(args.length() == 4);
   CONVERT_ARG_HANDLE_CHECKED(JSArrayBuffer, source, 0);
   CONVERT_ARG_HANDLE_CHECKED(JSArrayBuffer, target, 1);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(first, 2);
+  CONVERT_NUMBER_ARG_HANDLE_CHECKED(new_length, 3);
+
+  if (source->was_neutered() || target->was_neutered()) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewTypeError(MessageTemplate::kDetachedOperation,
+                              isolate->factory()->NewStringFromAsciiChecked(
+                                  "ArrayBuffer.prototype.slice")));
+  }
+
   RUNTIME_ASSERT(!source.is_identical_to(target));
-  size_t start = 0;
+  size_t start = 0, target_length = 0;
   RUNTIME_ASSERT(TryNumberToSize(isolate, *first, &start));
-  size_t target_length = NumberToSize(isolate, target->byte_length());
+  RUNTIME_ASSERT(TryNumberToSize(isolate, *new_length, &target_length));
+  RUNTIME_ASSERT(NumberToSize(isolate, target->byte_length()) >= target_length);
 
   if (target_length == 0) return isolate->heap()->undefined_value();
 
@@ -123,14 +54,6 @@ RUNTIME_FUNCTION(Runtime_ArrayBufferSliceImpl) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_ArrayBufferIsView) {
-  HandleScope scope(isolate);
-  DCHECK(args.length() == 1);
-  CONVERT_ARG_CHECKED(Object, object, 0);
-  return isolate->heap()->ToBoolean(object->IsJSArrayBufferView());
-}
-
-
 RUNTIME_FUNCTION(Runtime_ArrayBufferNeuter) {
   HandleScope scope(isolate);
   DCHECK(args.length() == 1);
@@ -139,26 +62,26 @@ RUNTIME_FUNCTION(Runtime_ArrayBufferNeuter) {
     CHECK(Smi::FromInt(0) == array_buffer->byte_length());
     return isolate->heap()->undefined_value();
   }
+  // Shared array buffers should never be neutered.
+  RUNTIME_ASSERT(!array_buffer->is_shared());
   DCHECK(!array_buffer->is_external());
   void* backing_store = array_buffer->backing_store();
   size_t byte_length = NumberToSize(isolate, array_buffer->byte_length());
   array_buffer->set_is_external(true);
-  Runtime::NeuterArrayBuffer(array_buffer);
-  isolate->heap()->UnregisterArrayBuffer(backing_store);
+  isolate->heap()->UnregisterArrayBuffer(*array_buffer);
+  array_buffer->Neuter();
   isolate->array_buffer_allocator()->Free(backing_store, byte_length);
   return isolate->heap()->undefined_value();
 }
 
 
 void Runtime::ArrayIdToTypeAndSize(int arrayId, ExternalArrayType* array_type,
-                                   ElementsKind* external_elements_kind,
                                    ElementsKind* fixed_elements_kind,
                                    size_t* element_size) {
   switch (arrayId) {
 #define ARRAY_ID_CASE(Type, type, TYPE, ctype, size)      \
   case ARRAY_ID_##TYPE:                                   \
     *array_type = kExternal##Type##Array;                 \
-    *external_elements_kind = EXTERNAL_##TYPE##_ELEMENTS; \
     *fixed_elements_kind = TYPE##_ELEMENTS;               \
     *element_size = size;                                 \
     break;
@@ -174,23 +97,22 @@ void Runtime::ArrayIdToTypeAndSize(int arrayId, ExternalArrayType* array_type,
 
 RUNTIME_FUNCTION(Runtime_TypedArrayInitialize) {
   HandleScope scope(isolate);
-  DCHECK(args.length() == 5);
+  DCHECK(args.length() == 6);
   CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, holder, 0);
   CONVERT_SMI_ARG_CHECKED(arrayId, 1);
   CONVERT_ARG_HANDLE_CHECKED(Object, maybe_buffer, 2);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(byte_offset_object, 3);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(byte_length_object, 4);
+  CONVERT_BOOLEAN_ARG_CHECKED(initialize, 5);
 
   RUNTIME_ASSERT(arrayId >= Runtime::ARRAY_ID_FIRST &&
                  arrayId <= Runtime::ARRAY_ID_LAST);
 
   ExternalArrayType array_type = kExternalInt8Array;  // Bogus initialization.
   size_t element_size = 1;                            // Bogus initialization.
-  ElementsKind external_elements_kind =
-      EXTERNAL_INT8_ELEMENTS;                        // Bogus initialization.
   ElementsKind fixed_elements_kind = INT8_ELEMENTS;  // Bogus initialization.
-  Runtime::ArrayIdToTypeAndSize(arrayId, &array_type, &external_elements_kind,
-                                &fixed_elements_kind, &element_size);
+  Runtime::ArrayIdToTypeAndSize(arrayId, &array_type, &fixed_elements_kind,
+                                &element_size);
   RUNTIME_ASSERT(holder->map()->elements_kind() == fixed_elements_kind);
 
   size_t byte_offset = 0;
@@ -213,14 +135,13 @@ RUNTIME_FUNCTION(Runtime_TypedArrayInitialize) {
 
   if (length > static_cast<unsigned>(Smi::kMaxValue)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewRangeError("invalid_typed_array_length",
-                               HandleVector<Object>(NULL, 0)));
+        isolate, NewRangeError(MessageTemplate::kInvalidTypedArrayLength));
   }
 
   // All checks are done, now we can modify objects.
 
-  DCHECK(holder->GetInternalFieldCount() ==
-         v8::ArrayBufferView::kInternalFieldCount);
+  DCHECK_EQ(v8::ArrayBufferView::kInternalFieldCount,
+            holder->GetInternalFieldCount());
   for (int i = 0; i < v8::ArrayBufferView::kInternalFieldCount; i++) {
     holder->SetInternalField(i, Smi::FromInt(0));
   }
@@ -233,18 +154,19 @@ RUNTIME_FUNCTION(Runtime_TypedArrayInitialize) {
     Handle<JSArrayBuffer> buffer = Handle<JSArrayBuffer>::cast(maybe_buffer);
     holder->set_buffer(*buffer);
 
-    Handle<ExternalArray> elements = isolate->factory()->NewExternalArray(
-        static_cast<int>(length), array_type,
-        static_cast<uint8_t*>(buffer->backing_store()) + byte_offset);
-    Handle<Map> map =
-        JSObject::GetElementsTransitionMap(holder, external_elements_kind);
-    JSObject::SetMapAndElements(holder, map, elements);
-    DCHECK(IsExternalArrayElementsKind(holder->map()->elements_kind()));
+    Handle<FixedTypedArrayBase> elements =
+        isolate->factory()->NewFixedTypedArrayWithExternalPointer(
+            static_cast<int>(length), array_type,
+            static_cast<uint8_t*>(buffer->backing_store()) + byte_offset);
+    holder->set_elements(*elements);
   } else {
-    holder->set_buffer(Smi::FromInt(0));
+    Handle<JSArrayBuffer> buffer = isolate->factory()->NewJSArrayBuffer();
+    JSArrayBuffer::Setup(buffer, isolate, true, NULL, byte_length,
+                         SharedFlag::kNotShared);
+    holder->set_buffer(*buffer);
     Handle<FixedTypedArrayBase> elements =
         isolate->factory()->NewFixedTypedArray(static_cast<int>(length),
-                                               array_type);
+                                               array_type, initialize);
     holder->set_elements(*elements);
   }
   return isolate->heap()->undefined_value();
@@ -269,32 +191,31 @@ RUNTIME_FUNCTION(Runtime_TypedArrayInitializeFromArrayLike) {
 
   ExternalArrayType array_type = kExternalInt8Array;  // Bogus initialization.
   size_t element_size = 1;                            // Bogus initialization.
-  ElementsKind external_elements_kind =
-      EXTERNAL_INT8_ELEMENTS;                        // Bogus intialization.
   ElementsKind fixed_elements_kind = INT8_ELEMENTS;  // Bogus initialization.
-  Runtime::ArrayIdToTypeAndSize(arrayId, &array_type, &external_elements_kind,
-                                &fixed_elements_kind, &element_size);
+  Runtime::ArrayIdToTypeAndSize(arrayId, &array_type, &fixed_elements_kind,
+                                &element_size);
 
   RUNTIME_ASSERT(holder->map()->elements_kind() == fixed_elements_kind);
 
   Handle<JSArrayBuffer> buffer = isolate->factory()->NewJSArrayBuffer();
+  size_t length = 0;
   if (source->IsJSTypedArray() &&
       JSTypedArray::cast(*source)->type() == array_type) {
-    length_obj = Handle<Object>(JSTypedArray::cast(*source)->length(), isolate);
+    length_obj = handle(JSTypedArray::cast(*source)->length(), isolate);
+    length = JSTypedArray::cast(*source)->length_value();
+  } else {
+    RUNTIME_ASSERT(TryNumberToSize(isolate, *length_obj, &length));
   }
-  size_t length = 0;
-  RUNTIME_ASSERT(TryNumberToSize(isolate, *length_obj, &length));
 
   if ((length > static_cast<unsigned>(Smi::kMaxValue)) ||
       (length > (kMaxInt / element_size))) {
     THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewRangeError("invalid_typed_array_length",
-                               HandleVector<Object>(NULL, 0)));
+        isolate, NewRangeError(MessageTemplate::kInvalidTypedArrayLength));
   }
   size_t byte_length = length * element_size;
 
-  DCHECK(holder->GetInternalFieldCount() ==
-         v8::ArrayBufferView::kInternalFieldCount);
+  DCHECK_EQ(v8::ArrayBufferView::kInternalFieldCount,
+            holder->GetInternalFieldCount());
   for (int i = 0; i < v8::ArrayBufferView::kInternalFieldCount; i++) {
     holder->SetInternalField(i, Smi::FromInt(0));
   }
@@ -315,11 +236,10 @@ RUNTIME_FUNCTION(Runtime_TypedArrayInitializeFromArrayLike) {
   //
   // TODO(dslomov): revise this once we support subclassing.
 
-  if (!Runtime::SetupArrayBufferAllocatingData(isolate, buffer, byte_length,
-                                               false)) {
+  if (!JSArrayBuffer::SetupAllocatingData(buffer, isolate, byte_length,
+                                          false)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewRangeError("invalid_array_buffer_length",
-                               HandleVector<Object>(NULL, 0)));
+        isolate, NewRangeError(MessageTemplate::kInvalidArrayBufferLength));
   }
 
   holder->set_buffer(*buffer);
@@ -329,12 +249,11 @@ RUNTIME_FUNCTION(Runtime_TypedArrayInitializeFromArrayLike) {
   holder->set_byte_length(*byte_length_obj);
   holder->set_length(*length_obj);
 
-  Handle<ExternalArray> elements = isolate->factory()->NewExternalArray(
-      static_cast<int>(length), array_type,
-      static_cast<uint8_t*>(buffer->backing_store()));
-  Handle<Map> map =
-      JSObject::GetElementsTransitionMap(holder, external_elements_kind);
-  JSObject::SetMapAndElements(holder, map, elements);
+  Handle<FixedTypedArrayBase> elements =
+      isolate->factory()->NewFixedTypedArrayWithExternalPointer(
+          static_cast<int>(length), array_type,
+          static_cast<uint8_t*>(buffer->backing_store()));
+  holder->set_elements(*elements);
 
   if (source->IsJSTypedArray()) {
     Handle<JSTypedArray> typed_array(JSTypedArray::cast(*source));
@@ -357,7 +276,7 @@ RUNTIME_FUNCTION(Runtime_TypedArrayInitializeFromArrayLike) {
 #define BUFFER_VIEW_GETTER(Type, getter, accessor)   \
   RUNTIME_FUNCTION(Runtime_##Type##Get##getter) {    \
     HandleScope scope(isolate);                      \
-    DCHECK(args.length() == 1);                      \
+    DCHECK_EQ(1, args.length());                     \
     CONVERT_ARG_HANDLE_CHECKED(JS##Type, holder, 0); \
     return holder->accessor();                       \
   }
@@ -371,7 +290,7 @@ BUFFER_VIEW_GETTER(DataView, Buffer, buffer)
 
 RUNTIME_FUNCTION(Runtime_TypedArrayGetBuffer) {
   HandleScope scope(isolate);
-  DCHECK(args.length() == 1);
+  DCHECK_EQ(1, args.length());
   CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, holder, 0);
   return *holder->GetBuffer();
 }
@@ -397,8 +316,7 @@ RUNTIME_FUNCTION(Runtime_TypedArraySetFastCases) {
   DCHECK(args.length() == 3);
   if (!args[0]->IsJSTypedArray()) {
     THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate,
-        NewTypeError("not_typed_array", HandleVector<Object>(NULL, 0)));
+        isolate, NewTypeError(MessageTemplate::kNotTypedArray));
   }
 
   if (!args[1]->IsJSTypedArray())
@@ -412,15 +330,14 @@ RUNTIME_FUNCTION(Runtime_TypedArraySetFastCases) {
   Handle<JSTypedArray> source(JSTypedArray::cast(*source_obj));
   size_t offset = 0;
   RUNTIME_ASSERT(TryNumberToSize(isolate, *offset_obj, &offset));
-  size_t target_length = NumberToSize(isolate, target->length());
-  size_t source_length = NumberToSize(isolate, source->length());
+  size_t target_length = target->length_value();
+  size_t source_length = source->length_value();
   size_t target_byte_length = NumberToSize(isolate, target->byte_length());
   size_t source_byte_length = NumberToSize(isolate, source->byte_length());
   if (offset > target_length || offset + source_length > target_length ||
       offset + source_length < offset) {  // overflow
     THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewRangeError("typed_array_set_source_too_large",
-                               HandleVector<Object>(NULL, 0)));
+        isolate, NewRangeError(MessageTemplate::kTypedArraySetSourceTooLarge));
   }
 
   size_t target_offset = NumberToSize(isolate, target->byte_offset());
@@ -469,39 +386,40 @@ RUNTIME_FUNCTION(Runtime_IsTypedArray) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_DataViewInitialize) {
+RUNTIME_FUNCTION(Runtime_IsSharedTypedArray) {
   HandleScope scope(isolate);
-  DCHECK(args.length() == 4);
-  CONVERT_ARG_HANDLE_CHECKED(JSDataView, holder, 0);
-  CONVERT_ARG_HANDLE_CHECKED(JSArrayBuffer, buffer, 1);
-  CONVERT_NUMBER_ARG_HANDLE_CHECKED(byte_offset, 2);
-  CONVERT_NUMBER_ARG_HANDLE_CHECKED(byte_length, 3);
+  DCHECK(args.length() == 1);
+  return isolate->heap()->ToBoolean(
+      args[0]->IsJSTypedArray() &&
+      JSTypedArray::cast(args[0])->GetBuffer()->is_shared());
+}
 
-  DCHECK(holder->GetInternalFieldCount() ==
-         v8::ArrayBufferView::kInternalFieldCount);
-  for (int i = 0; i < v8::ArrayBufferView::kInternalFieldCount; i++) {
-    holder->SetInternalField(i, Smi::FromInt(0));
+
+RUNTIME_FUNCTION(Runtime_IsSharedIntegerTypedArray) {
+  HandleScope scope(isolate);
+  DCHECK(args.length() == 1);
+  if (!args[0]->IsJSTypedArray()) {
+    return isolate->heap()->false_value();
   }
-  size_t buffer_length = 0;
-  size_t offset = 0;
-  size_t length = 0;
-  RUNTIME_ASSERT(
-      TryNumberToSize(isolate, buffer->byte_length(), &buffer_length));
-  RUNTIME_ASSERT(TryNumberToSize(isolate, *byte_offset, &offset));
-  RUNTIME_ASSERT(TryNumberToSize(isolate, *byte_length, &length));
 
-  // TODO(jkummerow): When we have a "safe numerics" helper class, use it here.
-  // Entire range [offset, offset + length] must be in bounds.
-  RUNTIME_ASSERT(offset <= buffer_length);
-  RUNTIME_ASSERT(offset + length <= buffer_length);
-  // No overflow.
-  RUNTIME_ASSERT(offset + length >= offset);
+  Handle<JSTypedArray> obj(JSTypedArray::cast(args[0]));
+  return isolate->heap()->ToBoolean(obj->GetBuffer()->is_shared() &&
+                                    obj->type() != kExternalFloat32Array &&
+                                    obj->type() != kExternalFloat64Array &&
+                                    obj->type() != kExternalUint8ClampedArray);
+}
 
-  holder->set_buffer(*buffer);
-  holder->set_byte_offset(*byte_offset);
-  holder->set_byte_length(*byte_length);
 
-  return isolate->heap()->undefined_value();
+RUNTIME_FUNCTION(Runtime_IsSharedInteger32TypedArray) {
+  HandleScope scope(isolate);
+  DCHECK(args.length() == 1);
+  if (!args[0]->IsJSTypedArray()) {
+    return isolate->heap()->false_value();
+  }
+
+  Handle<JSTypedArray> obj(JSTypedArray::cast(args[0]));
+  return isolate->heap()->ToBoolean(obj->GetBuffer()->is_shared() &&
+                                    obj->type() == kExternalInt32Array);
 }
 
 
@@ -612,22 +530,22 @@ static bool DataViewSetValue(Isolate* isolate, Handle<JSDataView> data_view,
 }
 
 
-#define DATA_VIEW_GETTER(TypeName, Type, Converter)                   \
-  RUNTIME_FUNCTION(Runtime_DataViewGet##TypeName) {                   \
-    HandleScope scope(isolate);                                       \
-    DCHECK(args.length() == 3);                                       \
-    CONVERT_ARG_HANDLE_CHECKED(JSDataView, holder, 0);                \
-    CONVERT_NUMBER_ARG_HANDLE_CHECKED(offset, 1);                     \
-    CONVERT_BOOLEAN_ARG_CHECKED(is_little_endian, 2);                 \
-    Type result;                                                      \
-    if (DataViewGetValue(isolate, holder, offset, is_little_endian,   \
-                         &result)) {                                  \
-      return *isolate->factory()->Converter(result);                  \
-    } else {                                                          \
-      THROW_NEW_ERROR_RETURN_FAILURE(                                 \
-          isolate, NewRangeError("invalid_data_view_accessor_offset", \
-                                 HandleVector<Object>(NULL, 0)));     \
-    }                                                                 \
+#define DATA_VIEW_GETTER(TypeName, Type, Converter)                        \
+  RUNTIME_FUNCTION(Runtime_DataViewGet##TypeName) {                        \
+    HandleScope scope(isolate);                                            \
+    DCHECK(args.length() == 3);                                            \
+    CONVERT_ARG_HANDLE_CHECKED(JSDataView, holder, 0);                     \
+    CONVERT_NUMBER_ARG_HANDLE_CHECKED(offset, 1);                          \
+    CONVERT_BOOLEAN_ARG_CHECKED(is_little_endian, 2);                      \
+    Type result;                                                           \
+    if (DataViewGetValue(isolate, holder, offset, is_little_endian,        \
+                         &result)) {                                       \
+      return *isolate->factory()->Converter(result);                       \
+    } else {                                                               \
+      THROW_NEW_ERROR_RETURN_FAILURE(                                      \
+          isolate,                                                         \
+          NewRangeError(MessageTemplate::kInvalidDataViewAccessorOffset)); \
+    }                                                                      \
   }
 
 DATA_VIEW_GETTER(Uint8, uint8_t, NewNumberFromUint)
@@ -694,22 +612,22 @@ double DataViewConvertValue<double>(double value) {
 }
 
 
-#define DATA_VIEW_SETTER(TypeName, Type)                                  \
-  RUNTIME_FUNCTION(Runtime_DataViewSet##TypeName) {                       \
-    HandleScope scope(isolate);                                           \
-    DCHECK(args.length() == 4);                                           \
-    CONVERT_ARG_HANDLE_CHECKED(JSDataView, holder, 0);                    \
-    CONVERT_NUMBER_ARG_HANDLE_CHECKED(offset, 1);                         \
-    CONVERT_NUMBER_ARG_HANDLE_CHECKED(value, 2);                          \
-    CONVERT_BOOLEAN_ARG_CHECKED(is_little_endian, 3);                     \
-    Type v = DataViewConvertValue<Type>(value->Number());                 \
-    if (DataViewSetValue(isolate, holder, offset, is_little_endian, v)) { \
-      return isolate->heap()->undefined_value();                          \
-    } else {                                                              \
-      THROW_NEW_ERROR_RETURN_FAILURE(                                     \
-          isolate, NewRangeError("invalid_data_view_accessor_offset",     \
-                                 HandleVector<Object>(NULL, 0)));         \
-    }                                                                     \
+#define DATA_VIEW_SETTER(TypeName, Type)                                   \
+  RUNTIME_FUNCTION(Runtime_DataViewSet##TypeName) {                        \
+    HandleScope scope(isolate);                                            \
+    DCHECK(args.length() == 4);                                            \
+    CONVERT_ARG_HANDLE_CHECKED(JSDataView, holder, 0);                     \
+    CONVERT_NUMBER_ARG_HANDLE_CHECKED(offset, 1);                          \
+    CONVERT_NUMBER_ARG_HANDLE_CHECKED(value, 2);                           \
+    CONVERT_BOOLEAN_ARG_CHECKED(is_little_endian, 3);                      \
+    Type v = DataViewConvertValue<Type>(value->Number());                  \
+    if (DataViewSetValue(isolate, holder, offset, is_little_endian, v)) {  \
+      return isolate->heap()->undefined_value();                           \
+    } else {                                                               \
+      THROW_NEW_ERROR_RETURN_FAILURE(                                      \
+          isolate,                                                         \
+          NewRangeError(MessageTemplate::kInvalidDataViewAccessorOffset)); \
+    }                                                                      \
   }
 
 DATA_VIEW_SETTER(Uint8, uint8_t)
@@ -722,5 +640,5 @@ DATA_VIEW_SETTER(Float32, float)
 DATA_VIEW_SETTER(Float64, double)
 
 #undef DATA_VIEW_SETTER
-}
-}  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8

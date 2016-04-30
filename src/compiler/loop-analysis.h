@@ -63,8 +63,7 @@ class LoopTree : public ZoneObject {
 
   // Return the innermost nested loop, if any, that contains {node}.
   Loop* ContainingLoop(Node* node) {
-    if (node->id() >= static_cast<int>(node_to_loop_num_.size()))
-      return nullptr;
+    if (node->id() >= node_to_loop_num_.size()) return nullptr;
     int num = node_to_loop_num_[node->id()];
     return num > 0 ? &all_loops_[num - 1] : nullptr;
   }
@@ -114,8 +113,10 @@ class LoopTree : public ZoneObject {
       if (node->opcode() == IrOpcode::kLoop) return node;
     }
     UNREACHABLE();
-    return NULL;
+    return nullptr;
   }
+
+  Zone* zone() const { return zone_; }
 
  private:
   friend class LoopFinderImpl;

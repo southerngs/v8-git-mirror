@@ -16,6 +16,8 @@ namespace internal {
 namespace compiler {
 
 // Forward declarations.
+class DeoptimizationExit;
+class FrameAccessState;
 class Linkage;
 class OutOfLineCode;
 
@@ -24,6 +26,20 @@ struct BranchInfo {
   Label* true_label;
   Label* false_label;
   bool fallthru;
+};
+
+
+class InstructionOperandIterator {
+ public:
+  InstructionOperandIterator(Instruction* instr, size_t pos)
+      : instr_(instr), pos_(pos) {}
+
+  Instruction* instruction() const { return instr_; }
+  InstructionOperand* Advance() { return instr_->InputAt(pos_++); }
+
+ private:
+  Instruction* instr_;
+  size_t pos_;
 };
 
 
@@ -37,7 +53,8 @@ class CodeGenerator final : public GapResolver::Assembler {
   Handle<Code> GenerateCode();
 
   InstructionSequence* code() const { return code_; }
-  Frame* frame() const { return frame_; }
+  FrameAccessState* frame_access_state() const { return frame_access_state_; }
+  const Frame* frame() const { return frame_access_state_->frame(); }
   Isolate* isolate() const { return info_->isolate(); }
   Linkage* linkage() const { return linkage_; }
 
@@ -50,6 +67,12 @@ class CodeGenerator final : public GapResolver::Assembler {
   Zone* zone() const { return code()->zone(); }
   CompilationInfo* info() const { return info_; }
 
+  // Create the FrameAccessState object. The Frame is immutable from here on.
+  void CreateFrameAccessState(Frame* frame);
+
+  // Architecture - specific frame finalization.
+  void FinishFrame(Frame* frame);
+
   // Checks if {block} will appear directly after {current_block_} when
   // assembling code, in which case, a fall-through can be used.
   bool IsNextInAssemblyOrder(RpoNumber block) const;
@@ -60,15 +83,21 @@ class CodeGenerator final : public GapResolver::Assembler {
 
   // Check if a heap object can be materialized by loading from the frame, which
   // is usually way cheaper than materializing the actual heap object constant.
-  bool IsMaterializableFromFrame(Handle<HeapObject> object, int* offset_return);
+  bool IsMaterializableFromFrame(Handle<HeapObject> object, int* slot_return);
   // Check if a heap object can be materialized by loading from a heap root,
   // which is cheaper on some platforms than materializing the actual heap
   // object constant.
   bool IsMaterializableFromRoot(Handle<HeapObject> object,
                                 Heap::RootListIndex* index_return);
 
+  enum CodeGenResult { kSuccess, kTooManyDeoptimizationBailouts };
+
+  // Assemble instructions for the specified block.
+  CodeGenResult AssembleBlock(const InstructionBlock* block);
+
   // Assemble code for the specified instruction.
-  void AssembleInstruction(Instruction* instr);
+  CodeGenResult AssembleInstruction(Instruction* instr,
+                                    const InstructionBlock* block);
   void AssembleSourcePosition(Instruction* instr);
   void AssembleGaps(Instruction* instr);
 
@@ -76,22 +105,35 @@ class CodeGenerator final : public GapResolver::Assembler {
   // ============= Architecture-specific code generation methods. ==============
   // ===========================================================================
 
-  void AssembleArchInstruction(Instruction* instr);
+  CodeGenResult AssembleArchInstruction(Instruction* instr);
   void AssembleArchJump(RpoNumber target);
   void AssembleArchBranch(Instruction* instr, BranchInfo* branch);
   void AssembleArchBoolean(Instruction* instr, FlagsCondition condition);
   void AssembleArchLookupSwitch(Instruction* instr);
   void AssembleArchTableSwitch(Instruction* instr);
 
-  void AssembleDeoptimizerCall(int deoptimization_id,
-                               Deoptimizer::BailoutType bailout_type);
+  CodeGenResult AssembleDeoptimizerCall(int deoptimization_id,
+                                        Deoptimizer::BailoutType bailout_type);
 
   // Generates an architecture-specific, descriptor-specific prologue
   // to set up a stack frame.
-  void AssemblePrologue();
+  void AssembleConstructFrame();
+
   // Generates an architecture-specific, descriptor-specific return sequence
   // to tear down a stack frame.
   void AssembleReturn();
+
+  // Generates code to deconstruct a the caller's frame, including arguments.
+  void AssembleDeconstructActivationRecord(int stack_param_delta);
+
+  void AssembleDeconstructFrame();
+
+  // Generates code to manipulate the stack in preparation for a tail call.
+  void AssemblePrepareTailCall(int stack_param_delta);
+
+  // Generates code to pop current frame if it is an arguments adaptor frame.
+  void AssemblePopArgumentsAdaptorFrame(Register args_reg, Register scratch1,
+                                        Register scratch2, Register scratch3);
 
   // ===========================================================================
   // ============== Architecture-specific gap resolver methods. ================
@@ -128,14 +170,29 @@ class CodeGenerator final : public GapResolver::Assembler {
                        size_t frame_state_offset,
                        OutputFrameStateCombine state_combine);
   void BuildTranslationForFrameStateDescriptor(
-      FrameStateDescriptor* descriptor, Instruction* instr,
-      Translation* translation, size_t frame_state_offset,
-      OutputFrameStateCombine state_combine);
+      FrameStateDescriptor* descriptor, InstructionOperandIterator* iter,
+      Translation* translation, OutputFrameStateCombine state_combine);
+  void TranslateStateValueDescriptor(StateValueDescriptor* desc,
+                                     Translation* translation,
+                                     InstructionOperandIterator* iter);
+  void TranslateFrameStateDescriptorOperands(FrameStateDescriptor* desc,
+                                             InstructionOperandIterator* iter,
+                                             OutputFrameStateCombine combine,
+                                             Translation* translation);
   void AddTranslationForOperand(Translation* translation, Instruction* instr,
                                 InstructionOperand* op, MachineType type);
   void AddNopForSmiCodeInlining();
   void EnsureSpaceForLazyDeopt();
   void MarkLazyDeoptSite();
+
+  DeoptimizationExit* AddDeoptimizationExit(Instruction* instr,
+                                            size_t frame_state_offset);
+
+  // Converts the delta in the number of stack parameter passed from a tail
+  // caller to the callee into the distance (in pointers) the SP must be
+  // adjusted, taking frame elision and other relevant factors into
+  // consideration.
+  int TailCallFrameStackSlotDelta(int stack_param_delta);
 
   // ===========================================================================
 
@@ -157,25 +214,29 @@ class CodeGenerator final : public GapResolver::Assembler {
   };
 
   struct HandlerInfo {
+    bool caught_locally;
     Label* handler;
     int pc_offset;
   };
 
   friend class OutOfLineCode;
 
-  Frame* const frame_;
+  FrameAccessState* frame_access_state_;
   Linkage* const linkage_;
   InstructionSequence* const code_;
   CompilationInfo* const info_;
   Label* const labels_;
+  Label return_label_;
   RpoNumber current_block_;
   SourcePosition current_source_position_;
   MacroAssembler masm_;
   GapResolver resolver_;
   SafepointTableBuilder safepoints_;
   ZoneVector<HandlerInfo> handlers_;
+  ZoneDeque<DeoptimizationExit*> deoptimization_exits_;
   ZoneDeque<DeoptimizationState*> deoptimization_states_;
   ZoneDeque<Handle<Object>> deoptimization_literals_;
+  size_t inlined_function_count_;
   TranslationBuffer translations_;
   int last_lazy_deopt_pc_;
   JumpTable* jump_tables_;

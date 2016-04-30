@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/x87/codegen-x87.h"
 
 #if V8_TARGET_ARCH_X87
 
@@ -33,16 +33,34 @@ void StubRuntimeCallHelper::AfterCall(MacroAssembler* masm) const {
 
 #define __ masm.
 
-
-UnaryMathFunction CreateExpFunction() {
-  // No SSE2 support
-  return &std::exp;
+UnaryMathFunctionWithIsolate CreateExpFunction(Isolate* isolate) {
+  return nullptr;
 }
 
 
-UnaryMathFunction CreateSqrtFunction() {
-  // No SSE2 support
-  return &std::sqrt;
+UnaryMathFunctionWithIsolate CreateSqrtFunction(Isolate* isolate) {
+  size_t actual_size;
+  // Allocate buffer in executable space.
+  byte* buffer =
+      static_cast<byte*>(base::OS::Allocate(1 * KB, &actual_size, true));
+  if (buffer == nullptr) return nullptr;
+
+  MacroAssembler masm(isolate, buffer, static_cast<int>(actual_size),
+                      CodeObjectRequired::kNo);
+  // Load double input into registers.
+  __ fld_d(MemOperand(esp, 4));
+  __ X87SetFPUCW(0x027F);
+  __ fsqrt();
+  __ X87SetFPUCW(0x037F);
+  __ Ret();
+
+  CodeDesc desc;
+  masm.GetCode(&desc);
+  DCHECK(!RelocInfo::RequiresRelocation(desc));
+
+  Assembler::FlushICache(isolate, buffer, actual_size);
+  base::OS::ProtectCode(buffer, actual_size);
+  return FUNCTION_CAST<UnaryMathFunctionWithIsolate>(buffer);
 }
 
 
@@ -76,13 +94,14 @@ class LabelConverter {
 };
 
 
-MemMoveFunction CreateMemMoveFunction() {
+MemMoveFunction CreateMemMoveFunction(Isolate* isolate) {
   size_t actual_size;
   // Allocate buffer in executable space.
   byte* buffer =
       static_cast<byte*>(base::OS::Allocate(1 * KB, &actual_size, true));
-  if (buffer == NULL) return NULL;
-  MacroAssembler masm(NULL, buffer, static_cast<int>(actual_size));
+  if (buffer == nullptr) return nullptr;
+  MacroAssembler masm(isolate, buffer, static_cast<int>(actual_size),
+                      CodeObjectRequired::kNo);
   LabelConverter conv(buffer);
 
   // Generated code is put into a fixed, unmovable buffer, and not into
@@ -182,7 +201,7 @@ MemMoveFunction CreateMemMoveFunction() {
   CodeDesc desc;
   masm.GetCode(&desc);
   DCHECK(!RelocInfo::RequiresRelocation(desc));
-  CpuFeatures::FlushICache(buffer, actual_size);
+  Assembler::FlushICache(isolate, buffer, actual_size);
   base::OS::ProtectCode(buffer, actual_size);
   // TODO(jkummerow): It would be nice to register this code creation event
   // with the PROFILE / GDBJIT system.
@@ -256,8 +275,7 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
   // Allocate new FixedDoubleArray.
   // edx: receiver
   // edi: length of source FixedArray (smi-tagged)
-  AllocationFlags flags =
-      static_cast<AllocationFlags>(TAG_OBJECT | DOUBLE_ALIGNMENT);
+  AllocationFlags flags = static_cast<AllocationFlags>(DOUBLE_ALIGNMENT);
   __ Allocate(FixedDoubleArray::kHeaderSize, times_8, edi,
               REGISTER_VALUE_IS_SMI, eax, ebx, no_reg, &gc_required, flags);
 
@@ -362,6 +380,7 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
   __ cmp(edi, Immediate(masm->isolate()->factory()->empty_fixed_array()));
   __ j(equal, &only_change_map);
 
+  __ push(esi);
   __ push(eax);
   __ push(edx);
   __ push(ebx);
@@ -371,7 +390,7 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
   // Allocate new FixedArray.
   // ebx: length of source FixedDoubleArray (smi-tagged)
   __ lea(edi, Operand(ebx, times_2, FixedArray::kHeaderSize));
-  __ Allocate(edi, eax, esi, no_reg, &gc_required, TAG_OBJECT);
+  __ Allocate(edi, eax, esi, no_reg, &gc_required, NO_ALLOCATION_FLAGS);
 
   // eax: destination FixedArray
   // ebx: number of elements
@@ -406,10 +425,10 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
 
   // Call into runtime if GC is required.
   __ bind(&gc_required);
-  __ mov(esi, Operand(ebp, StandardFrameConstants::kContextOffset));
   __ pop(ebx);
   __ pop(edx);
   __ pop(eax);
+  __ pop(esi);
   __ jmp(fail);
 
   // Box doubles into heap numbers.
@@ -458,7 +477,7 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
 
   // Restore registers.
   __ pop(eax);
-  __ mov(esi, Operand(ebp, StandardFrameConstants::kContextOffset));
+  __ pop(esi);
 
   __ bind(&success);
 }
@@ -526,11 +545,11 @@ void StringCharLoadGenerator::Generate(MacroAssembler* masm,
   }
   // Rule out short external strings.
   STATIC_ASSERT(kShortExternalStringTag != 0);
-  __ test_b(result, kShortExternalStringMask);
+  __ test_b(result, Immediate(kShortExternalStringMask));
   __ j(not_zero, call_runtime);
   // Check encoding.
   STATIC_ASSERT(kTwoByteStringTag == 0);
-  __ test_b(result, kStringEncodingMask);
+  __ test_b(result, Immediate(kStringEncodingMask));
   __ mov(result, FieldOperand(string, ExternalString::kResourceDataOffset));
   __ j(not_equal, &one_byte_external, Label::kNear);
   // Two-byte string.
@@ -571,9 +590,11 @@ void StringCharLoadGenerator::Generate(MacroAssembler* masm,
 #undef __
 
 
-CodeAgingHelper::CodeAgingHelper() {
+CodeAgingHelper::CodeAgingHelper(Isolate* isolate) {
+  USE(isolate);
   DCHECK(young_sequence_.length() == kNoCodeAgeSequenceLength);
-  CodePatcher patcher(young_sequence_.start(), young_sequence_.length());
+  CodePatcher patcher(isolate, young_sequence_.start(),
+                      young_sequence_.length());
   patcher.masm()->push(ebp);
   patcher.masm()->mov(ebp, esp);
   patcher.masm()->push(esi);
@@ -617,15 +638,16 @@ void Code::PatchPlatformCodeAge(Isolate* isolate,
   uint32_t young_length = isolate->code_aging_helper()->young_sequence_length();
   if (age == kNoAgeCodeAge) {
     isolate->code_aging_helper()->CopyYoungSequenceTo(sequence);
-    CpuFeatures::FlushICache(sequence, young_length);
+    Assembler::FlushICache(isolate, sequence, young_length);
   } else {
     Code* stub = GetCodeAgeStub(isolate, age, parity);
-    CodePatcher patcher(sequence, young_length);
+    CodePatcher patcher(isolate, sequence, young_length);
     patcher.masm()->call(stub->instruction_start(), RelocInfo::NONE32);
   }
 }
 
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_TARGET_ARCH_X87

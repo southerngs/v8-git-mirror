@@ -31,9 +31,7 @@ OUTDIR ?= out
 TESTJOBS ?=
 GYPFLAGS ?=
 TESTFLAGS ?=
-ANDROID_NDK_ROOT ?=
 ANDROID_NDK_HOST_ARCH ?=
-ANDROID_TOOLCHAIN ?=
 ANDROID_V8 ?= /data/local/tmp/v8
 NACL_SDK_ROOT ?=
 
@@ -45,10 +43,6 @@ ifeq ($(library), shared)
 endif
 ifdef component
   GYPFLAGS += -Dcomponent=$(component)
-endif
-# console=readline
-ifdef console
-  GYPFLAGS += -Dconsole=$(console)
 endif
 # disassembler=on
 ifeq ($(disassembler), on)
@@ -145,9 +139,17 @@ ifeq ($(i18nsupport), off)
   GYPFLAGS += -Dv8_enable_i18n_support=0
   TESTFLAGS += --noi18n
 endif
-# deprecation_warnings=on
+# deprecationwarnings=on
 ifeq ($(deprecationwarnings), on)
   GYPFLAGS += -Dv8_deprecation_warnings=1
+endif
+# vectorstores=on
+ifeq ($(vectorstores), on)
+  GYPFLAGS += -Dv8_vector_stores=1
+endif
+# imminentdeprecationwarnings=on
+ifeq ($(imminentdeprecationwarnings), on)
+  GYPFLAGS += -Dv8_imminent_deprecation_warnings=1
 endif
 # asan=on
 ifeq ($(asan), on)
@@ -164,7 +166,12 @@ endif
 ifeq ($(d8_static_link),on)
 	GYPFLAGS += -Dd8_static_link=1
 endif
-
+ifdef warmupscript
+  GYPFLAGS += -Dwarmup_script=$(warmupscript)
+endif
+ifeq ($(goma), on)
+  GYPFLAGS += -Duse_goma=1
+endif
 # arm specific flags.
 # arm_version=<number | "default">
 ifneq ($(strip $(arm_version)),)
@@ -219,6 +226,15 @@ endif
 ifeq ($(arm_test_noprobe), on)
   GYPFLAGS += -Darm_test_noprobe=on
 endif
+# Do not omit the frame pointer, needed for profiling with perf
+ifeq ($(no_omit_framepointer), on)
+  GYPFLAGS += -Drelease_extra_cflags=-fno-omit-frame-pointer
+endif
+
+ifdef android_ndk_root
+  GYPFLAGS += -Dandroid_ndk_root=$(android_ndk_root)
+  export ANDROID_NDK_ROOT = $(android_ndk_root)
+endif
 
 # ----------------- available targets: --------------------
 # - "grokdump": rebuilds heap constants lists used by grokdump
@@ -238,7 +254,8 @@ endif
 
 # Architectures and modes to be compiled. Consider these to be internal
 # variables, don't override them (use the targets instead).
-ARCHES = ia32 x64 x32 arm arm64 mips mipsel mips64el x87 ppc ppc64
+ARCHES = ia32 x64 x32 arm arm64 mips mipsel mips64 mips64el x87 ppc ppc64 \
+		 s390 s390x
 DEFAULT_ARCHES = ia32 x64 arm
 MODES = release debug optdebug
 DEFAULT_MODES = release debug
@@ -248,10 +265,11 @@ NACL_ARCHES = nacl_ia32 nacl_x64
 
 # List of files that trigger Makefile regeneration:
 GYPFILES = third_party/icu/icu.gypi third_party/icu/icu.gyp \
-	   build/shim_headers.gypi build/features.gypi build/standalone.gypi \
-	   build/toolchain.gypi build/all.gyp build/mac/asan.gyp \
-	   build/android.gypi test/cctest/cctest.gyp \
-	   test/unittests/unittests.gyp tools/gyp/v8.gyp \
+	   gypfiles/shim_headers.gypi gypfiles/features.gypi \
+           gypfiles/standalone.gypi \
+	   gypfiles/toolchain.gypi gypfiles/all.gyp gypfiles/mac/asan.gyp \
+	   test/cctest/cctest.gyp test/fuzzer/fuzzer.gyp \
+	   test/unittests/unittests.gyp src/v8.gyp \
 	   tools/parser-shell.gyp testing/gmock.gyp testing/gtest.gyp \
 	   buildtools/third_party/libc++abi/libc++abi.gyp \
 	   buildtools/third_party/libc++/libc++.gyp samples/samples.gyp \
@@ -281,7 +299,6 @@ ENVFILE = $(OUTDIR)/environment
         $(ARCHES) $(MODES) $(BUILDS) $(CHECKS) $(addsuffix .clean,$(ARCHES)) \
         $(addsuffix .check,$(MODES)) $(addsuffix .check,$(ARCHES)) \
         $(ANDROID_ARCHES) $(ANDROID_BUILDS) $(ANDROID_CHECKS) \
-        must-set-ANDROID_NDK_ROOT_OR_TOOLCHAIN \
         $(NACL_ARCHES) $(NACL_BUILDS) $(NACL_CHECKS) \
         must-set-NACL_SDK_ROOT
 
@@ -315,8 +332,7 @@ native: $(OUTDIR)/Makefile.native
 
 $(ANDROID_ARCHES): $(addprefix $$@.,$(MODES))
 
-$(ANDROID_BUILDS): $(GYPFILES) $(ENVFILE) build/android.gypi \
-                   must-set-ANDROID_NDK_ROOT_OR_TOOLCHAIN Makefile.android
+$(ANDROID_BUILDS): $(GYPFILES) $(ENVFILE) Makefile.android
 	@$(MAKE) -f Makefile.android $@ \
 	        ARCH="$(basename $@)" \
 	        MODE="$(subst .,,$(suffix $@))" \
@@ -426,7 +442,7 @@ native.clean:
 	rm -rf $(OUTDIR)/native
 	find $(OUTDIR) -regex '.*\(host\|target\)\.native\.mk' -delete
 
-clean: $(addsuffix .clean, $(ARCHES) $(ANDROID_ARCHES) $(NACL_ARCHES)) native.clean gtags.clean
+clean: $(addsuffix .clean, $(ARCHES) $(ANDROID_ARCHES) $(NACL_ARCHES)) native.clean gtags.clean tags.clean
 
 # GYP file generation targets.
 OUT_MAKEFILES = $(addprefix $(OUTDIR)/Makefile.,$(BUILDS))
@@ -436,10 +452,10 @@ $(OUT_MAKEFILES): $(GYPFILES) $(ENVFILE)
 	$(eval CXX_TARGET_ARCH:=$(subst aarch64,arm64,$(CXX_TARGET_ARCH)))
 	$(eval CXX_TARGET_ARCH:=$(subst x86_64,x64,$(CXX_TARGET_ARCH)))
 	$(eval V8_TARGET_ARCH:=$(subst .,,$(suffix $(basename $@))))
-	PYTHONPATH="$(shell pwd)/tools/generate_shim_headers:$(shell pwd)/build:$(PYTHONPATH):$(shell pwd)/build/gyp/pylib:$(PYTHONPATH)" \
+	PYTHONPATH="$(shell pwd)/tools/generate_shim_headers:$(shell pwd)/build:$(PYTHONPATH):$(shell pwd)/tools/gyp/pylib:$(PYTHONPATH)" \
 	GYP_GENERATORS=make \
-	build/gyp/gyp --generator-output="$(OUTDIR)" build/all.gyp \
-	              -Ibuild/standalone.gypi --depth=. \
+	tools/gyp/gyp --generator-output="$(OUTDIR)" gypfiles/all.gyp \
+	              -Igypfiles/standalone.gypi --depth=. \
 	              -Dv8_target_arch=$(V8_TARGET_ARCH) \
 	              $(if $(findstring $(CXX_TARGET_ARCH),$(V8_TARGET_ARCH)), \
 	              -Dtarget_arch=$(V8_TARGET_ARCH),) \
@@ -447,17 +463,10 @@ $(OUT_MAKEFILES): $(GYPFILES) $(ENVFILE)
 	              -S$(suffix $(basename $@))$(suffix $@) $(GYPFLAGS)
 
 $(OUTDIR)/Makefile.native: $(GYPFILES) $(ENVFILE)
-	PYTHONPATH="$(shell pwd)/tools/generate_shim_headers:$(shell pwd)/build:$(PYTHONPATH):$(shell pwd)/build/gyp/pylib:$(PYTHONPATH)" \
+	PYTHONPATH="$(shell pwd)/tools/generate_shim_headers:$(shell pwd)/build:$(PYTHONPATH):$(shell pwd)/tools/gyp/pylib:$(PYTHONPATH)" \
 	GYP_GENERATORS=make \
-	build/gyp/gyp --generator-output="$(OUTDIR)" build/all.gyp \
-	              -Ibuild/standalone.gypi --depth=. -S.native $(GYPFLAGS)
-
-must-set-ANDROID_NDK_ROOT_OR_TOOLCHAIN:
-ifndef ANDROID_NDK_ROOT
-ifndef ANDROID_TOOLCHAIN
-	  $(error ANDROID_NDK_ROOT or ANDROID_TOOLCHAIN must be set))
-endif
-endif
+	tools/gyp/gyp --generator-output="$(OUTDIR)" gypfiles/all.gyp \
+	              -Igypfiles/standalone.gypi --depth=. -S.native $(GYPFLAGS)
 
 # Note that NACL_SDK_ROOT must be set to point to an appropriate
 # Native Client SDK before using this makefile. You can download
@@ -498,11 +507,21 @@ gtags.files: $(GYPFILES) $(ENVFILE)
 
 # We need to manually set the stack limit here, to work around bugs in
 # gmake-3.81 and global-5.7.1 on recent 64-bit Linux systems.
-GPATH GRTAGS GSYMS GTAGS: gtags.files $(shell cat gtags.files 2> /dev/null)
+# Using $(wildcard ...) gracefully ignores non-existing files, so that stale
+# gtags.files after switching branches don't cause recipe failures.
+GPATH GRTAGS GSYMS GTAGS: gtags.files $(wildcard $(shell cat gtags.files 2> /dev/null))
 	@bash -c 'ulimit -s 10240 && GTAGSFORCECPP=yes gtags -i -q -f $<'
 
 gtags.clean:
 	rm -f gtags.files GPATH GRTAGS GSYMS GTAGS
+
+tags: gtags.files $(wildcard $(shell cat gtags.files 2> /dev/null))
+	@(ctags --version | grep 'Exuberant Ctags' >/dev/null) || \
+		(echo "Please install Exuberant Ctags (check 'ctags --version')" >&2; false)
+	ctags --fields=+l -L $<
+
+tags.clean:
+	rm -r tags
 
 dependencies builddeps:
 	$(error Use 'gclient sync' instead)

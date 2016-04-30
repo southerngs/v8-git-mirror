@@ -1,19 +1,20 @@
-// Copyright 2013 the V8 project authors. All rights reserved.
+// Copyright 2014 the V8 project authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef V8_COMPILER_COMMON_OPERATOR_H_
 #define V8_COMPILER_COMMON_OPERATOR_H_
 
-#include "src/compiler/machine-type.h"
-#include "src/unique.h"
+#include "src/assembler.h"
+#include "src/compiler/frame-states.h"
+#include "src/machine-type.h"
+#include "src/zone-containers.h"
 
 namespace v8 {
 namespace internal {
 
 // Forward declarations.
-class ExternalReference;
-
+class Type;
 
 namespace compiler {
 
@@ -26,6 +27,19 @@ class Operator;
 // Prediction hint for branches.
 enum class BranchHint : uint8_t { kNone, kTrue, kFalse };
 
+inline BranchHint NegateBranchHint(BranchHint hint) {
+  switch (hint) {
+    case BranchHint::kNone:
+      return hint;
+    case BranchHint::kTrue:
+      return BranchHint::kFalse;
+    case BranchHint::kFalse:
+      return BranchHint::kTrue;
+  }
+  UNREACHABLE();
+  return hint;
+}
+
 inline size_t hash_value(BranchHint hint) { return static_cast<size_t>(hint); }
 
 std::ostream& operator<<(std::ostream&, BranchHint);
@@ -33,17 +47,35 @@ std::ostream& operator<<(std::ostream&, BranchHint);
 BranchHint BranchHintOf(const Operator* const);
 
 
+// Deoptimize bailout kind.
+enum class DeoptimizeKind : uint8_t { kEager, kSoft };
+
+size_t hash_value(DeoptimizeKind kind);
+
+std::ostream& operator<<(std::ostream&, DeoptimizeKind);
+
+DeoptimizeKind DeoptimizeKindOf(const Operator* const);
+
+
+// Prediction whether throw-site is surrounded by any local catch-scope.
+enum class IfExceptionHint { kLocallyUncaught, kLocallyCaught };
+
+size_t hash_value(IfExceptionHint hint);
+
+std::ostream& operator<<(std::ostream&, IfExceptionHint);
+
+
 class SelectParameters final {
  public:
-  explicit SelectParameters(MachineType type,
+  explicit SelectParameters(MachineRepresentation representation,
                             BranchHint hint = BranchHint::kNone)
-      : type_(type), hint_(hint) {}
+      : representation_(representation), hint_(hint) {}
 
-  MachineType type() const { return type_; }
+  MachineRepresentation representation() const { return representation_; }
   BranchHint hint() const { return hint_; }
 
  private:
-  const MachineType type_;
+  const MachineRepresentation representation_;
   const BranchHint hint_;
 };
 
@@ -56,104 +88,11 @@ std::ostream& operator<<(std::ostream&, SelectParameters const& p);
 
 SelectParameters const& SelectParametersOf(const Operator* const);
 
-
-// Flag that describes how to combine the current environment with
-// the output of a node to obtain a framestate for lazy bailout.
-class OutputFrameStateCombine {
- public:
-  enum Kind {
-    kPushOutput,  // Push the output on the expression stack.
-    kPokeAt       // Poke at the given environment location,
-                  // counting from the top of the stack.
-  };
-
-  static OutputFrameStateCombine Ignore() {
-    return OutputFrameStateCombine(kPushOutput, 0);
-  }
-  static OutputFrameStateCombine Push(size_t count = 1) {
-    return OutputFrameStateCombine(kPushOutput, count);
-  }
-  static OutputFrameStateCombine PokeAt(size_t index) {
-    return OutputFrameStateCombine(kPokeAt, index);
-  }
-
-  Kind kind() const { return kind_; }
-  size_t GetPushCount() const {
-    DCHECK_EQ(kPushOutput, kind());
-    return parameter_;
-  }
-  size_t GetOffsetToPokeAt() const {
-    DCHECK_EQ(kPokeAt, kind());
-    return parameter_;
-  }
-
-  bool IsOutputIgnored() const {
-    return kind_ == kPushOutput && parameter_ == 0;
-  }
-
-  size_t ConsumedOutputCount() const {
-    return kind_ == kPushOutput ? GetPushCount() : 1;
-  }
-
-  bool operator==(OutputFrameStateCombine const& other) const {
-    return kind_ == other.kind_ && parameter_ == other.parameter_;
-  }
-  bool operator!=(OutputFrameStateCombine const& other) const {
-    return !(*this == other);
-  }
-
-  friend size_t hash_value(OutputFrameStateCombine const&);
-  friend std::ostream& operator<<(std::ostream&,
-                                  OutputFrameStateCombine const&);
-
- private:
-  OutputFrameStateCombine(Kind kind, size_t parameter)
-      : kind_(kind), parameter_(parameter) {}
-
-  Kind const kind_;
-  size_t const parameter_;
-};
-
-
-// The type of stack frame that a FrameState node represents.
-enum FrameStateType {
-  JS_FRAME,          // Represents an unoptimized JavaScriptFrame.
-  ARGUMENTS_ADAPTOR  // Represents an ArgumentsAdaptorFrame.
-};
-
-
-class FrameStateCallInfo final {
- public:
-  FrameStateCallInfo(
-      FrameStateType type, BailoutId bailout_id,
-      OutputFrameStateCombine state_combine,
-      MaybeHandle<JSFunction> jsfunction = MaybeHandle<JSFunction>())
-      : type_(type),
-        bailout_id_(bailout_id),
-        frame_state_combine_(state_combine),
-        jsfunction_(jsfunction) {}
-
-  FrameStateType type() const { return type_; }
-  BailoutId bailout_id() const { return bailout_id_; }
-  OutputFrameStateCombine state_combine() const { return frame_state_combine_; }
-  MaybeHandle<JSFunction> jsfunction() const { return jsfunction_; }
-
- private:
-  FrameStateType type_;
-  BailoutId bailout_id_;
-  OutputFrameStateCombine frame_state_combine_;
-  MaybeHandle<JSFunction> jsfunction_;
-};
-
-bool operator==(FrameStateCallInfo const&, FrameStateCallInfo const&);
-bool operator!=(FrameStateCallInfo const&, FrameStateCallInfo const&);
-
-size_t hash_value(FrameStateCallInfo const&);
-
-std::ostream& operator<<(std::ostream&, FrameStateCallInfo const&);
-
+CallDescriptor const* CallDescriptorOf(const Operator* const);
 
 size_t ProjectionIndexOf(const Operator* const);
+
+MachineRepresentation PhiRepresentationOf(const Operator* const);
 
 
 // The {IrOpcode::kParameter} opcode represents an incoming parameter to the
@@ -176,6 +115,25 @@ std::ostream& operator<<(std::ostream&, ParameterInfo const&);
 int ParameterIndexOf(const Operator* const);
 const ParameterInfo& ParameterInfoOf(const Operator* const);
 
+class RelocatablePtrConstantInfo final {
+ public:
+  RelocatablePtrConstantInfo(intptr_t value, RelocInfo::Mode rmode)
+      : value_(value), rmode_(rmode) {}
+
+  intptr_t value() const { return value_; }
+  RelocInfo::Mode rmode() const { return rmode_; }
+
+ private:
+  intptr_t value_;
+  RelocInfo::Mode rmode_;
+};
+
+bool operator==(RelocatablePtrConstantInfo const& lhs,
+                RelocatablePtrConstantInfo const& rhs);
+bool operator!=(RelocatablePtrConstantInfo const& lhs,
+                RelocatablePtrConstantInfo const& rhs);
+std::ostream& operator<<(std::ostream&, RelocatablePtrConstantInfo const&);
+size_t hash_value(RelocatablePtrConstantInfo const& p);
 
 // Interface for building common operators that can be used at any level of IR,
 // including JavaScript, mid-level, and low-level.
@@ -183,26 +141,24 @@ class CommonOperatorBuilder final : public ZoneObject {
  public:
   explicit CommonOperatorBuilder(Zone* zone);
 
-  // Special operator used only in Branches to mark them as always taken, but
-  // still unfoldable. This is required to properly connect non terminating
-  // loops to end (in both the sea of nodes and the CFG).
-  const Operator* Always();
-
   const Operator* Dead();
-  const Operator* End();
+  const Operator* End(size_t control_input_count);
   const Operator* Branch(BranchHint = BranchHint::kNone);
   const Operator* IfTrue();
   const Operator* IfFalse();
   const Operator* IfSuccess();
-  const Operator* IfException();
+  const Operator* IfException(IfExceptionHint hint);
   const Operator* Switch(size_t control_output_count);
   const Operator* IfValue(int32_t value);
   const Operator* IfDefault();
   const Operator* Throw();
-  const Operator* Deoptimize();
-  const Operator* Return();
+  const Operator* Deoptimize(DeoptimizeKind kind);
+  const Operator* DeoptimizeIf();
+  const Operator* DeoptimizeUnless();
+  const Operator* Return(int value_input_count = 1);
+  const Operator* Terminate();
 
-  const Operator* Start(int num_formal_parameters);
+  const Operator* Start(int value_output_count);
   const Operator* Loop(int control_input_count);
   const Operator* Merge(int control_input_count);
   const Operator* Parameter(int index, const char* debug_name = nullptr);
@@ -217,26 +173,39 @@ class CommonOperatorBuilder final : public ZoneObject {
   const Operator* Float64Constant(volatile double);
   const Operator* ExternalConstant(const ExternalReference&);
   const Operator* NumberConstant(volatile double);
-  const Operator* HeapConstant(const Unique<HeapObject>&);
+  const Operator* HeapConstant(const Handle<HeapObject>&);
 
-  const Operator* Select(MachineType, BranchHint = BranchHint::kNone);
-  const Operator* Phi(MachineType type, int value_input_count);
+  const Operator* RelocatableInt32Constant(int32_t value,
+                                           RelocInfo::Mode rmode);
+  const Operator* RelocatableInt64Constant(int64_t value,
+                                           RelocInfo::Mode rmode);
+
+  const Operator* Select(MachineRepresentation, BranchHint = BranchHint::kNone);
+  const Operator* Phi(MachineRepresentation representation,
+                      int value_input_count);
   const Operator* EffectPhi(int effect_input_count);
   const Operator* EffectSet(int arguments);
-  const Operator* ValueEffect(int arguments);
-  const Operator* Finish(int arguments);
+  const Operator* Guard(Type* type);
+  const Operator* BeginRegion();
+  const Operator* FinishRegion();
   const Operator* StateValues(int arguments);
+  const Operator* ObjectState(int pointer_slots, int id);
   const Operator* TypedStateValues(const ZoneVector<MachineType>* types);
-  const Operator* FrameState(
-      FrameStateType type, BailoutId bailout_id,
-      OutputFrameStateCombine state_combine,
-      MaybeHandle<JSFunction> jsfunction = MaybeHandle<JSFunction>());
+  const Operator* FrameState(BailoutId bailout_id,
+                             OutputFrameStateCombine state_combine,
+                             const FrameStateFunctionInfo* function_info);
   const Operator* Call(const CallDescriptor* descriptor);
+  const Operator* TailCall(const CallDescriptor* descriptor);
   const Operator* Projection(size_t index);
 
   // Constructs a new merge or phi operator with the same opcode as {op}, but
   // with {size} inputs.
   const Operator* ResizeMergeOrPhi(const Operator* op, int size);
+
+  // Constructs function info for frame state construction.
+  const FrameStateFunctionInfo* CreateFrameStateFunctionInfo(
+      FrameStateType type, int parameter_count, int local_count,
+      Handle<SharedFunctionInfo> shared_info);
 
  private:
   Zone* zone() const { return zone_; }
