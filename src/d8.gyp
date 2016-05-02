@@ -32,6 +32,7 @@
     'v8_enable_vtunejit%': 0,
     'v8_enable_i18n_support%': 1,
     'v8_toolset_for_d8%': 'target',
+    'd8_static_link': 0
   },
   'includes': ['../gypfiles/toolchain.gypi', '../gypfiles/features.gypi'],
   'targets': [
