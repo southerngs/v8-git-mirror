@@ -1,0 +1,5 @@
+#Build notes:
+
+# Building on Arch Linux:
+GYPFLAGS=-Dlinux_use_bundled_gold=0 LINK=clang++ CC=clang CXX=clang++ make x64.release
+
