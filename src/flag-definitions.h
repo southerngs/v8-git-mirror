@@ -356,6 +356,7 @@ DEFINE_BOOL(print_deopt_stress, false, "print number of possible deopt points")
 
 #ifdef DEOPT_CHECKS_COUNT 
 DEFINE_BOOL(deopt_checks_count, false, "deopt check statistics")
+DEFINE_BOOL(deopt_checks_count_taken, false, "count deopt checks taken")
 #endif // DEOPT_CHECKS_COUNT
 
 DEFINE_BOOL(trap_on_deopt, false, "put a break point before deoptimizing")

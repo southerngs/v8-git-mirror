@@ -1962,10 +1962,80 @@ void Isolate::Deinit() {
 
 #ifdef DEOPT_CHECKS_COUNT
   if (FLAG_deopt_checks_count) {
-    PrintF(stdout, "=== Deopt checks total: %llu\n", deopt_checks_total_);
-    PrintF(stdout, "=== Deopt checks taken: %llu\n", deopt_checks_taken_);
+  
+    Deoptimizer::DeoptReason reason[] {
+        Deoptimizer::kAccessCheck,
+        Deoptimizer::kDivisionByZero,
+        Deoptimizer::kHole,
+        Deoptimizer::kInstanceMigrationFailed,
+        Deoptimizer::kLostPrecision,
+        Deoptimizer::kMementoFound,
+        Deoptimizer::kMinusZero,
+        Deoptimizer::kNaN,
+        Deoptimizer::kNegativeValue,
+        Deoptimizer::kNoCache,
+        Deoptimizer::kNotAHeapNumber,
+        Deoptimizer::kNotAHeapNumberUndefined,
+        Deoptimizer::kNotAHeapNumberUndefinedBoolean,
+        Deoptimizer::kNotAJavaScriptObject,
+        Deoptimizer::kNotASmi,
+        Deoptimizer::kOutOfBounds,
+        Deoptimizer::kOverflow,
+        Deoptimizer::kProxy,
+        Deoptimizer::kSmi,
+        Deoptimizer::kTooManyArguments,
+        Deoptimizer::kUnexpectedObject,
+        Deoptimizer::kValueMismatch,
+        Deoptimizer::kWrongInstanceType,
+        Deoptimizer::kWrongMap
+    };
+
+    const char* reason_str[] {
+        "kAccessCheck",
+        "kDivisionByZero",
+        "kHole",
+        "kInstanceMigrationFailed",
+        "kLostPrecision",
+        "kMementoFound",
+        "kMinusZero",
+        "kNaN",
+        "kNegativeValue",
+        "kNoCache",
+        "kNotAHeapNumber",
+        "kNotAHeapNumberUndefined",
+        "kNotAHeapNumberUndefinedBoolean",
+        "kNotAJavaScriptObject",
+        "kNotASmi",
+        "kOutOfBounds",
+        "kOverflow",
+        "kProxy",
+        "kSmi",
+        "kTooManyArguments",
+        "kUnexpectedObject",
+        "kValueMismatch",
+        "kWrongInstanceType",
+        "kWrongMap"
+    };
+
+    unsigned long long total = 0;
     for(int i = 0; i < 24; i++) {
-      PrintF(stdout, "+++ Deopt checks array[%d]: %llu\n", i, deopt_checks_array_[i]);
+      total += deopt_checks_array_[i];
+    }
+    for(int i = 0; i < 24; i++) {
+      if(deopt_checks_array_[i] > 0) {
+        PrintF(stdout, "+++ Deopt checks: %-45s: %-35s: %12llu: %5.2f\n", 
+               Deoptimizer::GetDeoptReason(reason[i]), 
+               reason_str[i], 
+               deopt_checks_array_[i],
+               (static_cast<double>(deopt_checks_array_[i])/static_cast<double>(total))*100.0
+            );
+      }
+    }
+    PrintF(stdout, "=== Deopt checks total: %llu\n", total);
+
+    //PrintF(stdout, "=== Deopt checks total: %llu\n", deopt_checks_total_);
+    if(FLAG_deopt_checks_count_taken) {
+      PrintF(stdout, "=== Deopt checks taken: %llu\n", deopt_checks_taken_);
     }
   }
 #endif // DEOPT_CHECKS_COUNT

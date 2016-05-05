@@ -795,7 +795,6 @@ void LCodeGen::DeoptimizeIf(Condition cc, LInstruction* instr,
     } else {
 #ifdef DEOPT_CHECKS_COUNT
       if(DeoptChecksEnabled()) {
-        Label no_deopt;
 
         switch(deopt_reason) {
           case Deoptimizer::kAccessCheck:
@@ -874,12 +873,15 @@ void LCodeGen::DeoptimizeIf(Condition cc, LInstruction* instr,
             break;
         }
 
-        //IncrementCounter(ExternalReference::deopt_checks_total(isolate()));
-
-        __ j(NegateCondition(cc), &no_deopt, Label::kNear);
-        IncrementCounter(ExternalReference::deopt_checks_taken(isolate()));
-        __ jmp(&jump_table_.last().label);
-        __ bind(&no_deopt);
+        if(FLAG_deopt_checks_count_taken) {
+          Label no_deopt;
+          __ j(NegateCondition(cc), &no_deopt, Label::kNear);
+          IncrementCounter(ExternalReference::deopt_checks_taken(isolate()));
+          __ jmp(&jump_table_.last().label);
+          __ bind(&no_deopt);
+        } else {
+        __ j(cc, &jump_table_.last().label);
+        }
       } else{
         __ j(cc, &jump_table_.last().label);
       }
