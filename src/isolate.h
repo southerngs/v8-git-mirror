@@ -1031,6 +1031,12 @@ class Isolate {
 
   void* stress_deopt_count_address() { return &stress_deopt_count_; }
 
+#ifdef DEOPT_CHECKS_COUNT
+  void* deopt_checks_total_address() { return &deopt_checks_total_; }
+  void* deopt_checks_taken_address() { return &deopt_checks_taken_; }
+  void* deopt_checks_array_address(int index) { return &deopt_checks_array_[index]; }
+#endif // DEOPT_CHECKS_COUNT
+
   void* virtual_handler_register_address() {
     return &virtual_handler_register_;
   }
@@ -1337,6 +1343,12 @@ class Isolate {
 
   // Counts deopt points if deopt_every_n_times is enabled.
   unsigned int stress_deopt_count_;
+
+#ifdef DEOPT_CHECKS_COUNT
+  unsigned long long deopt_checks_total_;
+  unsigned long long deopt_checks_taken_;
+  unsigned long long deopt_checks_array_[24];  //TODO: don't hardcode array size
+#endif // DEOPT_CHECKS_COUNT
 
   Address virtual_handler_register_;
   Address virtual_slot_register_;

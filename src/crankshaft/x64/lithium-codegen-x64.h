@@ -216,6 +216,13 @@ class LCodeGen: public LCodeGenBase {
     return FLAG_deopt_every_n_times != 0 && !info()->IsStub();
   }
 
+#ifdef DEOPT_CHECKS_COUNT
+  bool DeoptChecksEnabled() {
+    return FLAG_deopt_checks_count != 0;
+  }
+  void IncrementCounter(ExternalReference count);
+#endif //DEOPT_CHECKS_COUNT
+
   void AddToTranslation(LEnvironment* environment,
                         Translation* translation,
                         LOperand* op,

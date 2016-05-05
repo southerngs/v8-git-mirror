@@ -3,3 +3,30 @@
 # Building on Arch Linux:
 GYPFLAGS=-Dlinux_use_bundled_gold=0 LINK=clang++ CC=clang CXX=clang++ make x64.release
 
+
+# Deopt types in lithium-x64-codegen
+# Note that this follows order in switch statement for counters
+kAccessCheck
+kDivisionByZero
+kHole
+kInstanceMigrationFailed
+kLostPrecision
+kMementoFound
+kMinusZero
+kNaN
+kNegativeValue
+kNoCache
+kNotAHeapNumber
+kNotAHeapNumberUndefined
+kNotAHeapNumberUndefinedBoolean
+kNotAJavaScriptObject
+kNotASmi
+kOutOfBounds
+kOverflow
+kProxy
+kSmi
+kTooManyArguments
+kUnexpectedObject
+kValueMismatch
+kWrongInstanceType
+kWrongMap

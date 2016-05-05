@@ -1144,6 +1144,17 @@ ExternalReference ExternalReference::stress_deopt_count(Isolate* isolate) {
   return ExternalReference(isolate->stress_deopt_count_address());
 }
 
+#ifdef DEOPT_CHECKS_COUNT
+ExternalReference ExternalReference::deopt_checks_total(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_checks_total_address());
+}
+ExternalReference ExternalReference::deopt_checks_taken(Isolate* isolate) {
+  return ExternalReference(isolate->deopt_checks_taken_address());
+}
+ExternalReference ExternalReference::deopt_checks_array(Isolate* isolate, int index) {
+  return ExternalReference(isolate->deopt_checks_array_address(index));
+}
+#endif // DEOPT_CHECKS_COUNT
 
 ExternalReference ExternalReference::new_deoptimizer_function(
     Isolate* isolate) {

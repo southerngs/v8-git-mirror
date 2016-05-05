@@ -202,6 +202,21 @@ ExternalReferenceTable::ExternalReferenceTable(Isolate* isolate) {
       "OffsetsVector::static_offsets_vector");
 #endif  // V8_INTERPRETED_REGEXP
 
+#ifdef DEOPT_CHECKS_COUNT
+  Add(ExternalReference::deopt_checks_total(isolate).address(),
+      "Isolate::deopt_checks_total_address()");
+  Add(ExternalReference::deopt_checks_taken(isolate).address(),
+      "Isolate::deopt_checks_taken_address()");
+
+  for(int i = 0; i < 24; i++) {
+    char refname[50];
+    sprintf(refname, "Isolate::deopt_checks_array_address(%d)",i);
+    Add(ExternalReference::deopt_checks_array(isolate, i).address(), 
+        refname);
+  }
+#endif // DEOPT_CHECKS_COUNT
+
+
   // The following populates all of the different type of external references
   // into the ExternalReferenceTable.
   //

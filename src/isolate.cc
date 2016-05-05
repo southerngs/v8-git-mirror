@@ -1838,6 +1838,11 @@ Isolate::Isolate(bool enable_serializer)
       deferred_handles_head_(NULL),
       optimizing_compile_dispatcher_(NULL),
       stress_deopt_count_(0),
+#ifdef DEOPT_CHECKS_COUNT
+      deopt_checks_total_(0),
+      deopt_checks_taken_(0),
+      deopt_checks_array_{0},
+#endif
       virtual_handler_register_(NULL),
       virtual_slot_register_(NULL),
       next_optimization_id_(0),
@@ -1954,6 +1959,16 @@ void Isolate::Deinit() {
   if (FLAG_print_deopt_stress) {
     PrintF(stdout, "=== Stress deopt counter: %u\n", stress_deopt_count_);
   }
+
+#ifdef DEOPT_CHECKS_COUNT
+  if (FLAG_deopt_checks_count) {
+    PrintF(stdout, "=== Deopt checks total: %llu\n", deopt_checks_total_);
+    PrintF(stdout, "=== Deopt checks taken: %llu\n", deopt_checks_taken_);
+    for(int i = 0; i < 24; i++) {
+      PrintF(stdout, "+++ Deopt checks array[%d]: %llu\n", i, deopt_checks_array_[i]);
+    }
+  }
+#endif // DEOPT_CHECKS_COUNT
 
   if (cpu_profiler_) {
     cpu_profiler_->DeleteAllProfiles();
