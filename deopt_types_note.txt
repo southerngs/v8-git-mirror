@@ -1,0 +1,30 @@
+# The types of deopts that are used for conditional deopts in lithium-x64
+# code.  The order listed below is important for the deopt instrumentation code.
+# The index of the first deopt type is 0, and the last is 23.  These indicies
+# are also used to set values in a bitmask when determining which deopts
+# to skip.
+
+kAccessCheck
+kDivisionByZero
+kHole
+kInstanceMigrationFailed
+kLostPrecision
+kMementoFound
+kMinusZero
+kNaN
+kNegativeValue
+kNoCache
+kNotAHeapNumber
+kNotAHeapNumberUndefined
+kNotAHeapNumberUndefinedBoolean
+kNotAJavaScriptObject
+kNotASmi
+kOutOfBounds
+kOverflow
+kProxy
+kSmi
+kTooManyArguments
+kUnexpectedObject
+kValueMismatch
+kWrongInstanceType
+kWrongMap

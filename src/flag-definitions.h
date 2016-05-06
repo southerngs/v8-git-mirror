@@ -355,9 +355,11 @@ DEFINE_INT(deopt_every_n_garbage_collections, 0,
 DEFINE_BOOL(print_deopt_stress, false, "print number of possible deopt points")
 
 #ifdef DEOPT_CHECKS_COUNT 
-DEFINE_BOOL(deopt_checks_count, false, "deopt check statistics")
+DEFINE_BOOL(deopt_checks, false, "deopt check analysis")
+DEFINE_BOOL(deopt_checks_count, false, "count deopt checks")
 DEFINE_BOOL(deopt_checks_count_taken, false, "count deopt checks taken")
-DEFINE_BOOL(deopt_checks_skip, false, "skip conditional deopt checks")
+DEFINE_BOOL(deopt_checks_skip, false, "skip deopt checks if type matches mask")
+DEFINE_INT(deopt_checks_mask, 0, "bitmask for types of deopt checks to skip")
 #endif // DEOPT_CHECKS_COUNT
 
 DEFINE_BOOL(trap_on_deopt, false, "put a break point before deoptimizing")

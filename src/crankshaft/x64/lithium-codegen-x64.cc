@@ -715,15 +715,26 @@ void LCodeGen::IncrementCounter(ExternalReference count) {
 }
 
 void LCodeGen::DeoptTypeCount(int index, Condition cc) {
-  IncrementCounter(ExternalReference::deopt_checks_array(isolate(),index));
-  if(FLAG_deopt_checks_count_taken) {
-    Label no_deopt;
-    __ j(NegateCondition(cc), &no_deopt, Label::kNear);
-    IncrementCounter(ExternalReference::deopt_checks_taken_array(isolate(),index));
-    __ jmp(&jump_table_.last().label);
-    __ bind(&no_deopt);
+
+  // The types of deoptimizations are assigned an index that is used
+  // when setting counter values in the deopt_checks_array, and
+  // when checking the bitmask of types to enable.  Information
+  // about the index order is in deopt_types_notes.txt file.
+  if(FLAG_deopt_checks_skip && ((1 << index) & FLAG_deopt_checks_mask)) {
+    return; // don't generate any code if deopt check is skipped
   } else {
-    __ j(cc, &jump_table_.last().label);
+    if(FLAG_deopt_checks_count) {
+      IncrementCounter(ExternalReference::deopt_checks_array(isolate(),index));
+    }
+    if(FLAG_deopt_checks_count_taken) {
+      Label no_deopt;
+      __ j(NegateCondition(cc), &no_deopt, Label::kNear);
+      IncrementCounter(ExternalReference::deopt_checks_taken_array(isolate(),index));
+      __ jmp(&jump_table_.last().label);
+      __ bind(&no_deopt);
+    } else {
+      __ j(cc, &jump_table_.last().label);
+    }
   }
 }
 #endif // DEOPT_CHECKS_COUNT
@@ -807,14 +818,16 @@ void LCodeGen::DeoptimizeIf(Condition cc, LInstruction* instr,
       __ jmp(&jump_table_.last().label);
     } else {
 #ifdef DEOPT_CHECKS_COUNT
-
-      if(FLAG_deopt_checks_skip) {
-        __ nop();
-        return;
-      }
-
-
-      if(DeoptChecksEnabled()) {
+      // There are 24 types of deoptimizations that appear in the lithium x64
+      // codegen.  However, the Deoptimizer enum contains additional types
+      // that are used in other places.  The deopt_checks_taken_array only
+      // has slots for the 24 types that are used.  This switch statement
+      // converts from the Deoptimizer enum type to the associated index
+      // into the array.  Note that the index values are hardcoded
+      // (i.e. Deoptimizer::kAccessCheck is 0).  Ideally these would be
+      // written as constants, but since this code is only for short 
+      // experiment the hardcoded values will stay for now.
+      if(FLAG_deopt_checks) {
         switch(deopt_reason) {
           case Deoptimizer::kAccessCheck:
             DeoptTypeCount(0, cc);

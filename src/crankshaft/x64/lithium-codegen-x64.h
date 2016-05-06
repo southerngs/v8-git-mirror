@@ -217,9 +217,6 @@ class LCodeGen: public LCodeGenBase {
   }
 
 #ifdef DEOPT_CHECKS_COUNT
-  bool DeoptChecksEnabled() {
-    return FLAG_deopt_checks_count != 0;
-  }
   void DeoptTypeCount(int index, Condition cc);
   void IncrementCounter(ExternalReference count);
 #endif //DEOPT_CHECKS_COUNT
