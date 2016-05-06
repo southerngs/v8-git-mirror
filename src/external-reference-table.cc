@@ -209,10 +209,14 @@ ExternalReferenceTable::ExternalReferenceTable(Isolate* isolate) {
       "Isolate::deopt_checks_taken_address()");
 
   for(int i = 0; i < 24; i++) {
-    char refname[50];
-    sprintf(refname, "Isolate::deopt_checks_array_address(%d)",i);
+    char ref_checks_name[50];
+    char ref_taken_name[50];
+    sprintf(ref_checks_name, "Isolate::deopt_checks_array_address(%d)",i);
+    sprintf(ref_taken_name, "Isolate::deopt_checks_taken_array_address(%d)",i);
     Add(ExternalReference::deopt_checks_array(isolate, i).address(), 
-        refname);
+        ref_checks_name);
+    Add(ExternalReference::deopt_checks_taken_array(isolate, i).address(), 
+        ref_taken_name);
   }
 #endif // DEOPT_CHECKS_COUNT
 

@@ -1842,6 +1842,7 @@ Isolate::Isolate(bool enable_serializer)
       deopt_checks_total_(0),
       deopt_checks_taken_(0),
       deopt_checks_array_{0},
+      deopt_checks_taken_array_{0},
 #endif
       virtual_handler_register_(NULL),
       virtual_slot_register_(NULL),
@@ -2023,10 +2024,11 @@ void Isolate::Deinit() {
     }
     for(int i = 0; i < 24; i++) {
       if(deopt_checks_array_[i] > 0) {
-        PrintF(stdout, "+++ Deopt checks: %-45s: %-35s: %12llu: %5.2f\n", 
+        PrintF(stdout, "+++ Deopt checks: %-45s: %-35s: %12llu: %5llu: %5.2f\n", 
                Deoptimizer::GetDeoptReason(reason[i]), 
                reason_str[i], 
                deopt_checks_array_[i],
+               deopt_checks_taken_array_[i],
                (static_cast<double>(deopt_checks_array_[i])/static_cast<double>(total))*100.0
             );
       }

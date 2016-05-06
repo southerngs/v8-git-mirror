@@ -713,6 +713,19 @@ void LCodeGen::IncrementCounter(ExternalReference count) {
   __ popq(rax);
   __ popfq();
 }
+
+void LCodeGen::DeoptTypeCount(int index, Condition cc) {
+  IncrementCounter(ExternalReference::deopt_checks_array(isolate(),index));
+  if(FLAG_deopt_checks_count_taken) {
+    Label no_deopt;
+    __ j(NegateCondition(cc), &no_deopt, Label::kNear);
+    IncrementCounter(ExternalReference::deopt_checks_taken_array(isolate(),index));
+    __ jmp(&jump_table_.last().label);
+    __ bind(&no_deopt);
+  } else {
+    __ j(cc, &jump_table_.last().label);
+  }
+}
 #endif // DEOPT_CHECKS_COUNT
 
  
@@ -794,93 +807,89 @@ void LCodeGen::DeoptimizeIf(Condition cc, LInstruction* instr,
       __ jmp(&jump_table_.last().label);
     } else {
 #ifdef DEOPT_CHECKS_COUNT
-      if(DeoptChecksEnabled()) {
 
+      if(FLAG_deopt_checks_skip) {
+        __ nop();
+        return;
+      }
+
+
+      if(DeoptChecksEnabled()) {
         switch(deopt_reason) {
           case Deoptimizer::kAccessCheck:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),0));
+            DeoptTypeCount(0, cc);
             break;
           case Deoptimizer::kDivisionByZero:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),1));
+            DeoptTypeCount(1, cc);
             break;
           case Deoptimizer::kHole:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),2));
+            DeoptTypeCount(2, cc);
             break;
           case Deoptimizer::kInstanceMigrationFailed:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),3));
+            DeoptTypeCount(3, cc);
             break;
           case Deoptimizer::kLostPrecision:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),4));
+            DeoptTypeCount(4, cc);
             break;
           case Deoptimizer::kMementoFound:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),5));
+            DeoptTypeCount(5, cc);
             break;
           case Deoptimizer::kMinusZero:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),6));
+            DeoptTypeCount(6, cc);
             break;
           case Deoptimizer::kNaN:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),7));
+            DeoptTypeCount(7, cc);
             break;
           case Deoptimizer::kNegativeValue:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),8));
+            DeoptTypeCount(8, cc);
             break;
           case Deoptimizer::kNoCache:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),9));
+            DeoptTypeCount(9, cc);
             break;
           case Deoptimizer::kNotAHeapNumber:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),10));
+            DeoptTypeCount(10, cc);
             break;
           case Deoptimizer::kNotAHeapNumberUndefined:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),11));
+            DeoptTypeCount(11, cc);
             break;
           case Deoptimizer::kNotAHeapNumberUndefinedBoolean:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),12));
+            DeoptTypeCount(12, cc);
             break;
           case Deoptimizer::kNotAJavaScriptObject:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),13));
+            DeoptTypeCount(13, cc);
             break;
           case Deoptimizer::kNotASmi:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),14));
+            DeoptTypeCount(14, cc);
             break;
           case Deoptimizer::kOutOfBounds:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),15));
+            DeoptTypeCount(15, cc);
             break;
           case Deoptimizer::kOverflow:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),16));
+            DeoptTypeCount(16, cc);
             break;
           case Deoptimizer::kProxy:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),17));
+            DeoptTypeCount(17, cc);
             break;
           case Deoptimizer::kSmi:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),18));
+            DeoptTypeCount(18, cc);
             break;
           case Deoptimizer::kTooManyArguments:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),19));
+            DeoptTypeCount(19, cc);
             break;
           case Deoptimizer::kUnexpectedObject:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),20));
+            DeoptTypeCount(20, cc);
             break;
           case Deoptimizer::kValueMismatch:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),21));
+            DeoptTypeCount(21, cc);
             break;
           case Deoptimizer::kWrongInstanceType:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),22));
+            DeoptTypeCount(22, cc);
             break;
           case Deoptimizer::kWrongMap:
-            IncrementCounter(ExternalReference::deopt_checks_array(isolate(),23));
+            DeoptTypeCount(23, cc);
             break;
           default:
             break;
-        }
-
-        if(FLAG_deopt_checks_count_taken) {
-          Label no_deopt;
-          __ j(NegateCondition(cc), &no_deopt, Label::kNear);
-          IncrementCounter(ExternalReference::deopt_checks_taken(isolate()));
-          __ jmp(&jump_table_.last().label);
-          __ bind(&no_deopt);
-        } else {
-        __ j(cc, &jump_table_.last().label);
         }
       } else{
         __ j(cc, &jump_table_.last().label);

@@ -1035,6 +1035,7 @@ class Isolate {
   void* deopt_checks_total_address() { return &deopt_checks_total_; }
   void* deopt_checks_taken_address() { return &deopt_checks_taken_; }
   void* deopt_checks_array_address(int index) { return &deopt_checks_array_[index]; }
+  void* deopt_checks_taken_array_address(int index) { return &deopt_checks_taken_array_[index]; }
 #endif // DEOPT_CHECKS_COUNT
 
   void* virtual_handler_register_address() {
@@ -1348,6 +1349,7 @@ class Isolate {
   unsigned long long deopt_checks_total_;
   unsigned long long deopt_checks_taken_;
   unsigned long long deopt_checks_array_[24];  //TODO: don't hardcode array size
+  unsigned long long deopt_checks_taken_array_[24];  //TODO: don't hardcode array size
 #endif // DEOPT_CHECKS_COUNT
 
   Address virtual_handler_register_;

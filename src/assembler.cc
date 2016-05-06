@@ -1154,6 +1154,9 @@ ExternalReference ExternalReference::deopt_checks_taken(Isolate* isolate) {
 ExternalReference ExternalReference::deopt_checks_array(Isolate* isolate, int index) {
   return ExternalReference(isolate->deopt_checks_array_address(index));
 }
+ExternalReference ExternalReference::deopt_checks_taken_array(Isolate* isolate, int index) {
+  return ExternalReference(isolate->deopt_checks_taken_array_address(index));
+}
 #endif // DEOPT_CHECKS_COUNT
 
 ExternalReference ExternalReference::new_deoptimizer_function(

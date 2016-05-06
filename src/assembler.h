@@ -1083,6 +1083,7 @@ class ExternalReference BASE_EMBEDDED {
   static ExternalReference deopt_checks_total(Isolate* isolate);
   static ExternalReference deopt_checks_taken(Isolate* isolate);
   static ExternalReference deopt_checks_array(Isolate* isolate, int index);
+  static ExternalReference deopt_checks_taken_array(Isolate* isolate, int index);
 #endif // DEOPT_CHECKS_COUNT
 
   static ExternalReference fixed_typed_array_base_data_offset();
